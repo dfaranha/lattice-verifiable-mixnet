@@ -192,14 +192,11 @@ static void lin_prover(params::poly_q y[WIDTH], params::poly_q _y[WIDTH],
 		vector < params::poly_q > _r) {
 	params::poly_q beta, tmp[WIDTH], _tmp[WIDTH];
 	array < mpz_t, params::poly_q::degree > coeffs;
-	mpz_t qDivBy2;
 	int rej0, rej1;
 
-	mpz_init(qDivBy2);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
 	}
-	mpz_fdiv_q_2exp(qDivBy2, params::poly_q::moduli_product(), 1);
 
 	do {
 		/* Prover samples y,y' from Gaussian. */
@@ -249,7 +246,6 @@ static void lin_prover(params::poly_q y[WIDTH], params::poly_q _y[WIDTH],
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
 	}
-	mpz_clear(qDivBy2);
 }
 
 static int lin_verifier(params::poly_q z[WIDTH], params::poly_q _z[WIDTH],
