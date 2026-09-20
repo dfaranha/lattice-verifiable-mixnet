@@ -210,7 +210,7 @@ struct mulmod<uint64_t, simd::serial> {
     auto const shift = params<value_type>::kModulusRepresentationBitsize;
     ASSERT_STRICTMOD((x<p) && (y<p));
     greater_value_type res = (greater_value_type)x * y;
-    greater_value_type q = ((greater_value_type)params<T>::Pn[cm] * (res >> shift)) + (res<<2) ;
+    greater_value_type q = ((greater_value_type)params<T>::Pn[cm] * (res >> shift)) + (res * params<value_type>::Pn_hi[cm]) ;
     value_type r  = res - (q>>shift) * p;
     if (r >= p) { r -= p; }
     ASSERT_STRICTMOD(r == ((greater_value_type)(x) * y) % p);

@@ -37,7 +37,7 @@ struct muladd<uint64_t, simd::serial> {
     using value_type = typename params<T>::value_type;
     greater_value_type res = (greater_value_type)x * y;
     ASSERT_STRICTMOD(res < (std::numeric_limits<greater_value_type>::max()-rop));
-    greater_value_type q = ((greater_value_type)params<T>::Pn[cm] * (res >> shift)) + (res<<2) ;
+    greater_value_type q = ((greater_value_type)params<T>::Pn[cm] * (res >> shift)) + (res * params<value_type>::Pn_hi[cm]) ;
     value_type r  = res - (q>>shift) * p;
     if (r >= p) { r -= p; }
     r += rop;
