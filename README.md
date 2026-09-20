@@ -7,6 +7,7 @@ Code accompanying the paper "Verifiable Mix-Nets and Distributed Decryption for 
 Dependencies are the [NFLlib](https://github.com/quarkslab/NFLlib) and [FLINT](https://flintlib.org/doc/) libraries.
 NFLlib is already included in this repository, but instructions for installing its dependencies can be found in the link above.
 FLINT is usually included in package managers and can be easily installed in most systems out there. FLINT 3.1 or later is required: the code uses the `flint_rand_init()` family introduced in that release, and the `fmpz_mod_poly_{get,set}_coeff_mpz()` functions it used to call were removed in FLINT 3.5.
+GMP, MPFR and MPC are also required, all of them available as packages (`libgmp-dev`, `libmpfr-dev` and `libmpc-dev` on Debian-based systems). MPC only provides the `mpc.h` header included by `poly.h`; no MPC symbol is linked.
 
 The code is compiled as `gnu++17`. NFLlib predates C++20 and relies on `std::allocator<void>`, which that standard removed, so the language level is pinned in the `Makefile` rather than left to the compiler default.
 
