@@ -37,12 +37,6 @@ using namespace std;
 #define DEGREE      4096
 /* Sigma for the commitment gaussian distribution. */
 #define SIGMA_C     (1u << 12)
-/* Sigma for the boundness proof. */
-#define SIGMA_B1     (11585u)
-/* Sigma for the boundness proof. */
-#define SIGMA_B2     (1e66l)
-/* Norm bound for boundness proof. */
-#define BOUND_B     "6678434726570384949248"
 /* Parties that run the distributed decryption protocol. */
 #define PARTIES     4
 /* Security level for Distributed Decryption. */

@@ -616,7 +616,7 @@ static void test(flint_rand_t rand) {
 	}
 	fmpz_mod_poly_init(lag[TAU], ctx);
 
-	rd.resize(R);
+	rd.resize(WIDTH);
 	TEST_BEGIN("conversion is correct") {
 		for (int i = 0; i < R; i++) {
 			for (int j = 0; j < V; j++) {

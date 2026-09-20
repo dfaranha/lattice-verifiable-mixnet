@@ -1,9 +1,30 @@
+#include <cmath>
+
 #include "blake3.h"
 #include "test.h"
 #include "bench.h"
 #include "common.h"
 #include "sample_z_small.h"
 #include "sample_z_large.h"
+
+/* sqrt(3), the per-check rejection-sampling constant. */
+#define M_SQRT3     1.7320508075688772
+
+/**
+ * Stores a 128-bit signed integer in an mpz_t. GMP only offers mpz_set_si for
+ * long, which is too narrow for the coefficients of the last row.
+ */
+static void mpz_set_int128(mpz_t rop, __int128 op) {
+	int negative = (op < 0);
+	__uint128_t abs = negative ? -((__uint128_t) op) : (__uint128_t) op;
+
+	mpz_set_ui(rop, (uint64_t) (abs >> 64));
+	mpz_mul_2exp(rop, rop, 64);
+	mpz_add_ui(rop, rop, (uint64_t) abs);
+	if (negative) {
+		mpz_neg(rop, rop);
+	}
+}
 
 #define R       (HEIGHT+1)
 #define V       (HEIGHT+3)
@@ -16,6 +37,28 @@
 #ifndef NTI
 #define NTI     130
 #endif
+
+/* Number of rows of S' handled by the first of the two rejection-sampling
+ * checks; the last row is handled by the second. */
+#define ANEX_K      (V - 1)
+
+/* Infinity-norm bound on the last witness row (the decryption noise E in the
+ * mix-net; ternary like the others in the test below). */
+#ifndef ANEX_E_INF
+#define ANEX_E_INF  BETA
+#endif
+
+/*
+ * sigma_ANEx: derive here instead of using the paper's.
+ */
+static const double SIGMA_ANEX =
+		0.954 * BETA * DEGREE * sqrt(ANEX_K * (double) NTI * TAU / 2.0);
+
+/*
+ * sigma-hat_ANEx, for the last row: same derivation, one row instead of k.
+ */
+static const double SIGMA_ANEX_HAT =
+		0.954 * ANEX_E_INF * DEGREE * sqrt((double) NTI * TAU / 2.0);
 
 /* A params::poly_q is 64 KiB, so the matrices dimensioned by TAU or NTI are far
  * too large to be locals: C[TAU][NTI] alone is about 8.5 GiB at the default
@@ -77,11 +120,11 @@ static void pibnd_hash(uint8_t h[BLAKE3_OUT_LEN], params::poly_q A[R][V],
 }
 
 static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
-		params::poly_q SC[V][NTI], uint64_t s2) {
+		params::poly_q SC[V][NTI], int lo, int hi, double s2) {
 	array < mpz_t, params::poly_q::degree > coeffs0, coeffs1;
 	params::poly_q t;
 	mpz_t dot, norm, qDivBy2, tmp;
-	double r, M = 3.0;
+	double r, M = M_SQRT3;
 	int64_t seed;
 	mpf_t u;
 	uint8_t buf[8];
@@ -100,7 +143,7 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	mpz_fdiv_q_2exp(qDivBy2, params::poly_q::moduli_product(), 1);
 	mpz_set_ui(norm, 0);
 	mpz_set_ui(dot, 0);
-	for (int i = 0; i < V - 1; i++) {
+	for (int i = lo; i < hi; i++) {
 		for (int j = 0; j < NTI; j++) {
 			t = Z[i][j];
 			t.invntt_pow_invphi();
@@ -108,14 +151,14 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 			t = SC[i][j];
 			t.invntt_pow_invphi();
 			t.poly2mpz(coeffs1);
-			for (size_t i = 0; i < params::poly_q::degree; i++) {
-				util::center(coeffs0[i], coeffs0[i],
+			for (size_t l = 0; l < params::poly_q::degree; l++) {
+				util::center(coeffs0[l], coeffs0[l],
 						params::poly_q::moduli_product(), qDivBy2);
-				util::center(coeffs1[i], coeffs1[i],
+				util::center(coeffs1[l], coeffs1[l],
 						params::poly_q::moduli_product(), qDivBy2);
-				mpz_mul(tmp, coeffs0[i], coeffs1[i]);
+				mpz_mul(tmp, coeffs0[l], coeffs1[l]);
 				mpz_add(dot, dot, tmp);
-				mpz_mul(tmp, coeffs1[i], coeffs1[i]);
+				mpz_mul(tmp, coeffs1[l], coeffs1[l]);
 				mpz_add(norm, norm, tmp);
 			}
 		}
@@ -129,11 +172,13 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	gmp_randseed_ui(state, seed);
 	mpf_urandomb(u, state, mpf_get_default_prec());
 
+	/* Reject when <z, sc> < 0, then accept with probability min(1, r) for
+	 * r = exp((-2<z, sc> + ||sc||^2) / 2s2) / M. */
 	result = mpz_get_d(dot) < 0;
 	r = -2.0 * mpz_get_d(dot) + mpz_get_d(norm);
 	r = r / (2.0 * s2);
 	r = exp(r) / M;
-	result |= mpf_get_d(u) > (1 / M);
+	result |= mpf_get_d(u) > r;
 
 	mpf_clear(u);
 	gmp_randclear(state);
@@ -146,18 +191,17 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 }
 
 /**
- * Test if the l2-norm is within bounds (4 * sigma * sqrt(N)).
+ * Test if the l2-norm of r is within B = sigma * sqrt(2N).
  *
- * @param[in] r 			- the polynomial to compute the l2-norm.
- * @return the computed norm.
+ * @param[in] r 			- the polynomial to test.
+ * @param[in] sigma			- the Gaussian parameter the row was sampled with.
  */
-bool pibnd_test_norm1(params::poly_q r, uint64_t sigma_sqr) {
+static bool pibnd_test_norm(params::poly_q r, double sigma) {
 	array < mpz_t, params::poly_q::degree > coeffs;
-	mpz_t norm, qDivBy2, tmp;
-	params::poly_q t;
+	mpz_t norm, qDivBy2, tmp, bound;
 
 	/// Constructors
-	mpz_inits(norm, qDivBy2, tmp, nullptr);
+	mpz_inits(norm, qDivBy2, tmp, bound, nullptr);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
 	}
@@ -172,51 +216,19 @@ bool pibnd_test_norm1(params::poly_q r, uint64_t sigma_sqr) {
 		mpz_add(norm, norm, tmp);
 	}
 
-	// Compare to (sigma * sqrt(2N))^2 = sigma^2 * 2 * N.
-	uint64_t bound = 2 * sigma_sqr * params::poly_q::degree;
-	int result = mpz_cmp_ui(norm, bound) <= 0;
+	/* Compare to (sigma * sqrt(2N))^2 = 2 * sigma^2 * N, in mpz because
+	 * sigma-hat squared overflows 64 bits at the mix-net's parameters. */
+	mpz_set_d(bound, sigma);
+	mpz_mul(bound, bound, bound);
+	mpz_mul_ui(bound, bound, 2 * params::poly_q::degree);
+	int result = mpz_cmp(norm, bound) <= 0;
 
-	mpz_clears(norm, qDivBy2, tmp, nullptr);
+	mpz_clears(norm, qDivBy2, tmp, bound, nullptr);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
 	}
 
 	return result;
-}
-
-bool pibnd_test_norm2(params::poly_q r) {
-	array < mpz_t, params::poly_q::degree > coeffs;
-	mpz_t norm, qDivBy2, tmp, q;
-	params::poly_q t;
-
-	/// Constructors
-	mpz_inits(norm, qDivBy2, tmp, q, nullptr);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
-	}
-
-	r.poly2mpz(coeffs);
-	mpz_fdiv_q_2exp(qDivBy2, params::poly_q::moduli_product(), 1);
-	mpz_set_ui(norm, 0);
-	mpz_set_str(q, PRIMEQ, 10);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_mod(coeffs[i], coeffs[i], q);
-		util::center(coeffs[i], coeffs[i],
-				params::poly_q::moduli_product(), qDivBy2);
-		mpz_mul(tmp, coeffs[i], coeffs[i]);
-		mpz_add(norm, norm, tmp);
-	}
-
-	mpz_set_str(tmp, BOUND_B, 10);
-	mpz_mul(tmp, tmp, tmp);
-	int result = mpz_cmp(norm, tmp) <= 0;
-
-	mpz_clears(norm, qDivBy2, tmp, q, nullptr);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(coeffs[i]);
-	}
-
-	return !result;
 }
 
 // Sample a challenge.
@@ -230,7 +242,8 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		params::poly_q s[TAU][V]) {
 	std::array < mpz_t, params::poly_q::degree > coeffs;
 	mpz_t qDivBy2;
-	int64_t coeff;
+	__int128 coeff;
+	int rej0, rej1;
 
 	mpz_init(qDivBy2);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
@@ -244,12 +257,12 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 			for (int j = 0; j < NTI; j++) {
 				for (size_t k = 0; k < params::poly_q::degree; k++) {
 					if (i < V - 1) {
-						coeff = sample_z(0.0, SIGMA_B1);
+						coeff = sample_z(0.0, SIGMA_ANEX);
 					} else {
 						coeff = sample_z((__float128) 0.0,
-								(__float128) SIGMA_B2);
+								(__float128) SIGMA_ANEX_HAT);
 					}
-					mpz_set_si(coeffs[k], coeff);
+					mpz_set_int128(coeffs[k], coeff);
 				}
 				Z[i][j].mpz2poly(coeffs);
 				Z[i][j].ntt_pow_phi();
@@ -291,7 +304,13 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 				Z[i][j] = Z[i][j] + SC[i][j];
 			}
 		}
-	} while (pibnd_rej_sampling(Z, SC, SIGMA_B1 * SIGMA_B1) == 1);
+		/* Two checks: rows 1..k against sigma_ANEx, the last against
+		 * sigma-hat_ANEx. Each succeeds with probability 1/sqrt(3). */
+		rej0 = pibnd_rej_sampling(Z, SC, 0, ANEX_K,
+				SIGMA_ANEX * SIGMA_ANEX);
+		rej1 = pibnd_rej_sampling(Z, SC, ANEX_K, V,
+				SIGMA_ANEX_HAT * SIGMA_ANEX_HAT);
+	} while (rej0 || rej1);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
@@ -341,11 +360,8 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 	for (int i = 0; i < V; i++) {
 		for (int j = 0; j < NTI; j++) {
 			Z[i][j].invntt_pow_invphi();
-			if (i < V - 1) {
-				result &= pibnd_test_norm1(Z[i][j], SIGMA_B1 * SIGMA_B1);
-			} else {
-				result &= pibnd_test_norm2(Z[i][j]);
-			}
+			result &= pibnd_test_norm(Z[i][j],
+					i < ANEX_K ? SIGMA_ANEX : SIGMA_ANEX_HAT);
 		}
 	}
 	return result;

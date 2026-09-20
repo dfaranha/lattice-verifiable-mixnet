@@ -140,7 +140,7 @@ static inline int64_t cosac_comp(const unsigned char *r, const __float128 x)
  * This is the sampling algorithm from:
  * Shuo Sun, Yongbin Zhou, Yunfeng Ji, Rui Zhang, & Yang Tao. (2021). Generic, Efficient and Isochronous Gaussian Sampling over the Integers.
  * https://eprint.iacr.org/2021/199 */
-int64_t sample_z(const __float128 center, const __float128 sigma)
+__int128 sample_z(const __float128 center, const __float128 sigma)
 {
 	unsigned char r[DISCRETE_BYTES];
 
