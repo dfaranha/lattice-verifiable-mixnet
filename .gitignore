@@ -1,0 +1,15 @@
+# Build outputs
+obj/
+bdlop
+bgv
+shuffle
+pismall
+pibnd
+*.o
+*.d
+
+# NFLlib is configured and built out of tree into deps/
+deps/
+
+# Stray benchmark output
+saida.txt

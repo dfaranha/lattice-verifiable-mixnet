@@ -3,6 +3,7 @@
 #include "common.h"
 #include <sys/random.h>
 #include <array>
+#include <cassert>
 
 /*============================================================================*/
 /* Public definitions                                                         */
@@ -48,15 +49,86 @@ bool bdlop_test_norm(params::poly_q r, uint64_t sigma_sqr) {
 	return result;
 }
 
-void bdlop_sample_rand(vector < params::poly_q > &r) {
+void bdlop_sample_rand(vector<params::poly_q> &r) {
 	for (size_t i = 0; i < r.size(); i++) {
 		r[i] = nfl::ZO_dist();
 		r[i].ntt_pow_phi();
 	}
 }
 
+void bdlop_sample_uniform(params::poly_q &f) {
+	std::array<mpz_t, params::poly_q::degree> coeffs;
+	gmp_randstate_t prng;
+	unsigned long int seed;
+	mpz_t q;
+
+	gmp_randinit_default(prng);
+	if (getrandom(&seed, sizeof(seed), 0) != sizeof(seed)) {
+		fprintf(stderr, "ERROR: could not read entropy for uniform sampling\n");
+		abort();
+	}
+	gmp_randseed_ui(prng, seed);
+
+	mpz_init(q);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
+	}
+
+	mpz_set_str(q, PRIMEQ, 10);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_urandomm(coeffs[i], prng, q);
+	}
+	f.mpz2poly(coeffs);
+
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(coeffs[i]);
+	}
+	mpz_clear(q);
+	gmp_randclear(prng);
+}
+
+void bdlop_reduce(params::poly_q &f) {
+	std::array<mpz_t, params::poly_q::degree> coeffs;
+	mpz_t q;
+
+	mpz_init(q);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
+	}
+
+	f.invntt_pow_invphi();
+	f.poly2mpz(coeffs);
+	mpz_set_str(q, PRIMEQ, 10);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_mod(coeffs[i], coeffs[i], q);
+	}
+	f.mpz2poly(coeffs);
+	f.ntt_pow_phi();
+
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(coeffs[i]);
+	}
+	mpz_clear(q);
+}
+
+void bdlop_print(params::poly_q &f) {
+	std::array<mpz_t, params::poly_q::degree> coeffs;
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
+	}
+
+	f.poly2mpz(coeffs);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		gmp_printf("%Zd ", coeffs[i]);
+	}
+
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(coeffs[i]);
+	}
+}
+
 // Sample a challenge.
-void bdlop_sample_chal(params::poly_q & f) {
+void bdlop_sample_chal(params::poly_q &f) {
 	params::poly_q c0, c1;
 
 	c0 = nfl::hwt_dist {NONZERO};
@@ -72,7 +144,8 @@ void bdlop_keygen(comkey_t & key) {
 	one.ntt_pow_phi();
 	for (size_t i = 0; i < HEIGHT; i++) {
 		for (int j = 0; j < WIDTH - HEIGHT; j++) {
-			key.A1[i][j] = nfl::uniform();
+			bdlop_sample_uniform(key.A1[i][j]);
+			key.A1[i][j].ntt_pow_phi();
 		}
 	}
 	for (size_t i = 0; i < SIZE; i++) {
@@ -81,15 +154,23 @@ void bdlop_keygen(comkey_t & key) {
 		}
 		key.A2[i][i + HEIGHT] = one;
 		for (size_t j = SIZE + HEIGHT; j < WIDTH; j++) {
-			key.A2[i][j] = nfl::uniform();
+			bdlop_sample_uniform(key.A2[i][j]);
+			key.A2[i][j].ntt_pow_phi();
 		}
 	}
 }
 
 // Commit to a message.
-void bdlop_commit(commit_t & com, vector < params::poly_q > m, comkey_t & key,
-		vector < params::poly_q > r) {
+void bdlop_commit(commit_t & com, vector<params::poly_q> m, comkey_t & key,
+		vector<params::poly_q> r) {
 	params::poly_q _m;
+
+	/* m indexes the SIZE rows of key.A2 (and, in bdlop_open, the SIZE entries
+	 * of c2/_c2); r indexes the WIDTH columns of key.A2. Note that r.size() is
+	 * unsigned, so a vector shorter than HEIGHT would make r.size() - HEIGHT
+	 * wrap around and walk far off the end of key.A1. */
+	assert(m.size() <= SIZE);
+	assert(r.size() >= HEIGHT && r.size() <= WIDTH);
 
 	com.c1 = r[0];
 	for (size_t i = 0; i < HEIGHT; i++) {
@@ -111,10 +192,17 @@ void bdlop_commit(commit_t & com, vector < params::poly_q > m, comkey_t & key,
 }
 
 // Open a commitment on a message, randomness, factor.
-int bdlop_open(commit_t & com, vector < params::poly_q > m, comkey_t & key,
-		vector < params::poly_q > r, params::poly_q & f) {
+int bdlop_open(commit_t & com, vector<params::poly_q> m, comkey_t & key,
+		vector<params::poly_q> r, params::poly_q &f) {
 	params::poly_q c1, _c1, c2[SIZE], _c2[SIZE], _m;
 	int result = true;
+
+	/* m indexes the SIZE rows of key.A2 (and, in bdlop_open, the SIZE entries
+	 * of c2/_c2); r indexes the WIDTH columns of key.A2. Note that r.size() is
+	 * unsigned, so a vector shorter than HEIGHT would make r.size() - HEIGHT
+	 * wrap around and walk far off the end of key.A1. */
+	assert(m.size() <= SIZE);
+	assert(r.size() >= HEIGHT && r.size() <= WIDTH);
 
 	c1 = r[0];
 	for (size_t i = 0; i < HEIGHT; i++) {
@@ -162,33 +250,16 @@ int bdlop_open(commit_t & com, vector < params::poly_q > m, comkey_t & key,
 	return result;
 }
 
-// Commit to a ciphertext.
-void bdlop_commit(commit_t & com, bgvenc_t & c, comkey_t & key,
-		vector < params::poly_q > r) {
-	params::poly_q _m;
-
-	com.c1 = r[0];
-	for (size_t i = 0; i < HEIGHT; i++) {
-		for (size_t j = 0; j < r.size() - HEIGHT; j++) {
-			com.c1 = com.c1 + key.A1[i][j] * r[j + HEIGHT];
-		}
-	}
-
-	com.c2.resize(2);
-	com.c2[0] = r[1] + key.A2[0][1] * r[3] + c.u;
-	com.c2[1] = r[2] + key.A2[0][2] * r[3] + c.v;
-}
-
-
 #ifdef MAIN
 static void test1() {
 	comkey_t key;
 	commit_t com, _com;
 
 	bdlop_keygen(key);
-	vector < params::poly_q > r(WIDTH), s(WIDTH);
+	vector<params::poly_q> r(WIDTH), s(WIDTH);
 	params::poly_q f;
-	vector < params::poly_q > m = { nfl::uniform() };
+	vector<params::poly_q> m(1);
+	bdlop_sample_uniform(m[0]);
 
 	TEST_BEGIN("commitment for single messages can be generated and opened") {
 		bdlop_sample_rand(r);
@@ -205,7 +276,8 @@ static void test1() {
 
 	TEST_BEGIN("commitments for single messages are linearly homomorphic") {
 		/* Test linearity. */
-		vector < params::poly_q > rho = { nfl::uniform() };
+		vector<params::poly_q> rho(1);
+		bdlop_sample_uniform(rho[0]);
 		for (size_t j = 0; j < r.size(); j++) {
 			r[j] = 0;
 		}
@@ -225,10 +297,12 @@ static void test2() {
 	commit_t c, com, _com;
 
 	bdlop_keygen(key);
-	vector < params::poly_q > r(WIDTH), s(WIDTH);
+	vector<params::poly_q> r(WIDTH), s(WIDTH);
 	params::poly_q t, f, one;
-	vector < params::poly_q > _m = { 0 }, m =
-			{ nfl::uniform(), nfl::uniform() };
+	vector<params::poly_q> _m(1), m(2);
+	bdlop_sample_uniform(_m[0]);
+	bdlop_sample_uniform(m[0]);
+	bdlop_sample_uniform(m[1]);
 
 	TEST_BEGIN("commitment for multiple messages can be generated and opened") {
 		bdlop_sample_rand(r);
@@ -256,7 +330,9 @@ static void test2() {
 
 	TEST_BEGIN("commitments for multiple messages are linearly homomorphic") {
 		/* Test linearity. */
-		vector < params::poly_q > rho = { nfl::uniform(), nfl::uniform() };
+		vector<params::poly_q> rho(2);
+		bdlop_sample_uniform(rho[0]);
+		bdlop_sample_uniform(rho[1]);
 		bdlop_sample_rand(r);
 		bdlop_commit(com, m, key, r);
 		bdlop_sample_chal(f);
@@ -280,7 +356,7 @@ static void test2() {
 		// Now try again
 		rho[0] = 1;
 		rho[0].ntt_pow_phi();
-		rho[1] = nfl::uniform();
+		bdlop_sample_uniform(rho[1]);
 		_m[0] = m[0];
 		t = m[1];
 		_m[0].ntt_pow_phi();
@@ -315,8 +391,8 @@ static void bench() {
 	comkey_t key;
 	commit_t com;
 	params::poly_q f;
-	vector < params::poly_q > r(WIDTH), s(WIDTH);
-	vector < params::poly_q > m(SIZE);
+	vector<params::poly_q> r(WIDTH), s(WIDTH);
+	vector<params::poly_q> m(SIZE);
 	params::poly_p _m;
 
 	bgvkey_t pk;
@@ -333,15 +409,20 @@ static void bench() {
 		BENCH_ADD(bdlop_sample_rand(r));
 	} BENCH_END;
 
-	BENCH_BEGIN("bdlop_commit") {
+	BENCH_BEGIN("bdlop_reduce") {
 		m[0] = nfl::uniform();
-		m[1] = nfl::uniform();
+		BENCH_ADD(bdlop_reduce(m[0]));
+	} BENCH_END;
+
+	BENCH_BEGIN("bdlop_commit") {
+		bdlop_sample_uniform(m[0]);
+		bdlop_sample_uniform(m[1]);
 		BENCH_ADD(bdlop_commit(com, m, key, r));
 	} BENCH_END;
 
 	BENCH_BEGIN("bdlop_open") {
-		m[0] = nfl::uniform();
-		m[1] = nfl::uniform();
+		bdlop_sample_uniform(m[0]);
+		bdlop_sample_uniform(m[1]);
 		bdlop_commit(com, m, key, r);
 		for (size_t j = 0; j < r.size(); j++) {
 			s[j] = f * r[j];
@@ -351,14 +432,9 @@ static void bench() {
 
 	bgv_keygen(pk, sk);
 	bgv_sample_message(_m);
-
-	BENCH_BEGIN("bdlop_commit (ciphertext)") {
-		bgv_encrypt(c, pk, _m);
-		BENCH_ADD(bdlop_commit(com, c, key, r));
-	} BENCH_END;
 }
 
-int main(int argc, char *arv[]) {
+int main(void) {
 	printf("\n** Tests for lattice-based commitments:\n\n");
 	test1();
 	test2();

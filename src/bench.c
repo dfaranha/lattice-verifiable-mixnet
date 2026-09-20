@@ -39,6 +39,6 @@ void bench_print() {
 	printf("\n");
 }
 
-unsigned long long bench_get_total() {
+unsigned long long bench_total(void) {
 	return total;
 }

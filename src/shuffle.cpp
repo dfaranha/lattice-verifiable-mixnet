@@ -4,18 +4,73 @@
 #include <flint/flint.h>
 #include <flint/fmpz_mod_poly.h>
 
+#include "flint_util.h"
+
 #include "blake3.h"
 #include "common.h"
 #include "test.h"
 #include "bench.h"
-#include "assert.h"
+#include <assert.h>
 #include "sample_z_small.h"
 
 /*============================================================================*/
 /* Private definitions                                                        */
 /*============================================================================*/
 
-#define MSGS        1000
+/* Number of messages being shuffled. This drives every large buffer below, so
+ * it can be overridden (e.g. make CONFIG=-DMSGS=16) to test on a small machine;
+ * the paper's benchmarks use 1000. */
+#ifndef MSGS
+#define MSGS        2
+#endif
+
+/* A params::poly_q is 64 KiB, so anything dimensioned by MSGS is far too large
+ * to be a local variable: at MSGS = 1000 the buffers below add up to well over
+ * a gigabyte. They are allocated on the heap once at start-up, and the pointers
+ * index exactly like the arrays they replace. theta/inv and inv_tmp are the
+ * prover's and simul_inverse's scratch space, which are equally oversized. */
+static commit_t *com, *d, *cs;
+static vector < params::poly_q > *r;
+static params::poly_q *ms, *_ms, *s;
+static params::poly_q (*y)[WIDTH], (*_y)[WIDTH];
+static params::poly_q *t, *_t, *u;
+static params::poly_q *theta, *inv, *inv_tmp;
+
+static void shuffle_alloc(void) {
+	com = new commit_t[MSGS];
+	d = new commit_t[MSGS];
+	cs = new commit_t[MSGS];
+	r = new vector < params::poly_q >[MSGS];
+	ms = new params::poly_q[MSGS];
+	_ms = new params::poly_q[MSGS];
+	s = new params::poly_q[MSGS];
+	y = new params::poly_q[MSGS][WIDTH];
+	_y = new params::poly_q[MSGS][WIDTH];
+	t = new params::poly_q[MSGS];
+	_t = new params::poly_q[MSGS];
+	u = new params::poly_q[MSGS];
+	theta = new params::poly_q[MSGS];
+	inv = new params::poly_q[MSGS];
+	inv_tmp = new params::poly_q[MSGS];
+}
+
+static void shuffle_free(void) {
+	delete[]com;
+	delete[]d;
+	delete[]cs;
+	delete[]r;
+	delete[]ms;
+	delete[]_ms;
+	delete[]s;
+	delete[]y;
+	delete[]_y;
+	delete[]t;
+	delete[]_t;
+	delete[]u;
+	delete[]theta;
+	delete[]inv;
+	delete[]inv_tmp;
+}
 
 static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 		commit_t y, params::poly_q alpha[2], params::poly_q & u,
@@ -45,6 +100,9 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 
 	blake3_hasher_update(&hasher, (const uint8_t *)x.c1.data(), 16 * DEGREE);
 	blake3_hasher_update(&hasher, (const uint8_t *)y.c1.data(), 16 * DEGREE);
+	/* Both commitments must have the same number of components, otherwise
+	 * hashing y.c2 with x.c2's length reads past the end of y.c2. */
+	assert(x.c2.size() == y.c2.size());
 	for (size_t i = 0; i < x.c2.size(); i++) {
 		blake3_hasher_update(&hasher, (const uint8_t *)x.c2[i].data(),
 				16 * DEGREE);
@@ -85,16 +143,19 @@ static void poly_inverse(params::poly_q & inv, params::poly_q p) {
 	fmpz_mod_poly_set_coeff_ui(irred, 0, 1, ctx_q);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		fmpz_mod_poly_set_coeff_mpz(poly, i, coeffs[i], ctx_q);
+		flint_poly_set_coeff_mpz(poly, i, coeffs[i], ctx_q);
 	}
 	fmpz_mod_poly_invmod(poly, poly, irred, ctx_q);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		fmpz_mod_poly_get_coeff_mpz(coeffs[i], poly, i, ctx_q);
+		flint_poly_get_coeff_mpz(coeffs[i], poly, i, ctx_q);
 	}
 
 	inv.mpz2poly(coeffs);
 
+	fmpz_mod_poly_clear(poly, ctx_q);
+	fmpz_mod_poly_clear(irred, ctx_q);
+	fmpz_mod_ctx_clear(ctx_q);
 	fmpz_clear(q);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
@@ -102,25 +163,25 @@ static void poly_inverse(params::poly_q & inv, params::poly_q p) {
 }
 
 static void simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
-	params::poly_q u, t[MSGS];
+	params::poly_q w;
 	inv[0] = m[0];
-	t[0] = m[0];
+	inv_tmp[0] = m[0];
 
 	for (size_t i = 1; i < MSGS; i++) {
-		t[i] = m[i];
+		inv_tmp[i] = m[i];
 		inv[i] = inv[i - 1] * m[i];
 	}
 
-	u = inv[MSGS - 1];
-	u.invntt_pow_invphi();
-	poly_inverse(u, u);
-	u.ntt_pow_phi();
+	w = inv[MSGS - 1];
+	w.invntt_pow_invphi();
+	poly_inverse(w, w);
+	w.ntt_pow_phi();
 
 	for (size_t i = MSGS - 1; i > 0; i--) {
-		inv[i] = u * inv[i - 1];
-		u = u * t[i];
+		inv[i] = w * inv[i - 1];
+		w = w * inv_tmp[i];
 	}
-	inv[0] = u;
+	inv[0] = w;
 }
 
 static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
@@ -166,7 +227,10 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 		}
 	}
 
-	getrandom(buf, sizeof(buf), 0);
+	if (getrandom(buf, sizeof(buf), 0) != sizeof(buf)) {
+		fprintf(stderr, "ERROR: could not read entropy for rejection sampling\n");
+		abort();
+	}
 	memcpy(&seed, buf, sizeof(buf));
 	gmp_randseed_ui(state, seed);
 	mpf_urandomb(u, state, mpf_get_default_prec());
@@ -177,6 +241,7 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 	result = mpf_get_d(u) > r;
 
 	mpf_clear(u);
+	gmp_randclear(state);
 	mpz_clears(dot, norm, qDivBy2, tmp, nullptr);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs0[i]);
@@ -312,7 +377,7 @@ void shuffle_hash(params::poly_q & beta, commit_t c[MSGS], commit_t d[MSGS],
 				16 * DEGREE);
 		blake3_hasher_update(&hasher, (const uint8_t *)d[i].c1.data(),
 				16 * DEGREE);
-		for (size_t j = 0; j < c[j].c2.size(); j++) {
+		for (size_t j = 0; j < c[i].c2.size(); j++) {
 			blake3_hasher_update(&hasher, (const uint8_t *)c[i].c2[j].data(),
 					16 * DEGREE);
 			blake3_hasher_update(&hasher, (const uint8_t *)d[i].c2[j].data(),
@@ -337,10 +402,10 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
 		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
 		params::poly_q _ms[MSGS], vector < params::poly_q > r[MSGS],
-		params::poly_q rho[MSGS], comkey_t & key) {
+		params::poly_q rho[SIZE], comkey_t & key) {
 	vector < params::poly_q > t0(1);
 	vector < params::poly_q > _r[MSGS];
-	params::poly_q alpha[2], beta, theta[MSGS], inv[MSGS];
+	params::poly_q alpha[2], beta;
 
 	/* Prover samples theta_i and computes commitments D_i. */
 	for (size_t i = 0; i < MSGS - 1; i++) {
@@ -435,14 +500,10 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
 	return result;
 }
 
-static int run(commit_t com[MSGS], vector < vector < params::poly_q >> m,
-		vector < vector < params::poly_q >> _m, comkey_t & key,
-		vector < params::poly_q > r[MSGS]) {
-	params::poly_q ms[MSGS], _ms[MSGS];
-	commit_t d[MSGS], cs[MSGS];
+static int run(vector < vector < params::poly_q >> m,
+		vector < vector < params::poly_q >> _m, comkey_t & key) {
 	vector < params::poly_q > t0(1);
-	params::poly_q one, t1, rho[SIZE], s[MSGS];
-	params::poly_q y[MSGS][WIDTH], _y[MSGS][WIDTH], t[MSGS], _t[MSGS], u[MSGS];
+	params::poly_q one, t1, rho[SIZE];
 	comkey_t _key;
 
 	/* Extend commitments and adjust key. */
@@ -494,11 +555,9 @@ static int run(commit_t com[MSGS], vector < vector < params::poly_q >> m,
 #ifdef MAIN
 static void test() {
 	comkey_t key;
-	commit_t com[MSGS];
 	vector < vector < params::poly_q >> m(MSGS), _m(MSGS);
-	vector < params::poly_q > r[MSGS];
 
-	/* Generate commitment key-> */
+	/* Generate commitment key. */
 	bdlop_keygen(key);
 	for (int i = 0; i < MSGS; i++) {
 		m[i].resize(SIZE);
@@ -532,7 +591,7 @@ static void test() {
 	} TEST_END;
 
 	TEST_ONCE("shuffle proof is consistent") {
-		TEST_ASSERT(run(com, m, _m, key, r) == 1, end);
+		TEST_ASSERT(run(m, _m, key) == 1, end);
 	} TEST_END;
 
   end:
@@ -561,12 +620,10 @@ static void microbench() {
 
 static void bench() {
 	comkey_t key;
-	commit_t com[MSGS];
 	vector < vector < params::poly_q >> m(MSGS), _m(MSGS);
-	vector < params::poly_q > r[MSGS];
-	params::poly_q y[WIDTH], _y[WIDTH], t, _t, u, alpha[2], beta;
+	params::poly_q by[WIDTH], _by[WIDTH], bt, _bt, bu, alpha[2], beta;
 
-	/* Generate commitment key-> */
+	/* Generate commitment key. */
 	bdlop_keygen(key);
 	for (int i = 0; i < MSGS; i++) {
 		m[i].resize(SIZE);
@@ -593,22 +650,25 @@ static void bench() {
 	bdlop_sample_chal(beta);
 
 	BENCH_BEGIN("linear hash") {
-		BENCH_ADD(lin_hash(beta, key, com[0], com[1], alpha, u, t, _t));
+		BENCH_ADD(lin_hash(beta, key, com[0], com[1], alpha, bu, bt, _bt));
 	} BENCH_END;
 
 	BENCH_BEGIN("linear proof") {
-		BENCH_ADD(lin_prover(y, _y, t, _t, u, com[0], com[1], alpha, key, r[0],
-						r[0]));
+		BENCH_ADD(lin_prover(by, _by, bt, _bt, bu, com[0], com[1], alpha, key,
+						r[0], r[0]));
 	} BENCH_END;
 
 	BENCH_BEGIN("linear verifier") {
-		BENCH_ADD(lin_verifier(y, _y, t, _t, u, com[0], com[1], alpha, key));
+		BENCH_ADD(lin_verifier(by, _by, bt, _bt, bu, com[0], com[1], alpha,
+						key));
 	} BENCH_END;
 
-	BENCH_SMALL("shuffle-proof (N messages)", run(com, m, _m, key, r));
+	BENCH_SMALL("shuffle-proof (N messages)", run(m, _m, key));
 }
 
 int main(int argc, char *argv[]) {
+	shuffle_alloc();
+
 	printf("\n** Tests for lattice-based shuffle proof:\n\n");
 	test();
 
@@ -617,5 +677,8 @@ int main(int argc, char *argv[]) {
 
 	printf("\n** Benchmarks for lattice-based shuffle proof:\n\n");
 	bench();
+
+	shuffle_free();
+	return 0;
 }
 #endif

@@ -2,6 +2,7 @@
 #include "bench.h"
 #include "common.h"
 #include <sys/random.h>
+#include <cstdlib>
 
 void ghl_sample_message(params::poly_q & m) {
 	// Sample a short polynomial.
@@ -14,7 +15,10 @@ void ghl_sample_message(params::poly_q & m) {
 	}
 
 	for (size_t j = 0; j < params::poly_p::degree / 2; j += 32) {
-		getrandom(&buf, sizeof(buf), 0);
+		if (getrandom(&buf, sizeof(buf), 0) != sizeof(buf)) {
+			fprintf(stderr, "ERROR: could not read entropy for message\n");
+			abort();
+		}
 		for (size_t k = 0; k < 64; k += 2) {
 			mpz_set_ui(coeffs[j + k / 2], (buf >> k) % PRIMEP);
 		}
@@ -37,7 +41,10 @@ void bgv_sample_message(params::poly_p & m) {
 	}
 
 	for (size_t j = 0; j < params::poly_p::degree; j += 32) {
-		getrandom(&buf, sizeof(buf), 0);
+		if (getrandom(&buf, sizeof(buf), 0) != sizeof(buf)) {
+			fprintf(stderr, "ERROR: could not read entropy for message\n");
+			abort();
+		}
 		for (size_t k = 0; k < 64; k += 2) {
 			mpz_set_ui(coeffs[j + k / 2], (buf >> k) % PRIMEP);
 		}
@@ -184,6 +191,12 @@ void bgv_distdec(params::poly_q & tj, bgvenc_t & c, params::poly_q & sj) {
 	for (size_t i = 0; i < PRIMEP; i++) {
 		tj = tj + Ej;
 	}
+
+	mpz_clear(qDivBy2);
+	mpz_clear(bound);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(coeffs[i]);
+	}
 }
 
 void bgv_comb(params::poly_p & m, bgvenc_t & c, params::poly_q t[],
@@ -298,7 +311,7 @@ static void bench() {
 		BENCH_ADD(bgv_add(c, c, c));
 	} BENCH_END;
 
-	bgv_keyshare(t, PARTIES, sk);
+	bgv_keyshare(s, PARTIES, sk);
 	BENCH_BEGIN("bgv_distdec") {
 		bgv_encrypt(c, pk, m);
 		BENCH_ADD(bgv_distdec(t[0], c, s[0]));
@@ -313,7 +326,7 @@ static void bench() {
 	} BENCH_END;
 }
 
-int main(int argc, char *arv[]) {
+int main(void) {
 	printf("\n** Tests for BGV encryption:\n\n");
 	test();
 

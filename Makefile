@@ -1,33 +1,80 @@
-CPP = g++
-CFLAGS = -O3 -march=native -mtune=native -Wall -ggdb -I NFLlib/include/ -I NFLlib/include/nfl -I NFLlib/include/nfl/prng -I include -DNFL_OPTIMIZED=ON -DNTT_AVX2 -flto
-INCLUDES = include/bench.h include/cpucycles.h
-BLAKE3 = src/blake3/blake3.c src/blake3/blake3_dispatch.c src/blake3/blake3_portable.c src/blake3/blake3_sse2_x86-64_unix.S src/blake3/blake3_sse41_x86-64_unix.S src/blake3/blake3_avx2_x86-64_unix.S src/blake3/blake3_avx512_x86-64_unix.S
-BENCH = src/bench.c src/cpucycles.c
-TEST = src/test.c
-LIBS = deps/libnfllib_static.a -lgmp -lmpfr -L deps/ -lflint -lquadmath
+CPP      = g++
 
-all: bdlop bgv shuffle pismall pibnd
+# NFLlib predates C++20 and uses std::allocator<void>::const_pointer, which was
+# removed in that standard, so the language level has to be pinned. The GNU
+# dialect is required for the `Q` suffix on __float128 literals in param.h.
+STD      = -std=gnu++17
 
-bdlop: src/bdlop.cpp src/bgv.cpp ${TEST} ${BENCH} ${INCLUDES}
-	${CPP} ${CFLAGS} -c src/bgv.cpp -o bgv.o
-	${CPP} ${CFLAGS} -DMAIN src/bdlop.cpp bgv.o ${TEST} ${BENCH} -o bdlop ${LIBS}
+# A params::poly_q is 64 KiB, so it is very easy to write a function whose
+# locals silently overflow the stack. Fail loudly instead: 4 MiB is half the
+# usual default limit, and every function here is well under it.
+WARN     = -Wall -Wframe-larger-than=4194304
+OPT      = -O3 -march=native -mtune=native -flto
+INCLUDE  = -I NFLlib/include/ -I NFLlib/include/nfl -I NFLlib/include/nfl/prng -I include
+DEFINE   = -DNFL_OPTIMIZED=ON -DNTT_AVX2
+# Extra defines for a build, e.g. make CONFIG="-DTAU=10 -DNTI=8" to shrink the
+# proofs enough to run them on a machine without tens of gigabytes of RAM.
+CONFIG   =
+CFLAGS   = $(STD) $(OPT) $(WARN) -ggdb $(INCLUDE) $(DEFINE) $(CONFIG) -MMD -MP
 
-bgv: src/bgv.cpp ${TEST} ${BENCH} ${INCLUDES}
-	${CPP} ${CFLAGS} -DMAIN src/bgv.cpp ${TEST} ${BENCH} -o bgv ${LIBS}
+LIBS     = deps/libnfllib_static.a -lgmp -lmpfr -L deps/ -lflint -lquadmath
 
-shuffle: src/shuffle.cpp src/bdlop.cpp ${TEST} ${BENCH} ${INCLUDES}
-	${CPP} ${CFLAGS} -c src/sample_z_small.c -o sample_z_small.o
-	${CPP} ${CFLAGS} -c src/bdlop.cpp -o bdlop.o
-	${CPP} ${CFLAGS} -DMAIN src/shuffle.cpp sample_z_small.o bdlop.o ${TEST} ${BENCH} ${BLAKE3} -o shuffle ${LIBS}
+OBJ      = obj
+BIN      = bdlop bgv shuffle pismall pibnd
 
-pismall: src/bdlop.cpp src/pismall.cpp ${TEST} ${BENCH} ${INCLUDES}
-	${CPP} ${CFLAGS} -DSIZE=3 -c src/bdlop.cpp -o bdlop.o
-	${CPP} ${CFLAGS} -DSIZE=3 -DMAIN src/pismall.cpp bdlop.o ${TEST} ${BENCH} ${BLAKE3} -o pismall ${LIBS}
+BLAKE3_SRC = src/blake3/blake3.c src/blake3/blake3_dispatch.c \
+             src/blake3/blake3_portable.c \
+             src/blake3/blake3_sse2_x86-64_unix.S \
+             src/blake3/blake3_sse41_x86-64_unix.S \
+             src/blake3/blake3_avx2_x86-64_unix.S \
+             src/blake3/blake3_avx512_x86-64_unix.S
+BLAKE3   = $(OBJ)/blake3.o
+COMMON   = $(OBJ)/test.o $(OBJ)/bench.o $(OBJ)/cpucycles.o
 
-pibnd: src/pibnd.cpp ${TEST} ${BENCH} ${INCLUDES}
-	${CPP} ${CFLAGS} -c src/sample_z_small.c -o sample_z_small.o
-	${CPP} ${CFLAGS} -c src/sample_z_large.c -o sample_z_large.o
-	${CPP} ${CFLAGS} -DMAIN src/pibnd.cpp sample_z_small.o sample_z_large.o ${TEST} ${BENCH} ${BLAKE3} -o pibnd ${LIBS}
+.PHONY: all clean
+.SECONDARY:
+
+all: $(BIN)
+
+$(OBJ):
+	mkdir -p $(OBJ)
+
+# Support code, compiled once and shared by every binary.
+$(OBJ)/%.o: src/%.c | $(OBJ)
+	$(CPP) $(CFLAGS) -c $< -o $@
+
+$(OBJ)/%.o: src/%.cpp | $(OBJ)
+	$(CPP) $(CFLAGS) -c $< -o $@
+
+# BLAKE3 is bundled as a mix of C and assembly; keep it in a single object.
+$(BLAKE3): $(BLAKE3_SRC) | $(OBJ)
+	$(CPP) $(CFLAGS) -r -nostdlib $(BLAKE3_SRC) -o $@
+
+# pismall commits to SIZE=3 messages, every other binary to the default SIZE.
+# The two configurations must not share an object file, or whichever target is
+# built last silently links the wrong one.
+$(OBJ)/bdlop-size3.o: src/bdlop.cpp | $(OBJ)
+	$(CPP) $(CFLAGS) -DSIZE=3 -c $< -o $@
+
+bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON)
+	$(CPP) $(CFLAGS) -DMAIN src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) -o $@ $(LIBS)
+
+bgv: src/bgv.cpp $(COMMON)
+	$(CPP) $(CFLAGS) -DMAIN src/bgv.cpp $(COMMON) -o $@ $(LIBS)
+
+shuffle: src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/sample_z_small.o $(COMMON) $(BLAKE3)
+	$(CPP) $(CFLAGS) -DMAIN src/shuffle.cpp $(OBJ)/bdlop.o \
+		$(OBJ)/sample_z_small.o $(COMMON) $(BLAKE3) -o $@ $(LIBS)
+
+pismall: src/pismall.cpp $(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3)
+	$(CPP) $(CFLAGS) -DSIZE=3 -DMAIN src/pismall.cpp \
+		$(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3) -o $@ $(LIBS)
+
+pibnd: src/pibnd.cpp $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3)
+	$(CPP) $(CFLAGS) -DMAIN src/pibnd.cpp $(OBJ)/sample_z_small.o \
+		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS)
 
 clean:
-	rm *.o bdlop bgv shuffle pismall pibnd
+	rm -rf $(OBJ) $(BIN)
+
+-include $(wildcard $(OBJ)/*.d)

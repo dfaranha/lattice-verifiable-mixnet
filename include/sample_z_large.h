@@ -4,8 +4,8 @@
  * Integer samplers               *
  * ****************************** */
 
-#ifndef _SAMPLE_Z_H
-#define _SAMPLE_Z_H
+#ifndef _SAMPLE_Z_LARGE_H
+#define _SAMPLE_Z_LARGE_H
 
 #include "poly.h"
 

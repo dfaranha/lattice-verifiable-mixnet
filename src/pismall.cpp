@@ -4,20 +4,57 @@
 #include <flint/flint.h>
 #include <flint/fmpz_mod_poly.h>
 
+#include "flint_util.h"
+
 #include "common.h"
 #include "test.h"
 #include "bench.h"
-#include "assert.h"
+#include <assert.h>
 #include "blake3.h"
 
 #define ETA         325
 #define R           (HEIGHT+2)
 #define V           (WIDTH+3)
+/* Number of relations proven at once. This drives every large buffer below, so
+ * it can be overridden (e.g. make CONFIG=-DTAU=10) to test on a small machine;
+ * the paper's benchmarks use the default. */
+#ifndef TAU
 #define TAU         1000
+#endif
 
-/* Had to move those to global to avoid overflowing the stack. */
-params::poly_q A[R][V], s[TAU][V], t[TAU][R];
-params::poly_big H0[V], _H[V], H[TAU][3];
+/* Everything dimensioned by TAU is far too large to be a local: at TAU = 1000,
+ * s is 512 MiB, H is 786 MiB, and the prover's v_i,j are 3 * TAU * V arrays of
+ * DEGREE mpz_t, about 1.4 GiB. They are allocated on the heap once at start-up,
+ * and the pointers below index exactly like the arrays they replace.
+ *
+ * NOTE: at TAU = 1000 this binary needs several gigabytes of RAM. Pass e.g.
+ * CONFIG=-DTAU=8 to make to try it on a smaller machine. */
+params::poly_q A[R][V];
+params::poly_q (*s)[V], (*t)[R];
+params::poly_big H0[V], _H[V];
+params::poly_big (*H)[3];
+static array < mpz_t, params::poly_q::degree > (*v)[TAU][V];
+static fmpz_t *prover_y, (*prover_beta)[3], (*prover_r)[3][ETA];
+
+static void pismall_alloc(void) {
+	s = new params::poly_q[TAU][V];
+	t = new params::poly_q[TAU][R];
+	H = new params::poly_big[TAU][3];
+	v = new array < mpz_t, params::poly_q::degree >[3][TAU][V];
+	prover_y = new fmpz_t[TAU];
+	prover_beta = new fmpz_t[TAU][3];
+	prover_r = new fmpz_t[TAU][3][ETA];
+}
+
+static void pismall_free(void) {
+	delete[]s;
+	delete[]t;
+	delete[]H;
+	delete[]v;
+	delete[]prover_y;
+	delete[]prover_beta;
+	delete[]prover_r;
+}
 
 static void pismall_hash(fmpz_t x, fmpz_t beta0, fmpz_t beta[TAU][3], fmpz_t q,
 		commit_t & com) {
@@ -26,7 +63,7 @@ static void pismall_hash(fmpz_t x, fmpz_t beta0, fmpz_t beta[TAU][3], fmpz_t q,
 	flint_rand_t rand;
 	ulong seed[2];
 
-	flint_randinit(rand);
+	flint_rand_init(rand);
 
 	blake3_hasher_init(&hasher);
 	blake3_hasher_update(&hasher, (const uint8_t *)com.c1.data(), 16 * DEGREE);
@@ -39,7 +76,7 @@ static void pismall_hash(fmpz_t x, fmpz_t beta0, fmpz_t beta[TAU][3], fmpz_t q,
 
 	memcpy(&seed[0], hash, sizeof(ulong));
 	memcpy(&seed[1], hash + BLAKE3_OUT_LEN / 2, sizeof(ulong));
-	flint_randseed(rand, seed[0], seed[1]);
+	flint_rand_set_seed(rand, seed[0], seed[1]);
 	fmpz_randm(x, rand, q);
 	fmpz_randm(beta0, rand, q);
 	for (size_t i = 0; i < TAU; i++) {
@@ -47,6 +84,8 @@ static void pismall_hash(fmpz_t x, fmpz_t beta0, fmpz_t beta[TAU][3], fmpz_t q,
 			fmpz_randm(beta[i][j], rand, q);
 		}
 	}
+
+	flint_rand_clear(rand);
 }
 
 static void poly_to(params::poly_q & out, fmpz_mod_poly_t & in,
@@ -58,7 +97,7 @@ static void poly_to(params::poly_q & out, fmpz_mod_poly_t & in,
 	}
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		fmpz_mod_poly_get_coeff_mpz(coeffs[i], in, i, ctx);
+		flint_poly_get_coeff_mpz(coeffs[i], in, i, ctx);
 	}
 
 	out.mpz2poly(coeffs);
@@ -79,10 +118,10 @@ static void poly_encode(params::poly_big & out, fmpz_mod_poly_t in0,
 	}
 
 	for (i = 0; i < params::poly_q::degree; i++) {
-		fmpz_mod_poly_get_coeff_mpz(coeffs[i], in0, i, ctx);
+		flint_poly_get_coeff_mpz(coeffs[i], in0, i, ctx);
 	}
 	for (; i < 2 * params::poly_q::degree; i++) {
-		fmpz_mod_poly_get_coeff_mpz(coeffs[i], in1, i, ctx);
+		flint_poly_get_coeff_mpz(coeffs[i], in1, i, ctx);
 	}
 	for (; i < 2 * params::poly_q::degree + ETA; i++) {
 		fmpz_get_mpz(coeffs[i], in[i - 2 * params::poly_q::degree]);
@@ -111,7 +150,7 @@ static void poly_from(fmpz_mod_poly_t & out, params::poly_q & in,
 	fmpz_mod_poly_zero(out, ctx);
 	fmpz_mod_poly_fit_length(out, params::poly_q::degree, ctx);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		fmpz_mod_poly_set_coeff_mpz(out, i, coeffs[i], ctx);
+		flint_poly_set_coeff_mpz(out, i, coeffs[i], ctx);
 	}
 
 	in.ntt_pow_phi();
@@ -172,9 +211,9 @@ static int pismall_prover(commit_t & com, fmpz_t x, fmpz_mod_poly_t f[V],
 		vector < params::poly_q > rd, comkey_t & key,
 		fmpz_mod_poly_t lag[TAU + 1], flint_rand_t prng,
 		const fmpz_mod_ctx_t ctx) {
-	array < mpz_t, params::poly_q::degree > coeffs, coeffs0, v[3][TAU][V];
+	array < mpz_t, params::poly_q::degree > coeffs, coeffs0;
 	fmpz_mod_poly_t poly, zero;
-	fmpz_t t, u, q, y[TAU], beta0, beta[TAU][3], r0[ETA], r[TAU][3][ETA];
+	fmpz_t t, u, q, beta0, r0[ETA];
 	fmpz_mod_ctx_t ctx_q;
 	vector < params::poly_q > d;
 	params::poly_q s0[V];
@@ -193,7 +232,7 @@ static int pismall_prover(commit_t & com, fmpz_t x, fmpz_mod_poly_t f[V],
 		mpz_init(coeffs0[i]);
 	}
 	for (size_t i = 0; i < TAU; i++) {
-		fmpz_init(y[i]);
+		fmpz_init(prover_y[i]);
 		for (size_t j = 0; j < 3; j++) {
 			for (size_t k = 0; k < V; k++) {
 				for (size_t l = 0; l < params::poly_q::degree; l++) {
@@ -205,10 +244,10 @@ static int pismall_prover(commit_t & com, fmpz_t x, fmpz_mod_poly_t f[V],
 	fmpz_init(beta0);
 	for (size_t i = 0; i < TAU; i++) {
 		for (size_t j = 0; j < 3; j++) {
-			fmpz_init(beta[i][j]);
+			fmpz_init(prover_beta[i][j]);
 			for (size_t k = 0; k < ETA; k++) {
-				fmpz_init(r[i][j][k]);
-				fmpz_randm(r[i][j][k], prng, q);
+				fmpz_init(prover_r[i][j][k]);
+				fmpz_randm(prover_r[i][j][k], prng, q);
 			}
 		}
 	}
@@ -323,32 +362,32 @@ static int pismall_prover(commit_t & com, fmpz_t x, fmpz_mod_poly_t f[V],
 		for (size_t i = 0; i < TAU; i++) {
 			for (size_t j = 0; j < 3; j++) {
 				for (size_t l = 0; l < params::poly_q::degree; l++) {
-					fmpz_mod_poly_set_coeff_mpz(poly, l, v[j][i][k][l], ctx_q);
+					flint_poly_set_coeff_mpz(poly, l, v[j][i][k][l], ctx_q);
 				}
 				if (j == 0) {
 					poly_from(zero, s[i][j], ctx_q);
-					poly_encode(H[i][j], zero, poly, r[i][j], ctx_q);
+					poly_encode(H[i][j], zero, poly, prover_r[i][j], ctx_q);
 				}
 				fmpz_mod_poly_zero(zero, ctx);
-				poly_encode(H[i][j], zero, poly, r[i][j], ctx_q);
+				poly_encode(H[i][j], zero, poly, prover_r[i][j], ctx_q);
 			}
 		}
 	}
 
-	pismall_hash(x, beta0, beta, q, com);
+	pismall_hash(x, beta0, prover_beta, q, com);
 
 	/* Compute f = s_0 * l_0(x). */
-	fmpz_mod_poly_evaluate_fmpz(y[0], lag[0], x, ctx_q);
+	fmpz_mod_poly_evaluate_fmpz(prover_y[0], lag[0], x, ctx_q);
 	for (int i = 0; i < V; i++) {
 		poly_from(poly, s0[i], ctx_q);
-		fmpz_mod_poly_scalar_mul_fmpz(f[i], poly, y[0], ctx_q);
+		fmpz_mod_poly_scalar_mul_fmpz(f[i], poly, prover_y[0], ctx_q);
 	}
 	/* Compute remaining f = f(x) = \Sum s_i * l_i(x). */
 	for (size_t i = 1; i <= TAU; i++) {
-		fmpz_mod_poly_evaluate_fmpz(y[i - 1], lag[i], x, ctx_q);
+		fmpz_mod_poly_evaluate_fmpz(prover_y[i - 1], lag[i], x, ctx_q);
 		for (int j = 0; j < V; j++) {
 			poly_from(poly, s[i - 1][j], ctx_q);
-			fmpz_mod_poly_scalar_mul_fmpz(poly, poly, y[i - 1], ctx_q);
+			fmpz_mod_poly_scalar_mul_fmpz(poly, poly, prover_y[i - 1], ctx_q);
 			fmpz_mod_poly_add(f[j], f[j], poly, ctx_q);
 		}
 	}
@@ -356,17 +395,17 @@ static int pismall_prover(commit_t & com, fmpz_t x, fmpz_mod_poly_t f[V],
 	/* Compute _rf = r0 * l_0(x) + Sum r_i,j * l_i(x) * l_0(x)^j */
 	/* and _rh = r0 * beta_0 + Sum r_i,j * beta_i,j */
 	for (size_t k = 0; k < ETA; k++) {
-		fmpz_mod_mul(rf[k], r0[k], y[0], ctx);
+		fmpz_mod_mul(rf[k], r0[k], prover_y[0], ctx);
 		fmpz_mod_mul(t, r0[k], beta0, ctx);
 		fmpz_mod_add(rh[k], rh[k], t, ctx_q);
 		for (size_t i = 1; i <= TAU; i++) {
 			for (size_t j = 0; j < 3; j++) {
-				fmpz_mod_mul(t, r[i - 1][j][k], y[i - 1], ctx_q);
+				fmpz_mod_mul(t, prover_r[i - 1][j][k], prover_y[i - 1], ctx_q);
 				for (size_t l = 0; l < j; l++) {
-					fmpz_mod_mul(t, t, y[i], ctx_q);
+					fmpz_mod_mul(t, t, prover_y[i], ctx_q);
 				}
 				fmpz_mod_add(rf[k], rf[k], t, ctx_q);
-				fmpz_mod_mul(t, r[i - 1][j][k], beta[i - 1][j], ctx_q);
+				fmpz_mod_mul(t, prover_r[i - 1][j][k], prover_beta[i - 1][j], ctx_q);
 				fmpz_mod_add(rh[k], rh[k], t, ctx_q);
 			}
 		}
@@ -380,16 +419,19 @@ static int pismall_prover(commit_t & com, fmpz_t x, fmpz_mod_poly_t f[V],
 		for (size_t i = 1; i <= TAU; i++) {
 			for (size_t j = 0; j < 3; j++) {
 				if (j == 0) {
-					poly_from(poly, s[i][k], ctx_q);
-					fmpz_mod_poly_scalar_mul_fmpz(poly, poly, beta[i - 1][j],
+					/* i runs from 1 to TAU, so this has to be s[i - 1] like
+					 * every other access in this loop; s[i] read one row past
+					 * the end of the matrix on the last iteration. */
+					poly_from(poly, s[i - 1][k], ctx_q);
+					fmpz_mod_poly_scalar_mul_fmpz(poly, poly, prover_beta[i - 1][j],
 							ctx_q);
 					fmpz_mod_poly_add(h[0][k], h[0][k], poly, ctx);
 				}
 				for (size_t l = 0; l < params::poly_q::degree; l++) {
-					fmpz_mod_poly_set_coeff_mpz(poly, l, v[j][i - 1][k][l],
+					flint_poly_set_coeff_mpz(poly, l, v[j][i - 1][k][l],
 							ctx_q);
 				}
-				fmpz_mod_poly_scalar_mul_fmpz(poly, poly, beta[i - 1][j],
+				fmpz_mod_poly_scalar_mul_fmpz(poly, poly, prover_beta[i - 1][j],
 						ctx_q);
 				fmpz_mod_poly_add(h[1][k], h[1][k], poly, ctx);
 			}
@@ -406,7 +448,7 @@ static int pismall_prover(commit_t & com, fmpz_t x, fmpz_mod_poly_t f[V],
 		mpz_clear(coeffs0[i]);
 	}
 	for (size_t i = 0; i < TAU; i++) {
-		fmpz_clear(y[i]);
+		fmpz_clear(prover_y[i]);
 		for (size_t j = 0; j < 3; j++) {
 			for (size_t k = 0; k < V; k++) {
 				for (size_t l = 0; l < params::poly_q::degree; l++) {
@@ -418,15 +460,16 @@ static int pismall_prover(commit_t & com, fmpz_t x, fmpz_mod_poly_t f[V],
 	fmpz_clear(beta0);
 	for (size_t i = 0; i < TAU; i++) {
 		for (size_t j = 0; j < 3; j++) {
-			fmpz_clear(beta[i][j]);
+			fmpz_clear(prover_beta[i][j]);
 			for (size_t k = 0; k < ETA; k++) {
-				fmpz_clear(r[i][j][k]);
+				fmpz_clear(prover_r[i][j][k]);
 			}
 		}
 	}
 	for (size_t i = 0; i < ETA; i++) {
 		fmpz_clear(r0[i]);
 	}
+	fmpz_mod_ctx_clear(ctx_q);
 	return 1;
 }
 
@@ -435,7 +478,7 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V],
 		fmpz_mod_poly_t lag[TAU + 1], flint_rand_t prng,
 		const fmpz_mod_ctx_t ctx) {
 	array < mpz_t, params::poly_q::degree > coeffs;
-	fmpz_mod_poly_t poly, r[R], _d[R];
+	fmpz_mod_poly_t poly, r[R];
 	fmpz_mod_ctx_t ctx_q;
 	fmpz_t q, y, x, beta0, beta[TAU][3];
 	params::poly_q one = 1;
@@ -464,7 +507,6 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V],
 	for (int i = 0; i < R; i++) {
 		fmpz_mod_poly_init(r[i], ctx_q);
 		fmpz_mod_poly_zero(r[i], ctx_q);
-		fmpz_mod_poly_init(_d[i], ctx);
 	}
 
 	for (int i = 1; i <= TAU; i++) {
@@ -501,11 +543,11 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V],
 	fmpz_clear(q);
 	fmpz_clear(x);
 	fmpz_clear(y);
-	fmpz_mod_poly_clear(poly, ctx);
+	fmpz_mod_poly_clear(poly, ctx_q);
 	for (int i = 0; i < R; i++) {
-		fmpz_mod_poly_clear(r[i], ctx);
-		fmpz_mod_poly_clear(_d[i], ctx);
+		fmpz_mod_poly_clear(r[i], ctx_q);
 	}
+	fmpz_mod_ctx_clear(ctx_q);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
 	}
@@ -634,15 +676,21 @@ static void test(flint_rand_t rand) {
 	}
 	fmpz_mod_poly_clear(poly, ctx);
 	fmpz_mod_ctx_clear(ctx);
+	fmpz_mod_ctx_clear(ctx_q);
 	fmpz_clear(q);
 	fmpz_clear(x);
 }
 
 int main() {
 	flint_rand_t rand;
-	flint_randinit(rand);
+	flint_rand_init(rand);
+	pismall_alloc();
 
 	printf("\n** Tests for lattice-based AEX proof:\n\n");
 	test(rand);
-	flint_randclear(rand);
+
+	pismall_free();
+	flint_rand_clear(rand);
+
+	return 0;
 }

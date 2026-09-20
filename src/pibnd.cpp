@@ -7,8 +7,46 @@
 
 #define R       (HEIGHT+1)
 #define V       (HEIGHT+3)
+/* Number of relations and of parallel repetitions. These drive every large
+ * buffer below, so they can be overridden (e.g. make CONFIG="-DTAU=10 -DNTI=8")
+ * to test on a small machine; the paper's benchmarks use the defaults. */
+#ifndef TAU
 #define TAU     1000
+#endif
+#ifndef NTI
 #define NTI     130
+#endif
+
+/* A params::poly_q is 64 KiB, so the matrices dimensioned by TAU or NTI are far
+ * too large to be locals: C[TAU][NTI] alone is about 8.5 GiB at the default
+ * parameters. They are allocated on the heap once at start-up, and the pointers
+ * below index exactly like the two-dimensional arrays they replace. The prover
+ * and the verifier each rederive W and C from the transcript, so one copy of
+ * each is enough for both.
+ *
+ * NOTE: with TAU = 1000 and NTI = 130 this binary needs roughly 9 GiB of RAM.
+ * Pass e.g. CONFIG="-DTAU=8 -DNTI=8" to make to try it on a smaller machine. */
+static params::poly_q A[R][V];
+static params::poly_q (*s)[V], (*t)[V];
+static params::poly_q (*Z)[NTI], (*W)[NTI], (*C)[NTI], (*SC)[NTI];
+
+static void pibnd_alloc(void) {
+	s = new params::poly_q[TAU][V];
+	t = new params::poly_q[TAU][V];
+	Z = new params::poly_q[V][NTI];
+	W = new params::poly_q[R][NTI];
+	C = new params::poly_q[TAU][NTI];
+	SC = new params::poly_q[V][NTI];
+}
+
+static void pibnd_free(void) {
+	delete[]s;
+	delete[]t;
+	delete[]Z;
+	delete[]W;
+	delete[]C;
+	delete[]SC;
+}
 
 static void pibnd_hash(uint8_t h[BLAKE3_OUT_LEN], params::poly_q A[R][V],
 		params::poly_q t[TAU][V], params::poly_q W[R][NTI]) {
@@ -83,7 +121,10 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 		}
 	}
 
-	getrandom(buf, sizeof(buf), 0);
+	if (getrandom(buf, sizeof(buf), 0) != sizeof(buf)) {
+		fprintf(stderr, "ERROR: could not read entropy for rejection sampling\n");
+		abort();
+	}
 	memcpy(&seed, buf, sizeof(buf));
 	gmp_randseed_ui(state, seed);
 	mpf_urandomb(u, state, mpf_get_default_prec());
@@ -95,6 +136,7 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	result |= mpf_get_d(u) > (1 / M);
 
 	mpf_clear(u);
+	gmp_randclear(state);
 	mpz_clears(dot, norm, qDivBy2, tmp, nullptr);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs0[i]);
@@ -186,7 +228,6 @@ void pibnd_sample_chall(params::poly_q & f) {
 static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		params::poly_q A[R][V], params::poly_q t[TAU][V],
 		params::poly_q s[TAU][V]) {
-	params::poly_q W[R][NTI], C[TAU][NTI], SC[V][NTI];
 	std::array < mpz_t, params::poly_q::degree > coeffs;
 	mpz_t qDivBy2;
 	int64_t coeff;
@@ -260,7 +301,6 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 
 int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		params::poly_q A[R][V], params::poly_q t[TAU][V]) {
-	params::poly_q W[R][NTI], C[TAU][NTI];
 	uint8_t h2[BLAKE3_OUT_LEN];
 	int result;
 
@@ -274,6 +314,9 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 			C[i][j].ntt_pow_phi();
 		}
 	}
+
+	/* Restore the global PRNG, which is still seeded with the public hash. */
+	nfl::fastrandombytes_reseed();
 
 	/* Verifier checks that W = AZ - TC. */
 	for (int i = 0; i < R; i++) {
@@ -309,7 +352,6 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 }
 
 static void test() {
-	params::poly_q A[R][V], s[TAU][V], t[TAU][V], Z[V][NTI];
 	uint8_t h1[BLAKE3_OUT_LEN];
 	std::array < mpz_t, params::poly_q::degree > coeffs;
 	gmp_randstate_t prng;
@@ -363,7 +405,6 @@ static void test() {
 }
 
 static void bench() {
-	params::poly_q A[R][V], s[TAU][V], t[TAU][V], Z[V][NTI];
 	uint8_t h1[BLAKE3_OUT_LEN];
 	std::array < mpz_t, params::poly_q::degree > coeffs;
 	gmp_randstate_t prng;
@@ -413,9 +454,14 @@ static void bench() {
 }
 
 int main(int argc, char *argv[]) {
+	pibnd_alloc();
+
 	printf("\n** Tests for lattice-based BND proof:\n\n");
 	test();
 
 	printf("\n** Benchmarks for lattice-based BND proof:\n\n");
 	bench();
+
+	pibnd_free();
+	return 0;
 }
