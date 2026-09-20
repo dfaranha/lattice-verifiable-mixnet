@@ -81,4 +81,11 @@ void test_fail(void);
  */
 void test_pass(void);
 
+/**
+ * Returns the number of failed tests, so that main() can exit non-zero. The
+ * test macros only print their verdict, so without this a failing run is
+ * indistinguishable from a passing one to anything reading the exit status.
+ */
+int test_failures(void);
+
 #endif /* !RLC_TEST_H */

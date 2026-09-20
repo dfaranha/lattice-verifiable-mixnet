@@ -333,6 +333,6 @@ int main(void) {
 	printf("\n** Benchmarks for BGV encryption:\n\n");
 	bench();
 
-	return 0;
+	return test_failures() != 0;
 }
 #endif

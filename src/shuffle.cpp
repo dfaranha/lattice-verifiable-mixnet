@@ -686,6 +686,6 @@ int main(int argc, char *argv[]) {
 	bench();
 
 	shuffle_free();
-	return 0;
+	return test_failures() != 0;
 }
 #endif

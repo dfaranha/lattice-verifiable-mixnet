@@ -118,7 +118,10 @@ static void reset_font(void) {
 /* Public definitions                                                         */
 /*============================================================================*/
 
+static int failures = 0;
+
 void test_fail(void) {
+	failures++;
 	fail_font();
 	printf("[FAIL]\n");
 	reset_font();
@@ -128,4 +131,8 @@ void test_pass(void) {
 	pass_font();
 	printf("[PASS]\n");
 	reset_font();
+}
+
+int test_failures(void) {
+	return failures;
 }

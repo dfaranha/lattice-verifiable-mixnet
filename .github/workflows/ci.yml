@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Ubuntu ships FLINT 2.8.4 on 22.04 and 3.0.1 on 24.04, both older than the
+  # 3.1 this code requires, and there is no runner image for the 25.04 that
+  # carries 3.1.3. So FLINT is built from source and cached on its version.
+  FLINT_VERSION: "3.6.0"
+  FLINT_PREFIX: /home/runner/flint
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    env:
+      LD_LIBRARY_PATH: /home/runner/flint/lib
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libgmp-dev libmpfr-dev
+
+      - name: Cache FLINT
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FLINT_PREFIX }}
+          key: flint-${{ env.FLINT_VERSION }}-ubuntu-24.04
+
+      - name: Build FLINT
+        if: steps.flint.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL "https://github.com/flintlib/flint/releases/download/v$FLINT_VERSION/flint-$FLINT_VERSION.tar.gz" | tar xz
+          cd "flint-$FLINT_VERSION"
+          ./configure --prefix="$FLINT_PREFIX"
+          make -j"$(nproc)"
+          make install
+
+      - name: Build NFLlib
+        run: |
+          mkdir -p deps
+          cd deps
+          cmake ../NFLlib -DCMAKE_BUILD_TYPE=Release -DNFL_OPTIMIZED=ON
+          make -j"$(nproc)"
+
+      # The paper's parameters need tens of gigabytes and hours, which a runner
+      # has neither of. These sizes exercise the same code paths at a size that
+      # fits, which is what the Makefile's CONFIG hook exists for. TAU must stay
+      # a power of two: the interpolation nodes are the TAU-th roots of unity.
+      # BENCH=1 keeps the benchmark section from dominating the run.
+      - name: Test bdlop and bgv
+        run: |
+          make CONFIG="-I$FLINT_PREFIX/include -DBENCH=1" \
+               FLINT="-L$FLINT_PREFIX/lib -lflint" bdlop bgv
+          ./bdlop
+          ./bgv
+
+      - name: Test pismall
+        run: |
+          make clean
+          make CONFIG="-I$FLINT_PREFIX/include -DBENCH=1 -DTAU=8" \
+               FLINT="-L$FLINT_PREFIX/lib -lflint" pismall
+          ./pismall
+
+      - name: Test pibnd
+        run: |
+          make clean
+          make CONFIG="-I$FLINT_PREFIX/include -DBENCH=1 -DTAU=8 -DNTI=8" \
+               FLINT="-L$FLINT_PREFIX/lib -lflint" pibnd
+          ./pibnd
+
+      # Both parities: shuffle_prover negates the last term when MSGS is odd,
+      # so an even-only run leaves that branch untested.
+      - name: Test shuffle
+        run: |
+          for n in 4 5; do
+            make clean
+            make CONFIG="-I$FLINT_PREFIX/include -DBENCH=1 -DMSGS=$n" \
+                 FLINT="-L$FLINT_PREFIX/lib -lflint" shuffle
+            ./shuffle
+          done
+
+  sanitizers:
+    name: AddressSanitizer and UBSan
+    runs-on: ubuntu-24.04
+    # Informational. These proofs have never been run under a sanitizer, so a
+    # first failure here is a finding to triage, not a broken build. Drop this
+    # line once the job is known to be green.
+    continue-on-error: true
+    env:
+      LD_LIBRARY_PATH: /home/runner/flint/lib
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libgmp-dev libmpfr-dev
+
+      - name: Cache FLINT
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FLINT_PREFIX }}
+          key: flint-${{ env.FLINT_VERSION }}-ubuntu-24.04
+
+      - name: Build FLINT
+        if: steps.flint.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL "https://github.com/flintlib/flint/releases/download/v$FLINT_VERSION/flint-$FLINT_VERSION.tar.gz" | tar xz
+          cd "flint-$FLINT_VERSION"
+          ./configure --prefix="$FLINT_PREFIX"
+          make -j"$(nproc)"
+          make install
+
+      - name: Build NFLlib
+        run: |
+          mkdir -p deps
+          cd deps
+          cmake ../NFLlib -DCMAKE_BUILD_TYPE=Release -DNFL_OPTIMIZED=ON
+          make -j"$(nproc)"
+
+      # -march=native stays, because NFLlib is built with NTT_AVX2 and needs it.
+      # -flto is dropped: it obscures sanitizer stack traces. Leak detection is
+      # off because NFLlib and FLINT both keep static caches alive at exit.
+      - name: Build and run under sanitizers
+        run: |
+          make CONFIG="-I$FLINT_PREFIX/include -DBENCH=1 -DTAU=8" \
+               FLINT="-L$FLINT_PREFIX/lib -lflint" \
+               OPT="-O1 -march=native -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
+               bdlop bgv pismall
+          ./bdlop
+          ./bgv
+          ./pismall

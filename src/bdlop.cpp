@@ -442,6 +442,6 @@ int main(void) {
 	printf("\n** Benchmarks for lattice-based commitments:\n\n");
 	bench();
 
-	return 0;
+	return test_failures() != 0;
 }
 #endif

@@ -479,5 +479,5 @@ int main(int argc, char *argv[]) {
 	bench();
 
 	pibnd_free();
-	return 0;
+	return test_failures() != 0;
 }

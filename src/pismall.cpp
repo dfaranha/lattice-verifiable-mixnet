@@ -1914,5 +1914,5 @@ int main() {
 	pismall_free();
 	flint_rand_clear(rand);
 
-	return 0;
+	return test_failures() != 0;
 }
