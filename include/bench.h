@@ -8,9 +8,12 @@
 /*============================================================================*/
 
 /**
- * Number of times each benchmark is ran.
+ * Number of times each benchmark is ran. Overridable, so that a run at large
+ * parameters can use fewer repetitions.
  */
+#ifndef BENCH
 #define BENCH 	10
+#endif
 
 /**
  * Runs a new benchmark once.

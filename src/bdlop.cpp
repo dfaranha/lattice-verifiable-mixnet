@@ -74,7 +74,7 @@ void bdlop_sample_uniform(params::poly_q &f) {
 		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
 	}
 
-	mpz_set_str(q, PRIMEQ, 10);
+	mpz_set(q, params::poly_q::moduli_product());
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_urandomm(coeffs[i], prng, q);
 	}
@@ -98,7 +98,7 @@ void bdlop_reduce(params::poly_q &f) {
 
 	f.invntt_pow_invphi();
 	f.poly2mpz(coeffs);
-	mpz_set_str(q, PRIMEQ, 10);
+	mpz_set(q, params::poly_q::moduli_product());
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_mod(coeffs[i], coeffs[i], q);
 	}

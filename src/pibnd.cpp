@@ -380,7 +380,7 @@ static void test() {
 
 	/* Create instances. */
 	gmp_randinit_default(prng);
-	mpz_set_str(q, PRIMEQ, 10);
+	mpz_set(q, params::poly_q::moduli_product());
 	for (int i = 0; i < R; i++) {
 		for (int j = 0; j < V; j++) {
 			for (size_t k = 0; k < params::poly_q::degree; k++) {
@@ -433,7 +433,7 @@ static void bench() {
 
 	/* Create instances. */
 	gmp_randinit_default(prng);
-	mpz_set_str(q, PRIMEQ, 10);
+	mpz_set(q, params::poly_q::moduli_product());
 	for (int i = 0; i < R; i++) {
 		for (int j = 0; j < V; j++) {
 			for (size_t k = 0; k < params::poly_q::degree; k++) {

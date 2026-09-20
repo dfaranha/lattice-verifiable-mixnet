@@ -17,7 +17,12 @@ DEFINE   = -DNFL_OPTIMIZED=ON -DNTT_AVX2
 CONFIG   =
 CFLAGS   = $(STD) $(OPT) $(WARN) -ggdb $(INCLUDE) $(DEFINE) $(CONFIG) -MMD -MP
 
-LIBS     = deps/libnfllib_static.a -lgmp -lmpfr -L deps/ -lflint -lquadmath
+LIBS     = deps/libnfllib_static.a -lgmp -lmpfr -lquadmath
+# Only pismall uses FLINT, for GR(q,2) scalar arithmetic and for the dense
+# polynomials over Z_q that are not in the NTT domain. Everything else works
+# through NFLlib, so linking it everywhere only obscured which binary actually
+# depends on it.
+FLINT    = -L deps/ -lflint
 
 OBJ      = obj
 BIN      = bdlop bgv shuffle pismall pibnd
@@ -68,7 +73,7 @@ shuffle: src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/sample_z_small.o $(COMMON) $(BLAK
 
 pismall: src/pismall.cpp $(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3)
 	$(CPP) $(CFLAGS) -DSIZE=3 -DMAIN src/pismall.cpp \
-		$(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3) -o $@ $(LIBS)
+		$(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
 
 pibnd: src/pibnd.cpp $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3)
 	$(CPP) $(CFLAGS) -DMAIN src/pibnd.cpp $(OBJ)/sample_z_small.o \

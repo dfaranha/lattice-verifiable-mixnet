@@ -1,11 +1,6 @@
 #include <math.h>
 #include <stdlib.h>
 
-#include <flint/flint.h>
-#include <flint/fmpz_mod_poly.h>
-
-#include "flint_util.h"
-
 #include "blake3.h"
 #include "common.h"
 #include "test.h"
@@ -122,48 +117,49 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 	nfl::fastrandombytes_reseed();
 }
 
-static void poly_inverse(params::poly_q & inv, params::poly_q p) {
-	std::array < mpz_t, params::poly_q::degree > coeffs;
-	fmpz_t q;
-	fmpz_mod_poly_t poly, irred;
-	fmpz_mod_ctx_t ctx_q;
+/* a^-1 mod pm, by the extended Euclidean algorithm. Every modulus of the basis
+ * is 39 bits, so the Bezout coefficients stay well inside int64_t. */
+static uint64_t residue_inverse(uint64_t a, uint64_t pm) {
+	int64_t t = 0, t1 = 1, r = (int64_t) pm, r1 = (int64_t) a, quo, tmp;
 
-	fmpz_init(q);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
+	while (r1 != 0) {
+		quo = r / r1;
+		tmp = t - quo * t1;
+		t = t1;
+		t1 = tmp;
+		tmp = r - quo * r1;
+		r = r1;
+		r1 = tmp;
+	}
+	return (uint64_t) (t < 0 ? t + (int64_t) pm : t);
+}
+
+/* Inverse in R_q. In the NTT domain R_q is a product of N * nmoduli copies of
+ * Z_{p_cm}, so this is just a residue-wise inversion. Both arguments are in
+ * that domain and may alias. Each p_cm is prime, so p is invertible exactly
+ * when no residue is zero; otherwise return 0 and leave inv alone. */
+static int poly_inverse(params::poly_q & inv, const params::poly_q & p) {
+	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
+		for (size_t i = 0; i < params::poly_q::degree; i++) {
+			if (p(cm, i) == 0) {
+				return 0;
+			}
+		}
 	}
 
-	fmpz_set_mpz(q, params::poly_q::moduli_product());
-	fmpz_mod_ctx_init(ctx_q, q);
-	fmpz_mod_poly_init(poly, ctx_q);
-	fmpz_mod_poly_init(irred, ctx_q);
-
-	p.poly2mpz(coeffs);
-	fmpz_mod_poly_set_coeff_ui(irred, params::poly_q::degree, 1, ctx_q);
-	fmpz_mod_poly_set_coeff_ui(irred, 0, 1, ctx_q);
-
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		flint_poly_set_coeff_mpz(poly, i, coeffs[i], ctx_q);
+	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
+		uint64_t pm = nfl::params < uint64_t >::P[cm];
+		for (size_t i = 0; i < params::poly_q::degree; i++) {
+			inv(cm, i) = residue_inverse(p(cm, i), pm);
+		}
 	}
-	fmpz_mod_poly_invmod(poly, poly, irred, ctx_q);
-
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		flint_poly_get_coeff_mpz(coeffs[i], poly, i, ctx_q);
-	}
-
-	inv.mpz2poly(coeffs);
-
-	fmpz_mod_poly_clear(poly, ctx_q);
-	fmpz_mod_poly_clear(irred, ctx_q);
-	fmpz_mod_ctx_clear(ctx_q);
-	fmpz_clear(q);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(coeffs[i]);
-	}
+	return 1;
 }
 
 static void simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
 	params::poly_q w;
+	int ok;
+
 	inv[0] = m[0];
 	inv_tmp[0] = m[0];
 
@@ -173,9 +169,12 @@ static void simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
 	}
 
 	w = inv[MSGS - 1];
-	w.invntt_pow_invphi();
-	poly_inverse(w, w);
-	w.ntt_pow_phi();
+	/* The product of the shuffled messages behaves like a uniform element of
+	 * R_q, so the only way this fails -- one of its 2N NTT residues being zero
+	 * -- has probability about 2N/p_min, which is around 2^-26. */
+	ok = poly_inverse(w, w);
+	assert(ok == 1);
+	(void) ok;
 
 	for (size_t i = MSGS - 1; i > 0; i--) {
 		inv[i] = w * inv[i - 1];
@@ -578,16 +577,25 @@ static void test() {
 	}
 
 	TEST_ONCE("polynomial inverse is correct") {
+		/* nfl::uniform() fills the residues directly, so alpha[0] is already a
+		 * uniform element of the NTT domain, which is where poly_inverse works.
+		 * Multiplying twice by the inverse gives the inverse back, which avoids
+		 * having to build the constant 1 to compare against. */
 		params::poly_q alpha[2] = { nfl::uniform(), nfl::uniform() };
 
-		poly_inverse(alpha[1], alpha[0]);
-		alpha[0].ntt_pow_phi();
-		alpha[1].ntt_pow_phi();
+		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 1, end);
 		alpha[0] = alpha[0] * alpha[1];
 		alpha[0] = alpha[0] * alpha[1];
-		alpha[0].invntt_pow_invphi();
-		alpha[1].invntt_pow_invphi();
 		TEST_ASSERT(alpha[0] == alpha[1], end);
+	} TEST_END;
+
+	TEST_ONCE("polynomial inverse reports a zero divisor") {
+		/* A single zero residue makes the element a zero divisor. This used to
+		 * pass silently, leaving a zero polynomial to flow into the proof. */
+		params::poly_q alpha[2] = { nfl::uniform(), nfl::uniform() };
+
+		alpha[0](0, 0) = 0;
+		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 0, end);
 	} TEST_END;
 
 	TEST_ONCE("shuffle proof is consistent") {
@@ -612,7 +620,6 @@ static void microbench() {
 		BENCH_ADD(alpha[0] = alpha[0] * alpha[1]);
 	} BENCH_END;
 
-	alpha[0].invntt_pow_invphi();
 	BENCH_BEGIN("Polynomial inverse") {
 		BENCH_ADD(poly_inverse(alpha[1], alpha[0]));
 	} BENCH_END;
