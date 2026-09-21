@@ -4,6 +4,7 @@
 #include "test.h"
 #include "bench.h"
 #include "common.h"
+#include "pibnd.h"
 #include "sample_z_small.h"
 #include "sample_z_large.h"
 
@@ -27,7 +28,14 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
 }
 
 #define R       (HEIGHT+1)
-#define V       (HEIGHT+3)
+/* Number of witness components. The mix-net's own instance of this proof has
+ * V = HEIGHT + 3; the proof of shuffle links this file with V = WIDTH + 1, the
+ * shape of a BDLOP commitment equation, to bound the norm of the openings of
+ * its commitments to the sigma_i. */
+#ifndef PIBND_V
+#define PIBND_V (HEIGHT+3)
+#endif
+#define V       PIBND_V
 /* Number of relations and of parallel repetitions. These drive every large
  * buffer below, so they can be overridden (e.g. make CONFIG="-DTAU=10 -DNTI=8")
  * to test on a small machine; the paper's benchmarks use the defaults. */
@@ -41,6 +49,13 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
 /* Number of rows of S' handled by the first of the two rejection-sampling
  * checks; the last row is handled by the second. */
 #define ANEX_K      (V - 1)
+
+/* How many times the prover retries rejection sampling before giving up and
+ * emitting the masked opening it has. An honest prover passes both checks with
+ * probability about 1/3, so giving up is a 3^-64 event; a prover whose witness
+ * is not short never passes, and emitting the opening lets the verifier reject
+ * it on the norm test instead of looping here forever. */
+#define PIBND_TRIES 64
 
 /* Infinity-norm bound on the last witness row (the decryption noise E in the
  * mix-net; ternary like the others in the test below). */
@@ -63,9 +78,9 @@ static const double SIGMA_ANEX_HAT =
 /* Whether the last row needs the quad-precision sampler. sigma-hat_ANEx runs
  * past 2^64 when the last witness row is the mix-net's decryption noise, whose
  * infinity norm is far above BETA, and then it does. When the row is as short
- * as the others, sigma-hat is a few thousand and the double sampler covers it,
- * at two orders of magnitude less time. Both sides of the branch are
- * compile-time constant.
+ * as the others -- the proof of shuffle bounds a committed monomial with it --
+ * sigma-hat is a few thousand and the double sampler covers it, at two orders
+ * of magnitude less time. Both sides of the branch are compile-time constant.
  */
 static const bool ANEX_HAT_LARGE = SIGMA_ANEX_HAT > 1e15;
 
@@ -252,7 +267,7 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 	std::array < mpz_t, params::poly_q::degree > coeffs;
 	mpz_t qDivBy2;
 	__int128 coeff;
-	int rej0, rej1;
+	int rej0, rej1, tries = 0;
 
 	mpz_init(qDivBy2);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
@@ -321,7 +336,7 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 				SIGMA_ANEX * SIGMA_ANEX);
 		rej1 = pibnd_rej_sampling(Z, SC, ANEX_K, V,
 				SIGMA_ANEX_HAT * SIGMA_ANEX_HAT);
-	} while (rej0 || rej1);
+	} while ((rej0 || rej1) && ++tries < PIBND_TRIES);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
@@ -378,6 +393,136 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 	return result;
 }
 
+/* --- The norm bound used by the proof of shuffle ------------------------- */
+
+struct pibnd_short {
+	uint8_t h[BLAKE3_OUT_LEN];
+	params::poly_q (*Z)[NTI];
+};
+
+static int short_ready;
+static params::poly_q (*short_scratch)[NTI];
+
+static void pibnd_short_init(void) {
+	if (short_ready) {
+		return;
+	}
+	pibnd_alloc();
+	/* pibnd_verifier() takes Z out of the NTT domain to measure it, so it is
+	 * given a copy and the proof stays verifiable more than once. */
+	short_scratch = new params::poly_q[V][NTI];
+	short_ready = 1;
+}
+
+void pibnd_short_clear(void) {
+	if (!short_ready) {
+		return;
+	}
+	delete[]short_scratch;
+	pibnd_free();
+	short_ready = 0;
+}
+
+/* The relation is the BDLOP commitment equation, with the committed message as
+ * the last witness component:
+ *
+ *   row 0    P_i.c1 = r_0 + sum_j A1[0][j] r_{j+HEIGHT}
+ *   row 1    P_i.c2 = sum_j A2[0][j] r_j + sigma_i
+ *
+ * that is R = HEIGHT + 1 rows and V = WIDTH + 1 components. It is the relation
+ * the membership proof of pismall.cpp uses as well, minus the row carrying
+ * Y = w sigma, which the norm bound has no use for: Y is determined by sigma
+ * over the integers once sigma is known to be binary. Both prover and verifier
+ * build it from the commitment key alone.
+ */
+static void pibnd_commit_matrix(comkey_t & key) {
+	params::poly_q one = 1;
+
+	one.ntt_pow_phi();
+	for (int i = 0; i < R; i++) {
+		for (int j = 0; j < V; j++) {
+			A[i][j] = 0;
+		}
+	}
+	A[0][0] = one;
+	for (int j = 0; j < WIDTH - HEIGHT; j++) {
+		A[0][j + HEIGHT] = key.A1[0][j];
+	}
+	for (int j = 0; j < WIDTH; j++) {
+		A[1][j] = key.A2[0][j];
+	}
+	A[1][WIDTH] = one;
+}
+
+/* The public part, which is the commitment itself. The columns past the R
+ * rows of the relation are unused, but pibnd_hash() reads all V of them, so
+ * they are zeroed rather than left to whatever the allocator returned. */
+static void pibnd_commit_stmt(const commit_t * P) {
+	for (size_t i = 0; i < TAU; i++) {
+		t[i][0] = P[i].c1;
+		t[i][1] = P[i].c2[0];
+		for (int j = R; j < V; j++) {
+			t[i][j] = 0;
+		}
+	}
+}
+
+static void pibnd_commit_wit(const vector < params::poly_q > *r,
+		const params::poly_q * sigma) {
+	params::poly_q sg;
+
+	for (size_t i = 0; i < TAU; i++) {
+		for (int j = 0; j < WIDTH; j++) {
+			s[i][j] = r[i][j];
+		}
+		sg = sigma[i];
+		sg.ntt_pow_phi();
+		s[i][WIDTH] = sg;
+	}
+}
+
+pibnd_short_t *pibnd_short_prove(comkey_t & key, commit_t * P,
+		vector < params::poly_q > *r, params::poly_q * sigma, size_t n) {
+	pibnd_short_t *pi = new pibnd_short_t;
+
+	assert(n == TAU);
+	pibnd_short_init();
+	pibnd_commit_matrix(key);
+	pibnd_commit_stmt(P);
+	pibnd_commit_wit(r, sigma);
+
+	pi->Z = new params::poly_q[V][NTI];
+	pibnd_prover(pi->h, pi->Z, A, t, s);
+
+	return pi;
+}
+
+int pibnd_short_verify(pibnd_short_t * pi, comkey_t & key, commit_t * P,
+		size_t n) {
+	if (pi == NULL || n != TAU) {
+		return 0;
+	}
+	pibnd_short_init();
+	pibnd_commit_matrix(key);
+	pibnd_commit_stmt(P);
+	for (int i = 0; i < V; i++) {
+		for (int j = 0; j < NTI; j++) {
+			short_scratch[i][j] = pi->Z[i][j];
+		}
+	}
+
+	return pibnd_verifier(pi->h, short_scratch, A, t);
+}
+
+void pibnd_short_free(pibnd_short_t * pi) {
+	if (pi == NULL) {
+		return;
+	}
+	delete[]pi->Z;
+	delete pi;
+}
+
+#ifdef MAIN
 static void test() {
 	uint8_t h1[BLAKE3_OUT_LEN];
 	std::array < mpz_t, params::poly_q::degree > coeffs;
@@ -492,3 +637,4 @@ int main(int argc, char *argv[]) {
 	pibnd_free();
 	return test_failures() != 0;
 }
+#endif

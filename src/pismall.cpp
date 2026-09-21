@@ -8,6 +8,7 @@
 #include "flint_util.h"
 
 #include "common.h"
+#include "pismall.h"
 #include "test.h"
 #include "bench.h"
 #include <assert.h>
@@ -172,6 +173,7 @@ static void gr_pow_ui(gr_t & r, const gr_t & a, ulong e,
 }
 
 
+#ifdef MAIN
 /* Sample a ring element whose coefficients are uniform over the set, which
  * hwt_dist and ZO_dist between them do not cover. */
 static void aex_sample_set(params::poly_q & out, aex_set_t set) {
@@ -196,6 +198,7 @@ static void aex_sample_set(params::poly_q & out, aex_set_t set) {
 		mpz_clear(c[i]);
 	}
 }
+#endif
 
 /* Everything dimensioned by TAU is far too large to be a local: at TAU = 1000,
  * s is 512 MiB, H is 786 MiB, and the prover's v_i,j are 3 * TAU * V arrays of
@@ -204,8 +207,8 @@ static void aex_sample_set(params::poly_q & out, aex_set_t set) {
  *
  * NOTE: at TAU = 1000 this binary needs several gigabytes of RAM. Pass e.g.
  * CONFIG=-DTAU=8 to make to try it on a smaller machine. */
-params::poly_q A[R][V];
-params::poly_q (*s)[V], (*t)[R];
+static params::poly_q A[R][V];
+static params::poly_q (*s)[V], (*t)[R];
 static array < mpz_t, params::poly_q::degree > (*v)[TAU][V];
 static gr_t *prover_y;                      /* prover_y[i] = l_i(x) */
 static gr_t (*prover_beta)[3];
@@ -1031,6 +1034,114 @@ static void aex_extract(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
 	}
 }
 
+
+/* w = 2 - sum_j x^j, the multiplier that turns "binary of Hamming weight one"
+ * into something pointwise. For binary sigma, (sigma w)_i = S - 2 A_{i-1},
+ * with S the weight and A the partial sums, so every coefficient of sigma w
+ * lies in {-1, 1} exactly when S = 1, that is when sigma is a monomial. */
+static void aex_weight_multiplier(params::poly_q & w) {
+	array < mpz_t, params::poly_q::degree > c;
+	mpz_t q;
+
+	mpz_init(q);
+	mpz_set(q, params::poly_q::moduli_product());
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_init2(c[i], (params::poly_q::bits_in_moduli_product() << 2));
+		if (i == 0) {
+			mpz_set_ui(c[i], 1);            /* 2 - 1 */
+		} else {
+			mpz_sub_ui(c[i], q, 1);         /* -1 */
+		}
+	}
+	w.mpz2poly(c);
+	w.ntt_pow_phi();
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(c[i]);
+	}
+	mpz_clear(q);
+}
+
+/* Build the rows of the monomial relation. It is the commitment equation
+ * itself, so the witness the proof binds is an opening of P_i: no link between
+ * two commitment schemes is needed, which is what makes the proof usable by
+ * the shuffle, where sigma_i has to be the value inside the commitment the
+ * linear proof already speaks about.
+ *
+ *   row 0    P_i.c1 = r_0 + sum_j A1[0][j] r_{j+1}
+ *   row 1    P_i.c2 = sum_j A2[0][j] r_j + sigma_i
+ *   row 2    0      = Y_i - w sigma_i
+ *
+ * with r ternary, sigma_i binary and Y_i in {-1, 1}. The dimensions are
+ * exactly R = HEIGHT + 2 rows and WIDTH + 2 of the V = WIDTH + 3 components.
+ * Both prover and verifier build it from the commitment key alone.
+ */
+static void aex_monomial_matrix(comkey_t & key) {
+	params::poly_q w, one = 1, zero = 0;
+
+	one.ntt_pow_phi();
+	aex_weight_multiplier(w);
+
+	for (int i = 0; i < R; i++) {
+		for (int j = 0; j < V; j++) {
+			A[i][j] = 0;
+		}
+	}
+	A[0][0] = one;
+	for (int j = 0; j < WIDTH - HEIGHT; j++) {
+		A[0][j + HEIGHT] = key.A1[0][j];
+	}
+	for (int j = 0; j < WIDTH; j++) {
+		A[1][j] = key.A2[0][j];
+	}
+	A[1][WIDTH] = one;
+	A[2][WIDTH] = zero - w;
+	A[2][WIDTH + 1] = one;
+
+	for (int j = 0; j < V; j++) {
+		aex_sets[j] = AEX_TER;
+	}
+	aex_sets[WIDTH] = AEX_BIN;
+	aex_sets[WIDTH + 1] = AEX_SGN;
+}
+
+/* The public part of the relation, which is the commitment itself. TAU is a
+ * power of two and the caller may have fewer commitments than that, so the
+ * spare relations repeat the first one: proving the same statement twice costs
+ * nothing and keeps the padding off the transcript. */
+static void aex_monomial_stmt(const commit_t * P, size_t n) {
+	for (size_t i = 0; i < TAU; i++) {
+		const commit_t & p = P[i < n ? i : 0];
+
+		t[i][0] = p.c1;
+		t[i][1] = p.c2[0];
+		for (int j = 2; j < R; j++) {
+			t[i][j] = 0;
+		}
+	}
+}
+
+/* The witness: the opening of P_i, together with Y_i = w sigma_i. */
+static void aex_monomial_wit(const vector < params::poly_q > *r,
+		const params::poly_q * sigma, size_t n) {
+	params::poly_q w, sg;
+
+	aex_weight_multiplier(w);
+	for (size_t i = 0; i < TAU; i++) {
+		size_t k = (i < n ? i : 0);
+
+		sg = sigma[k];
+		sg.ntt_pow_phi();
+		for (int j = 0; j < WIDTH; j++) {
+			s[i][j] = r[k][j];
+		}
+		s[i][WIDTH] = sg;
+		s[i][WIDTH + 1] = w * sg;
+		for (int j = WIDTH + 2; j < V; j++) {
+			s[i][j] = 0;
+		}
+	}
+}
+
 static void pismall_hash(gr_t & x, gr_t & beta0, gr_t beta[TAU][3], fmpz_t q,
 		commit_t & com, const uint8_t root[BLAKE3_OUT_LEN]) {
 	uint8_t hash[BLAKE3_OUT_LEN];
@@ -1654,6 +1765,187 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][2],
 	return result;
 }
 
+/* --- The membership sub-proof used by the proof of shuffle --------------- */
+
+/* Setup shared by every membership proof: the interpolation nodes and the
+ * Lagrange basis depend on TAU alone, so they are built once. */
+/* One pass of the proof. The soundness error of a single pass is not
+ * negligible -- the challenge lives in GR(q,2), so one pass is worth about
+ * deg/p_min^2 -- so a proof is AEX_REPS independent passes and the verifier
+ * requires every one of them, exactly as the test of this file runs it. */
+struct pismall_pass {
+	commit_t com;
+	vector < params::poly_q > rd;
+	fmpz_mod_poly_t f[V][2], h[2][V][2];
+	gr_t rf[ETA], rh[ETA];
+	aex_open_t o;
+};
+
+struct pismall_mono {
+	pismall_pass pass[AEX_REPS];
+};
+
+static int mono_ready;
+static flint_rand_t mono_rand;
+static fmpz_mod_ctx_t mono_ctx;
+static fmpz_t mono_q, mono_a[TAU];
+static fmpz_mod_poly_t mono_lag[TAU + 1];
+
+static void pismall_mono_init(void) {
+	fmpz_t w;
+
+	if (mono_ready) {
+		return;
+	}
+	pismall_alloc();
+	flint_rand_init(mono_rand);
+	fmpz_init(mono_q);
+	fmpz_set_mpz(mono_q, params::poly_q::moduli_product());
+	fmpz_mod_ctx_init(mono_ctx, mono_q);
+	aex_ntt_setup(mono_ctx);
+	for (size_t i = 0; i <= TAU; i++) {
+		fmpz_mod_poly_init(mono_lag[i], mono_ctx);
+	}
+	fmpz_init(w);
+	aex_root_tau(w, mono_ctx);
+	for (size_t i = 0; i < TAU; i++) {
+		fmpz_init(mono_a[i]);
+		fmpz_mod_pow_ui(mono_a[i], w, i, mono_ctx);
+	}
+	fmpz_clear(w);
+	pismall_setup(mono_lag, mono_a, mono_q, mono_rand, mono_ctx);
+	mono_ready = 1;
+}
+
+void pismall_mono_clear(void) {
+	if (!mono_ready) {
+		return;
+	}
+	for (size_t i = 0; i <= TAU; i++) {
+		fmpz_mod_poly_clear(mono_lag[i], mono_ctx);
+	}
+	for (size_t i = 0; i < TAU; i++) {
+		fmpz_clear(mono_a[i]);
+	}
+	aex_ntt_clear();
+	fmpz_mod_ctx_clear(mono_ctx);
+	fmpz_clear(mono_q);
+	flint_rand_clear(mono_rand);
+	pismall_free();
+	mono_ready = 0;
+}
+
+pismall_mono_t *pismall_mono_prove(comkey_t & key, commit_t * P,
+		vector < params::poly_q > *r, params::poly_q * sigma, size_t n) {
+	pismall_mono_t *pi = new pismall_mono_t;
+	gr_t x;
+
+	assert(n >= 1 && n <= TAU);
+	pismall_mono_init();
+	aex_monomial_matrix(key);
+	aex_monomial_stmt(P, n);
+	aex_monomial_wit(r, sigma, n);
+
+	gr_init(x);
+	for (int rep = 0; rep < AEX_REPS; rep++) {
+		pismall_pass & ps = pi->pass[rep];
+
+		for (int i = 0; i < V; i++) {
+			for (int c = 0; c < 2; c++) {
+				fmpz_mod_poly_init(ps.f[i][c], mono_ctx);
+				fmpz_mod_poly_init(ps.h[0][i][c], mono_ctx);
+				fmpz_mod_poly_init(ps.h[1][i][c], mono_ctx);
+			}
+		}
+		for (size_t i = 0; i < ETA; i++) {
+			gr_init(ps.rf[i]);
+			gr_init(ps.rh[i]);
+		}
+		ps.rd.resize(WIDTH);
+		bdlop_sample_rand(ps.rd);
+		pismall_prover(ps.com, x, ps.f, ps.rf, ps.h, ps.rh, ps.rd, key,
+				mono_lag, mono_rand, mono_ctx, ps.o);
+	}
+	gr_clear(x);
+
+	return pi;
+}
+
+int pismall_mono_verify(pismall_mono_t * pi, comkey_t & key, commit_t * P,
+		size_t n) {
+	if (pi == NULL || n < 1 || n > TAU) {
+		return 0;
+	}
+	pismall_mono_init();
+	aex_monomial_matrix(key);
+	aex_monomial_stmt(P, n);
+
+	int result = 1;
+	for (int rep = 0; rep < AEX_REPS; rep++) {
+		pismall_pass & ps = pi->pass[rep];
+
+		result &= pismall_verifier(ps.com, ps.f, ps.rf, ps.h, ps.rh, ps.rd,
+				key, mono_lag, mono_rand, mono_ctx, ps.o);
+	}
+
+	return result;
+}
+
+void pismall_mono_free(pismall_mono_t * pi) {
+	if (pi == NULL) {
+		return;
+	}
+	for (int rep = 0; rep < AEX_REPS; rep++) {
+		pismall_pass & ps = pi->pass[rep];
+
+		for (int i = 0; i < V; i++) {
+			for (int c = 0; c < 2; c++) {
+				fmpz_mod_poly_clear(ps.f[i][c], mono_ctx);
+				fmpz_mod_poly_clear(ps.h[0][i][c], mono_ctx);
+				fmpz_mod_poly_clear(ps.h[1][i][c], mono_ctx);
+			}
+		}
+		for (size_t i = 0; i < ETA; i++) {
+			gr_clear(ps.rf[i]);
+			gr_clear(ps.rh[i]);
+		}
+		aex_open_clear(ps.o);
+	}
+	delete pi;
+}
+
+#ifdef MAIN
+/* Commit to TAU monomials x^i, or, when weight is larger than one, to binary
+ * elements of that Hamming weight, and build the relation for them. */
+static void aex_monomial_test_setup(comkey_t & key, commit_t * P,
+		vector < params::poly_q > *r, params::poly_q * sigma, size_t weight) {
+	array < mpz_t, params::poly_q::degree > c;
+	vector < params::poly_q > msg(1);
+
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_init2(c[i], (params::poly_q::bits_in_moduli_product() << 2));
+	}
+	for (size_t i = 0; i < TAU; i++) {
+		for (size_t l = 0; l < params::poly_q::degree; l++) {
+			mpz_set_ui(c[l], 0);
+		}
+		for (size_t k = 0; k < weight; k++) {
+			mpz_set_ui(c[(i + k) % params::poly_q::degree], 1);
+		}
+		sigma[i].mpz2poly(c);
+		msg[0] = sigma[i];
+		r[i].resize(WIDTH);
+		bdlop_sample_rand(r[i]);
+		bdlop_commit(P[i], msg, key, r[i]);
+	}
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(c[i]);
+	}
+	aex_monomial_matrix(key);
+	aex_monomial_stmt(P, TAU);
+	aex_monomial_wit(r, sigma, TAU);
+}
+
 static void test(flint_rand_t rand) {
 	fmpz_t q, a[TAU];
 	gr_t x, rf[ETA], rh[ETA];
@@ -1939,6 +2231,42 @@ static void test(flint_rand_t rand) {
 		TEST_ASSERT(rejected == 1, end);
 	} TEST_END;
 
+	TEST_ONCE("KNOWN GAP: the coefficient sets are per CRT component") {
+		/* Not a gap in the proof of shuffle, which compensates with a norm
+		 * bound, but a gap in what Pi_SMALL establishes on its own. */
+		/* q is composite, so f^3 - f has 27 roots in Z_q and not 3: every CRT
+		 * combination of {-1, 0, 1} satisfies the identity the proof checks.
+		 * The witness below is +1 modulo the first prime and -1 modulo the
+		 * second in every coefficient, which is as far from ternary over Z_q
+		 * as an element gets, and the proof accepts it. The same holds for the
+		 * binary and sign sets, so the monomial instance above establishes
+		 * membership in D only up to a CRT mix; the proof of shuffle rules
+		 * that out with a norm bound from pibnd.cpp rather than here. See
+		 * SOUNDNESS.md. Asserting the bug, so that a Pi_SMALL that became
+		 * exact over Z_q would turn this test red. */
+		aex_open_t o;
+		params::poly_q z;
+		int ok;
+
+		z = 0;
+		for (size_t l = 0; l < params::poly_q::degree; l++) {
+			z(0, l) = 1;
+			z(1, l) = nfl::params < uint64_t >::P[1] - 1;
+		}
+		z.ntt_pow_phi();
+		s[0][0] = z;
+		for (int j = 0; j < R; j++) {
+			t[0][j] = 0;
+			for (int k = 0; k < V; k++) {
+				t[0][j] = t[0][j] + A[j][k] * s[0][k];
+			}
+		}
+		pismall_prover(com, x, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		ok = pismall_verifier(com, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		aex_open_clear(o);
+		TEST_ASSERT(ok == 1, end);
+	} TEST_END;
+
 	printf("\n** Benchmarks for lattice-based AEX proof:\n\n");
 	BENCH_SMALL("pismall_setup", pismall_setup(lag, a, q, rand, ctx));
 	aex_open_t ob;
@@ -1948,6 +2276,47 @@ static void test(flint_rand_t rand) {
 	BENCH_SMALL("pismall_verifier", pismall_verifier(com, f, rf, h, rh, rd, key,
 					lag, rand, ctx, ob));
 	aex_open_clear(ob);
+
+	TEST_ONCE("monomial membership proof is consistent") {
+		commit_t *P = new commit_t[TAU];
+		vector < params::poly_q > *pr = new vector < params::poly_q >[TAU];
+		params::poly_q *sigma = new params::poly_q[TAU];
+		aex_open_t o;
+		int ok = 1;
+
+		aex_monomial_test_setup(key, P, pr, sigma, 1);
+		for (int rep = 0; rep < AEX_REPS; rep++) {
+			pismall_prover(com, x, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+			ok &= pismall_verifier(com, f, rf, h, rh, rd, key, lag, rand, ctx,
+					o);
+			aex_open_clear(o);
+		}
+		delete[]sigma;
+		delete[]pr;
+		delete[]P;
+		TEST_ASSERT(ok == 1, end);
+	} TEST_END;
+
+	TEST_ONCE("monomial membership rejects a binary non-monomial") {
+		/* sigma of Hamming weight two is still binary, so the binary set
+		 * alone accepts it; it is the row Y = w sigma together with the sign
+		 * set that rules it out, since the weight lands in Y's constant
+		 * coefficient. */
+		commit_t *P = new commit_t[TAU];
+		vector < params::poly_q > *pr = new vector < params::poly_q >[TAU];
+		params::poly_q *sigma = new params::poly_q[TAU];
+		aex_open_t o;
+		int ok;
+
+		aex_monomial_test_setup(key, P, pr, sigma, 2);
+		pismall_prover(com, x, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		ok = pismall_verifier(com, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		aex_open_clear(o);
+		delete[]sigma;
+		delete[]pr;
+		delete[]P;
+		TEST_ASSERT(ok == 0, end);
+	} TEST_END;
 
   end:
 	for (int i = 0; i < V; i++) {
@@ -1988,3 +2357,4 @@ int main() {
 
 	return test_failures() != 0;
 }
+#endif

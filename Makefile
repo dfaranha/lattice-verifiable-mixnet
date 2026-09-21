@@ -19,9 +19,10 @@ CFLAGS   = $(STD) $(OPT) $(WARN) -ggdb $(INCLUDE) $(DEFINE) $(CONFIG) -MMD -MP
 
 LIBS     = deps/libnfllib_static.a -lgmp -lmpfr -lquadmath
 # Only pismall uses FLINT, for GR(q,2) scalar arithmetic and for the dense
-# polynomials over Z_q that are not in the NTT domain. Everything else works
-# through NFLlib, so linking it everywhere only obscured which binary actually
-# depends on it.
+# polynomials over Z_q that are not in the NTT domain. shuffle inherits the
+# dependency by linking pismall for the membership sub-proof; everything else
+# works through NFLlib, so linking it everywhere only obscured which binary
+# actually depends on it.
 FLINT    = -L deps/ -lflint
 
 OBJ      = obj
@@ -55,11 +56,25 @@ $(OBJ)/%.o: src/%.cpp | $(OBJ)
 $(BLAKE3): $(BLAKE3_SRC) | $(OBJ)
 	$(CPP) $(CFLAGS) -r -nostdlib $(BLAKE3_SRC) -o $@
 
-# pismall commits to SIZE=3 messages, every other binary to the default SIZE.
-# The two configurations must not share an object file, or whichever target is
-# built last silently links the wrong one.
+# pismall commits to SIZE=3 messages, and so does shuffle, which links it for
+# the membership sub-proof; bdlop and bgv keep the default SIZE. The two
+# configurations must not share an object file, or whichever target is built
+# last silently links the wrong one.
 $(OBJ)/bdlop-size3.o: src/bdlop.cpp | $(OBJ)
 	$(CPP) $(CFLAGS) -DSIZE=3 -c $< -o $@
+
+# pismall as a library, for the proof that each committed sigma_i is a
+# monomial. The proof is amortized over exactly the MSGS relations the shuffle
+# has, rounded up to the power of two its interpolation nodes need.
+$(OBJ)/pismall-mono.o: src/pismall.cpp | $(OBJ)
+	$(CPP) $(CFLAGS) -DSIZE=3 -UTAU -DTAU='AEX_PAD2(MSGS)' -c $< -o $@
+
+# pibnd as a library, for the norm bound that makes those coefficient sets
+# exact. Its relation is the commitment equation, so V is WIDTH + 1 rather than
+# the HEIGHT + 3 of the mix-net's own instance, and it needs no padding: the
+# amortization parameter is MSGS itself.
+$(OBJ)/pibnd-short.o: src/pibnd.cpp | $(OBJ)
+	$(CPP) $(CFLAGS) -DSIZE=3 -DPIBND_V='(WIDTH+1)' -UTAU -DTAU=MSGS -c $< -o $@
 
 bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON)
 	$(CPP) $(CFLAGS) -DMAIN src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) -o $@ $(LIBS)
@@ -67,9 +82,12 @@ bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON)
 bgv: src/bgv.cpp $(COMMON)
 	$(CPP) $(CFLAGS) -DMAIN src/bgv.cpp $(COMMON) -o $@ $(LIBS)
 
-shuffle: src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/sample_z_small.o $(COMMON) $(BLAKE3)
-	$(CPP) $(CFLAGS) -DMAIN src/shuffle.cpp $(OBJ)/bdlop.o \
-		$(OBJ)/sample_z_small.o $(COMMON) $(BLAKE3) -o $@ $(LIBS)
+shuffle: src/shuffle.cpp $(OBJ)/bdlop-size3.o $(OBJ)/pismall-mono.o \
+		$(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o \
+		$(COMMON) $(BLAKE3)
+	$(CPP) $(CFLAGS) -DSIZE=3 -DMAIN src/shuffle.cpp $(OBJ)/bdlop-size3.o \
+		$(OBJ)/pismall-mono.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
+		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
 
 pismall: src/pismall.cpp $(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3)
 	$(CPP) $(CFLAGS) -DSIZE=3 -DMAIN src/pismall.cpp \

@@ -7,17 +7,12 @@
 #include "bench.h"
 #include <assert.h>
 #include "sample_z_small.h"
+#include "pismall.h"
+#include "pibnd.h"
 
 /*============================================================================*/
 /* Private definitions                                                        */
 /*============================================================================*/
-
-/* Number of messages being shuffled. This drives every large buffer below, so
- * it can be overridden (e.g. make CONFIG=-DMSGS=16) to test on a small machine;
- * the paper's benchmarks use 1000. */
-#ifndef MSGS
-#define MSGS        2
-#endif
 
 /*
  * The proof of shuffle below follows Neff's paradigm, but it does *not* use the
@@ -61,18 +56,36 @@
  * polynomial of Hamming weight 22 that is a zero divisor in this ring, so no
  * norm bound can place an element in D.
  *
- * CAVEAT, and it is a large one. Lemma 5 requires the committed sigma_i to lie
- * in D, and *this code does not prove that*. Protocol 1 of ePrint 2025/658
- * discharges the requirement with a sub-proof of is_bin(sigma_i) delegated to a
- * general-purpose proof system; the `fix-pkc` branch of the CT-RSA 2021 code
- * discharges it with a norm check on a masked opening of sigma_i. The first is
- * not available here and the second, as argued above, would establish nothing.
- * What is implemented below is therefore Protocol 1 without its membership
- * sub-proof: it stops a prover who CRT-mixes the *messages*, which is the
- * attack of Section 4.1 of that paper and the one mounted against the CT-RSA
- * 2021 implementation, and it does not stop a prover who CRT-mixes the
- * committed sigma_i as well. The test "KNOWN GAP" below demonstrates precisely
- * that. See SOUNDNESS.md for what closing the gap would take.
+ * Lemma 5 also requires the committed sigma_i to lie in D. That is discharged
+ * here by pismall_mono_prove(), which runs the amortized exact proof of
+ * src/pismall.cpp over all MSGS commitments to the sigma_i and shows that each
+ * committed element has binary coefficients and that multiplying it by the
+ * public 2 - sum_j x^j leaves every coefficient in {-1, 1}, the two
+ * coefficient-wise conditions that together say "monomial".
+ *
+ * That sub-proof is coefficient-wise but not exact on its own, because q is
+ * composite: the identity it checks for the binary set is c (c - 1) = 0, which
+ * over Z_q = Z_{p_1} x Z_{p_2} has four roots and not two, namely 0, 1 and the
+ * two CRT idempotents. By itself it would therefore say only that sigma_i is a
+ * monomial *in each CRT component*, and a prover who CRT-mixes the committed
+ * sigma_i the way it mixes the messages would still be accepted. No algebraic
+ * identity can do better over a composite modulus: the solution set of a
+ * polynomial system over Z_q is the product of the per-component solution sets,
+ * while D is the diagonal of such a product.
+ *
+ * What rules the idempotents out is a norm bound, and pibnd_short_prove() adds
+ * one: Pi_BND over the same MSGS commitments, bounding the openings. The
+ * idempotents are non-zero multiples of p_2 and of p_1, so their centred
+ * representatives exceed 2^38, while the bound proven is below 2^28 at any
+ * supported parameters. Binary in each component plus short therefore means
+ * binary over the integers, the Y row then pins the Hamming weight to one over
+ * the integers as well, and sigma_i in D follows.
+ *
+ * CAVEAT. The two sub-proofs are run on the same commitments and the same
+ * witness, but they are separate proofs: the membership one extracts an exact
+ * opening, the norm one a relaxed one, and the argument above reads them as
+ * statements about a single opening. Making that step rigorous is the part of
+ * this branch that has not been checked; see SOUNDNESS.md, section 6.
  */
 
 /* Monomials are distinct only up to the degree of the ring, and g must be
@@ -97,6 +110,16 @@ static params::poly_q (*y)[WIDTH], (*w)[WIDTH], (*_y)[WIDTH];
 static params::poly_q *t, *tp, *_t, *u;
 static params::poly_q *theta, *inv, *inv_tmp;
 static params::poly_q *sg, *fa, *fb;
+
+/* The proof that every committed sigma_i is a monomial, which is the
+ * membership sigma_i in D that Lemma 5 requires. It is produced by the prover
+ * along with the P_i and consumed by the verifier; it is kept here rather than
+ * threaded through the already long argument lists of the two. */
+static pismall_mono_t *mono;
+
+/* The proof that every committed sigma_i is short, which is what makes the
+ * coefficient sets of the membership proof exact; see the header comment. */
+static pibnd_short_t *bnd;
 
 static void shuffle_alloc(void) {
 	com = new commit_t[MSGS];
@@ -146,6 +169,12 @@ static void shuffle_free(void) {
 	delete[]sg;
 	delete[]fa;
 	delete[]fb;
+	pismall_mono_free(mono);
+	mono = NULL;
+	pismall_mono_clear();
+	pibnd_short_free(bnd);
+	bnd = NULL;
+	pibnd_short_clear();
 }
 
 /**
@@ -680,6 +709,18 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 		sg[i].ntt_pow_phi();
 	}
 
+	/* Lemma 5 also asks for sigma_i in D, and a product identity alone cannot
+	 * give it: a prover who CRT-mixes the sigma_i the way it mixes the
+	 * messages balances the product again. pismall proves membership
+	 * directly, exactly and amortized over all MSGS commitments, by showing
+	 * that the element opened by each P_i has binary coefficients and that
+	 * multiplying it by the public 2 - sum_j x^j leaves every coefficient in
+	 * {-1, 1}, which pins its Hamming weight to one. */
+	pismall_mono_free(mono);
+	mono = pismall_mono_prove(key, p, pr, sigma, MSGS);
+	pibnd_short_free(bnd);
+	bnd = pibnd_short_prove(key, p, pr, sigma, MSGS);
+
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho);
 
 	/* Build the factors of the product of Lemma 5:
@@ -744,6 +785,9 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
 		params::poly_q _ms[MSGS], params::poly_q rho[SIZE], comkey_t & key) {
 	params::poly_q coef[3], beta, tau, mu;
 	int result = 1;
+
+	result &= pismall_mono_verify(mono, key, p, MSGS);
+	result &= pibnd_short_verify(bnd, key, p, MSGS);
 
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho);
 	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho);
@@ -1028,23 +1072,26 @@ static void test() {
 		TEST_ASSERT(run(m, am, sigma, key) == 0, end);
 	} TEST_END;
 
-	/* Second-order attack, targeting the missing membership sub-proof: the
-	 * cheating prover applies to the permutation elements the very same CRT
+	/* Second-order attack, targeting the membership requirement of Lemma 5:
+	 * the cheating prover applies to the permutation elements the very same CRT
 	 * swap it applied to the messages. Then sigma_0 = g(pi(1)) and
 	 * sigma_1 = g(pi(0)) in the first CRT component, while sigma_i = g(pi(i))
 	 * in the second, so the product of Lemma 5 balances in both components
-	 * again. Those sigma_i are not monomials, hence outside D, and nothing in
-	 * this implementation rules them out. */
+	 * again. Those sigma_i are monomials in each CRT component, which is all
+	 * the membership sub-proof checks, but their coefficients are CRT
+	 * idempotents, which is what the norm bound rejects. */
 	for (int i = 0; i < MSGS; i++) {
 		asigma[i] = sigma[i];
 	}
 	crt_mix(asigma[0], asigma[1]);
 
-	TEST_ONCE("KNOWN GAP: CRT-mixed sigma is accepted, D is not proven") {
-		/* Asserting the bug, so that adding a membership sub-proof for
-		 * sigma_i in D turns this test red and it can be rewritten as the
-		 * rejection it should be. */
-		TEST_ASSERT(run(m, am, asigma, key) == 1, end);
+	TEST_ONCE("shuffle proof rejects CRT-mixed sigma") {
+		/* The membership sub-proof accepts these sigma_i, because they are
+		 * monomials in each CRT component and its coefficient sets are
+		 * per-component too. It is the norm bound that rejects them: their
+		 * coefficients are CRT idempotents, far too large for the masked
+		 * opening to stay inside the bound the verifier checks. */
+		TEST_ASSERT(run(m, am, asigma, key) == 0, end);
 	} TEST_END;
 
   end:

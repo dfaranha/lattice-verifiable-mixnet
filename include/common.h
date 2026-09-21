@@ -29,6 +29,14 @@ using namespace std;
 #ifndef SIZE
 #define SIZE        2
 #endif
+/* Number of messages being shuffled. This drives every large buffer of the
+ * proof of shuffle, so it can be overridden (e.g. make CONFIG=-DMSGS=16) to
+ * test on a small machine; the paper's benchmarks use 1000. It lives here
+ * rather than in shuffle.cpp because pismall.cpp, which carries the membership
+ * sub-proof, is amortized over exactly these MSGS relations. */
+#ifndef MSGS
+#define MSGS        2
+#endif
 /* Large modulus. Not named here: it is the product of the RNS basis below,
  * params::poly_q::moduli_product(). Composite (two 39-bit primes), 78 bits,
  * with each factor = 1 mod 2N as Table 1 requires and 2^14 | p-1, so Z_q
