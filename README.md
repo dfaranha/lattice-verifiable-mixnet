@@ -14,24 +14,22 @@ permutation over a ring that is not a field, only a permutation inside each CRT
 component, and the components need not agree.
 
 The `fix-pkc` branch replaces that product with the one from Lemma 5 of their
-paper, taking the set `D` to be the monomials `x^i`, which is one of the few
-legal choices in the fully splitting ring NFLlib gives us. A second, independent hole found along the way — every
+paper, taking `g(i) = i`: differences of distinct indices are non-zero integers
+smaller than either prime of the basis, hence units, which is what the lemma
+asks and which holds however far the ring splits. A second, independent hole found along the way — every
 equality the verifier checked was NFLlib's element-wise `operator==`, true as
 soon as the two sides agree in one of the 8192 NTT slots — was fixed on `main`
 and is inherited here.
 
-Lemma 5 also requires the committed permutation elements to lie in `D`, and the
-shuffle proves that with two sub-proofs over the commitments to the `sigma_i`.
-`\Pi_SMALL` shows coefficient by coefficient that each `sigma_i` is binary and
-that multiplying it by the public `2 - \sum_j x^j` leaves every coefficient in
-`{-1, 1}`, which together say "monomial". That is not exact on its own, because
-`q` is composite: the identity `c(c - 1) = 0` has four roots in `Z_q` and not
-two, so it says only that `sigma_i` is a monomial *in each CRT component*, and no
-algebraic identity can do better over a composite modulus. `\Pi_BND` supplies
-what is missing, a bound on the norm of the openings: the two extra roots are
-the CRT idempotents, whose centred representatives exceed `2^39` for any basis
-of this size and `2^75` for this one, against a bound below `2^28`. A prover who
-CRT-mixes the committed `sigma_i` as well as the messages is now rejected.
+Lemma 5 also requires the committed permutation elements to lie in a set whose
+differences are units, and the shuffle proves that with two sub-proofs over the
+commitments to the `sigma_i`. `\Pi_SMALL` shows that each `sigma_i` is a ring
+constant — every coefficient above the constant one is zero. That constraint is
+*exact* over `Z_q`, unlike every other coefficient set in that file: `f = 0` has
+a single root however `q` factors. `\Pi_BND` then bounds the norm of the
+openings, and the two together give that every difference of committed constants
+is a unit, by an argument that never has to name the set. A prover who CRT-mixes
+the committed `sigma_i` as well as the messages is rejected.
 
 One pass of the product argument is worth only `MSGS / p_min`, about `2^-29` at
 `MSGS = 1000`, so it is repeated with independent challenges as many times as
@@ -43,9 +41,11 @@ test exhibits a legal challenge that is a zero divisor. With the repetitions no
 term of the proof is below 128 bits.
 
 **Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this.** Two things
-in particular. `\Pi_SMALL` is not exact over `Z_q` on its own terms either,
-where "ternary" likewise means "ternary in each CRT component"; a `KNOWN GAP`
-test in `pismall` exhibits a full-size element it accepts as ternary. And
+in particular. `\Pi_SMALL`'s *other* coefficient sets are not exact over `Z_q`,
+where "ternary" means "ternary in each CRT component"; a `KNOWN GAP` test in
+`pismall` exhibits a full-size element it accepts as ternary. That defect is not
+in the path above, but it is real, and the argument below in fact relies on it.
+And
 reading the two sub-proofs as statements about a single opening of `P_i` takes
 an argument, made in section 6.4 modulo each prime of the basis, which costs one
 assumption the mix-net did not make before: MSIS modulo each `p_j` and not only

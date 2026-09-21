@@ -61,7 +61,7 @@ element of `l_2`-norm below `q^(1/k)` is invertible in a ring splitting into `k`
 factors. At `k = 2` that bound is roughly `q^(1/2)` and is useful. At
 `k = 2N` it says nothing at all.
 
-## 3. The fix: Lemma 5 with D the monomials
+## 3. The fix: Lemma 5 with g(i) = i
 
 Lemma 5 of ePrint 2025/658 replaces `(*)` with
 
@@ -73,18 +73,22 @@ where `g : [N] -> D` is injective, `D` is a set whose pairwise differences are
 invertible, and `sigma_i in D` is committed before `X1, X2` are drawn. Tying
 each message to its index forces the per-component permutations to agree.
 
-**Choice of D.** We take `D = {x^i}` and `g(i) = x^i`. Their differences are
-invertible in this ring:
+**What `D` can be.** In `R_q ~= prod_{s=1}^{8192} F_s`, an element is a unit
+exactly when it is non-zero in every slot, so `d - d'` invertible for distinct
+`d, d' in D` says: **the projection of `D` to every single slot is injective.**
+`D` is therefore a diagonal-like set, and `|D| <= p_min`, which at `2^39` is
+never the binding constraint. The choice of `D` is not about arranging
+invertibility, which is easy; it is about which admissible `D` has a
+characterisation a proof system can express.
 
-```
-x^a - x^b = x^b (x^{a-b} - 1),  0 <= b < a < N,
-```
-
-`x^b` is a unit, and each NTT slot evaluates `x` at a primitive `2N`-th root of
-unity `r`, so `r^{a-b} = 1` would need `2N | a - b`, impossible for
-`0 < a - b < N`. The test `monomial differences are invertible` checks this.
-`g` is injective for `i < N`, so the encoding supports up to `N = 4096`
-messages; `MSGS` is `static_assert`ed against that bound.
+**Choice of D.** We take `g(i) = i`, the ring constant with that value. A
+difference of distinct `g(i)` is a non-zero integer below `MSGS`, hence smaller
+than either prime of the basis, hence coprime to `q` and a unit. The test
+`scalar differences are invertible` checks this. The bound is `MSGS < p_min`,
+about `2^39`, rather than the ring degree — an earlier version of this branch
+used `D = {x^i}` with `g(i) = x^i`, which is also admissible but capped `MSGS`
+at `N = 4096` and, more importantly, had a far more awkward membership proof;
+Section 6 explains why the constants win.
 
 The two sets used elsewhere are **not** available here:
 
@@ -97,6 +101,12 @@ The two sets used elsewhere are **not** available here:
   a laptop.
 * *A ball of small norm*, the choice of the `fix-pkc` branch of the CT-RSA 2021
   code. Same objection, for the same reason.
+
+Note what separates those from the constants. Shortness certifies nothing about
+a general ring element here — that is exactly what the weight-22 zero divisor
+says. It does certify something about a *constant*, because a short constant is
+a small integer and small integers are coprime to `q`. The encoding works
+because it never asks shortness to do a job the splitting ring forbids.
 
 **Protocol changes.** In `shuffle.cpp`:
 
@@ -118,10 +128,10 @@ The two sets used elsewhere are **not** available here:
 The linear proof accordingly carries a third masked opening: one more Gaussian
 vector `w`, one more first message `t_p`, and one more rejection-sampling test.
 
-5. The prover also runs `pismall_mono_prove()` and `pibnd_short_prove()` on the
-   `P_i`, one amortized proof each that every committed `sigma_i` is a monomial
-   in each CRT component and that the openings are short, and the verifier
-   checks both before anything else. Section 6 says why it takes two.
+5. The prover also runs `pismall_const_prove()` and `pibnd_short_prove()` on
+   the `P_i`, one amortized proof each that every committed `sigma_i` is a ring
+   constant and that the openings are short, and the verifier checks both
+   before anything else. Section 6 says why it takes two.
 6. Everything after the `P_i` is run `SHUFFLE_REPS` times with independent
    challenges, because one pass of the product argument is worth only
    `MSGS / p_min`. Section 7.
@@ -190,45 +200,43 @@ distinguishable from uniform -- without handing over the permutation.
 ## 6. The membership sub-proof
 
 Lemma 5 requires `sigma_i in D`. This branch proves it with two sub-proofs run
-on the same commitments: `Pi_SMALL` for the algebraic half, which says that
-`sigma_i` is a monomial in each CRT component, and `Pi_BND` for the half no
+on the same commitments: `Pi_SMALL` for the algebraic half, which says exactly
+that `sigma_i` is a ring constant, and `Pi_BND` for the half no
 algebraic identity can give over a composite modulus, which says that its
-coefficients are small enough for the two components to be the same monomial.
-Section 6.4 is the argument that reads the two as statements about one opening,
-which needs MSIS modulo each prime of the basis rather than only modulo `q`.
+`Pi_BND` for the size half that no algebraic identity can give over a composite
+modulus. Section 6.4 is the argument that reads the two as statements about one
+opening, which needs MSIS modulo each prime of the basis rather than only modulo
+`q`, and which concludes with the invertibility Lemma 5 asks for.
 
 ### 6.1 What is proven
 
-`pismall_mono_prove()` runs the amortized exact proof of `src/pismall.cpp` over
-all `MSGS` commitments `P_i` to the `sigma_i`, as one proof. The relation is the
-commitment equation itself,
+`pismall_const_prove()` runs the amortized exact proof of `src/pismall.cpp`
+over all `MSGS` commitments `P_i` to the `sigma_i`, as one proof. The relation
+is the commitment equation itself,
 
 ```
   row 0    P_i.c1 = r_0 + sum_j A1[0][j] r_{j+1}
   row 1    P_i.c2 = sum_j A2[0][j] r_j + sigma_i
-  row 2    0      = Y_i - w sigma_i,          w = 2 - sum_{j<N} x^j public,
 ```
 
-so the witness the proof binds is an opening of `P_i` and no link between two
-commitment schemes is needed: `sigma_i` is the value inside the commitment the
-linear proof already speaks about. The coefficient sets are ternary for the
-commitment randomness `r`, binary for `sigma_i` and `{-1, 1}` for `Y_i`.
+`R = HEIGHT + 1` rows and `V = WIDTH + 1` components, so the witness the proof
+binds is an opening of `P_i` and no link between two commitment schemes is
+needed: `sigma_i` is the value inside the commitment the linear proof already
+speaks about. The coefficient sets are ternary for the randomness `r`, and
+`sigma_i` is declared `AEX_SCALAR` — unconstrained at coefficient 0, and the
+singleton `{0}` at every coefficient above it.
 
-Being a monomial is not a coefficient-wise property, but it splits into two
-that are. For binary `sigma` of Hamming weight `S` with partial sums `A_i`,
+**That constraint is exact over `Z_q`, and it is the only one in the file that
+is.** The identity is `f = 0`, which has a single root whether or not `q` is
+composite, so unlike the ternary, binary and sign sets it says the same thing
+over `Z_q` as it does in each CRT component. Nothing here needs repairing
+afterwards. The tests `constant membership proof is consistent` and
+`constant membership rejects a non-constant` cover both directions, and
+`AEX proof rejects a witness that is not a constant` covers the set itself.
 
-```
-  (sigma * w)_i = S - 2 A_{i-1},          A_{-1} = 0,
-```
-
-because `x^k (sum_j x^j) = sum_{j>=k} x^j - sum_{j<k} x^j` in the negacyclic
-ring. Its constant coefficient is `S`, and `0 <= S <= N < q - 1`, so all
-coefficients of `sigma w` lie in `{-1, 1}` exactly when `S = 1`, that is when
-`sigma` is one of the monomials `x^i`. The two tests
-`monomial membership proof is consistent` and
-`monomial membership rejects a binary non-monomial` in `pismall` cover both
-directions; the second one is caught by the `Y` row, since a binary `sigma` of
-Hamming weight two passes the binary row unharmed.
+What it leaves open is the *value*: `sigma_i` is some constant `c_i in Z_q`,
+and the set of all constants is not admissible, since a difference divisible by
+`p_1` is a zero divisor. That is what Section 6.3 supplies.
 
 The soundness error of one pass of the AEx proof is not negligible -- the
 challenge lives in `GR(q,2)`, so a pass is worth about `3 tau / p_min^2`, around
@@ -236,11 +244,11 @@ challenge lives in `GR(q,2)`, so a pass is worth about `3 tau / p_min^2`, around
 verifier requires every one of them, which is how the test of `pismall.cpp` runs
 it too.
 
-### 6.2 Why it is not enough on its own: the sets are per CRT component
+### 6.2 The sets are per CRT component, and here that is a feature
 
-**The proof is coefficient-wise but not exact, because `q` is composite.** What
-it checks for the binary set is the polynomial identity `c (c - 1) = 0` at every
-coefficient position. Over a field that has two roots. Over
+**Every other coefficient set in `pismall` is inexact, because `q` is
+composite.** What the proof checks for the binary set is `c (c - 1) = 0` at
+every coefficient position. Over a field that has two roots. Over
 `Z_q = Z_{p_1} x Z_{p_2}` it has four: `0`, `1`, and the two CRT idempotents.
 Ternary gives 9 roots instead of 3, and `{-1, 1}` gives 4 instead of 2. The test
 
@@ -248,62 +256,34 @@ Ternary gives 9 roots instead of 3, and `{-1, 1}` gives 4 instead of 2. The test
 KNOWN GAP: the coefficient sets are per CRT component
 ```
 
-in `pismall` exhibits a witness that is `+1` modulo `p_1` and `-1` modulo `p_2`
-in every coefficient — an element of full size over `Z_q` — and the proof
-accepts it as ternary.
+exhibits a witness that is `+1` modulo `p_1` and `-1` modulo `p_2` in every
+coefficient -- an element of full size over `Z_q` -- and the proof accepts it as
+ternary. That is a defect in `Pi_SMALL` on its own terms, and anything that
+reads it as an exact norm statement inherits it.
 
-For the shuffle the consequence is exact: what `pismall_mono_prove()`
-establishes is that `sigma_i` is a monomial **in each CRT component**, which is
-one component short of `sigma_i in D`. The prover of the test
-`shuffle proof rejects CRT-mixed sigma` is precisely of that shape, and this
-sub-proof accepts it. What rejects it is the norm bound of 6.3.
+An earlier version of this branch took `D = {x^i}`, and then this defect was
+fatal to the membership proof: "binary" and "Hamming weight one" are both
+inexact sets, so what was established was that `sigma_i` is a monomial *in each
+CRT component*, one component short of `sigma_i in D`, and a prover who
+CRT-mixed the `sigma_i` was accepted. No algebraic identity can do better over
+a composite modulus: the solution set of a polynomial system over `Z_q` is the
+product of the per-component solution sets, while every admissible `D` is a
+diagonal of such a product, and a diagonal is never a product.
 
-**No purely algebraic identity can do better.** The solution set of any system
-of polynomial equations over `Z_q` is the product of the per-component solution
-sets, while `D = {x^i}` is the diagonal of such a product and not a product
-itself. So membership in `D` cannot be established by polynomial identities over
-a composite modulus, whatever the identities are. It needs a prime modulus, or
-information that is not algebraic — a bound on the size of the coefficients.
+With `g(i) = i` the membership proof does not use an inexact set at all. The
+defect remains true of `Pi_SMALL`, and it is still load-bearing here — but as a
+*tool* rather than an obstacle. What it says about the randomness `r` is that
+the exact opening is short in the ordinary sense **modulo each prime**, and
+that is precisely the hypothesis Section 6.4 needs.
 
-**This observation is not specific to the monomial instance.** It is the
-exactness claim of `Pi_SMALL` itself: for the commitment randomness the proof
-establishes "ternary in each CRT component", membership in a set of 9 values of
-which 6 are full-size over `Z_q`, and not "ternary". Anything in this repository
-that reads `Pi_SMALL` as an exact norm statement inherits that.
-
-### 6.3 The norm bound, which closes it
+### 6.3 The norm bound
 
 `pibnd_short_prove()` bounds the openings of the same `P_i`. `Pi_BND` of
 `src/pibnd.cpp`, the amortized approximate norm proof already in this
-repository, is instantiated on the commitment equation itself,
-
-```
-  row 0    P_i.c1 = r_0 + sum_j A1[0][j] r_{j+HEIGHT}
-  row 1    P_i.c2 = sum_j A2[0][j] r_j + sigma_i
-```
-
-`R = HEIGHT + 1` rows and `V = WIDTH + 1` components, amortized over exactly the
-`MSGS` commitments and needing no padding, since nothing here is interpolated.
-The row carrying `Y = w sigma_i` is left out: once `sigma_i` is binary over the
-integers, `Y` is determined over the integers too and needs no bound of its own.
-
-**Why the two sub-proofs together are exact.** The CRT idempotents `e_1` and
-`e_2` are non-zero multiples of `p_2` and of `p_1`, so their centred
-representatives are at least `min(p_1, p_2)`, about `2^39`; at the primes of
-this RNS basis they are `+/- 67146933941338983279272`, about `2^75.8`. The bound
-the verifier enforces on each masked opening is `sigma_ANEx * sqrt(2N)`, about
-`2^23` at `MSGS = 2` and `2^27` at `MSGS = 1000`; extraction loosens it by a
-small constant and no more. A coefficient of `sigma_i` is therefore in
-`{0, 1, e_1, e_2}` by the membership proof and below `2^28` by the norm proof,
-hence in `{0, 1}` as an integer. The `Y` row then reads `Y_0 = S`, the Hamming
-weight, an integer in `[0, N]` that is `+/-1` in each CRT component, so `S = 1`
-and `sigma_i = x^a`, an element of `D`. The margin is eleven bits in the worst
-case a composite `q` of this size allows and forty-seven at these primes, so the
-looseness of an approximate norm proof is irrelevant here.
-
-The test `shuffle proof rejects CRT-mixed sigma` is the check: the prover this
-branch used to accept is now rejected, and rejected by the norm bound, since the
-membership proof on its own still accepts it.
+repository, is instantiated on the commitment equation — the very same relation
+`pismall_const_prove()` uses, `R = HEIGHT + 1` rows and `V = WIDTH + 1`
+components — amortized over exactly the `MSGS` commitments and needing no
+padding, since nothing here is interpolated.
 
 Two implementation notes, both visible in `src/pibnd.cpp`:
 
@@ -314,91 +294,85 @@ Two implementation notes, both visible in `src/pibnd.cpp`:
   `1/3` per attempt, so giving up is a `3^-64` event.
 * The last witness row is sampled with `sigma-hat_ANEx`, which needs the
   quad-precision sampler only when it runs past `2^64`, as it does when that row
-  is the mix-net's decryption noise. Here the row is a committed monomial and
+  is the mix-net's decryption noise. Here the row is a committed constant and
   `sigma-hat` is a few thousand, so the double sampler covers it. Choosing the
   sampler by magnitude rather than by row index makes `Pi_BND` about ten times
-  faster, the mix-net's own instance included, since its test witness is ternary
-  as well.
+  faster, the mix-net's own instance included.
 
-### 6.4 Why the two sub-proofs speak about one opening
+The challenge matrix is never stored: both sides derive it from the transcript
+hash and consume it once, row by row, so `pibnd` keeps a single row. At
+`TAU = 1000` the matrix would be 8 GiB.
 
-The two sub-proofs are different kinds of object. `Pi_SMALL` is an *exact* proof
-of knowledge: its extractor outputs a witness satisfying the relation and the
-coefficient sets with no relaxation, which is what "exact" in its name means.
-`Pi_BND`, like every Fiat-Shamir Sigma protocol of its shape, extracts a
-*relaxed* opening: a short `s'` and a short non-zero `c` with `A s' = t c`,
-where `c` is a difference of challenges. Section 6.3 treats the `sigma_i` of the
-two as one ring element, and that step needs an argument, because the obvious
-one does not work: multiplying the exact relation by `c` and subtracting gives
-`A (c r - r') = 0`, and one cannot conclude `c r - r' = 0` from the binding of
-the commitment, since `r` is short only in each CRT component and `c r` need not
-be short over `Z_q` at all.
+### 6.4 Why the two sub-proofs speak about one opening, and what follows
 
-The way through is to stop working over `Z_q`. Write the extracted witness in
-CRT form, `sigma = e_1 sigma^(1) + e_2 sigma^(2)` and `r = e_1 r^(1) + e_2
-r^(2)`. What 6.2 calls a defect says exactly that `sigma^(j)` is binary and
-`r^(j)` is ternary **as integer polynomials**, for each `j`. In other words the
-exact extraction hands us, for each prime of the basis, an opening of `P_i`
-modulo that prime that is short in the ordinary sense. The comparison that fails
-over `Z_q` therefore succeeds modulo `p_j`.
+`Pi_SMALL` is an *exact* proof of knowledge: its extractor outputs a witness
+satisfying the relation and the coefficient sets with no relaxation. `Pi_BND`,
+like every Fiat-Shamir Sigma protocol of its shape, extracts a *relaxed*
+opening: a short `s'` and a short non-zero `c` with `A s' = t c`, where `c` is a
+difference of challenges. Reading the `sigma_i` of the two as one ring element
+takes an argument, because the obvious one does not work: multiplying the exact
+relation by `c` and subtracting gives `A (c r - r') = 0`, and the binding of the
+commitment says nothing, since `r` is short only in each CRT component and `c r`
+need not be short over `Z_q` at all.
+
+The way through is to stop working over `Z_q`, and it is Section 6.2 that makes
+it possible. Write the extracted randomness in CRT form, `r = e_1 r^(1) + e_2
+r^(2)`. What 6.2 calls a defect says exactly that each `r^(j)` is ternary **as
+an integer polynomial**. So the exact extraction hands us, for each prime of the
+basis, an opening of `P_i` modulo that prime that is short in the ordinary
+sense, and the comparison that fails over `Z_q` succeeds modulo `p_j`.
 
 **Claim.** Suppose MSIS over `R_{p_j} = Z_{p_j}[x]/(x^N + 1)` is hard at norm
-`beta` for each prime `p_j` of the basis, where `beta` is twice the bound of
-`Pi_BND` plus the slack of a challenge difference. Then an accepting transcript
-of the two sub-proofs implies `sigma_i in D`.
+`beta` for each prime of the basis, `beta` being twice the bound of `Pi_BND`
+plus the slack of a challenge difference. Then every difference `c_i - c_{i'}`
+and `c_i - g(j)` is invertible, which is what Lemma 5 requires.
 
-*Proof.* Let `(r, sigma)` be the exact opening extracted from `Pi_SMALL` and
-`(r', sigma')`, `c` the relaxed one from `Pi_BND`.
+*Proof.* Reducing both relations modulo `p_j` gives `A (r', sigma') = (c1, c2)
+c` and `A (c r^(j), c sigma_i) = (c1, c2) c`, so `A1` kills the difference of
+the randomness parts. Both are short — `r'` by `Pi_BND`, `c r^(j)` because `c`
+is short and `r^(j)` ternary — so their difference is a short element of the
+kernel of `A1` modulo `p_j`, and by the assumption it is zero. The message row
+then gives `sigma' = c sigma_i = c c_i` modulo `p_j`, for each `j`, hence
+`sigma'_i = c c_i` modulo `q`.
 
-1. **The components are monomials over the integers.** Fix `j`. By 6.2,
-   `sigma^(j)` is a 0/1 polynomial and `Y^(j) = w sigma^(j)` has every
-   coefficient congruent to `+/-1` modulo `p_j`. But `(w sigma^(j))_i = S_j - 2
-   A_{i-1}` is an honest integer in `[-N, N]` and `p_j > 2N`, so those
-   coefficients *are* `+/-1`; the constant one is `S_j`, the Hamming weight,
-   which is in `[0, N]`, so `S_j = 1` and `sigma^(j) = x^{a_j}`. This step needs
-   no norm proof at all.
-2. **The two openings coincide modulo each prime.** Reducing both relations
-   modulo `p_j` gives `A (r', sigma') = (c1, c2) c` and `A (c r^(j), c
-   sigma^(j)) = (c1, c2) c`, so `A1` kills the difference of the randomness
-   parts. Both are short -- `r'` by `Pi_BND`, `c r^(j)` because `c` is short and
-   `r^(j)` ternary -- so their difference is a short element of the kernel of
-   `A1` modulo `p_j`, and by the assumption it is zero. The message row then
-   gives `sigma' = c sigma^(j) = c x^{a_j}` modulo `p_j`.
-3. **The congruences are equalities.** `sigma'`, `c x^{a_1}` and `c x^{a_2}` all
-   have infinity norm below `p_min / 2`, so step 2 read modulo `p_1` and modulo
-   `p_2` gives `sigma' = c x^{a_1}` and `sigma' = c x^{a_2}` in
-   `Z[x]/(x^N + 1)`. The test `the norm bound leaves room for the CRT argument`
-   checks that inequality at the parameters in force rather than assuming it.
-4. **Hence one monomial.** `x^N + 1` is the `2N`-th cyclotomic polynomial and
-   `N` is a power of two, so it is irreducible over `Q` and `Z[x]/(x^N + 1)` is
-   an integral domain. From `c x^{a_1} = c x^{a_2}` and `c` non-zero,
-   `a_1 = a_2`, so `sigma_i = x^{a_1}` is a monomial and lies in `D`. []
+Now let `d = c_i - c_{i'}` and suppose `d` is a zero divisor, say `p_1 | d` and
+`d` not divisible by `p_2`. Then `c d = sigma'_i - sigma'_{i'}` has infinity
+norm at most `2 B`, and it is divisible by `p_1`; since `2 B < p_1` every
+coefficient of it is zero, so `c d = 0` in `R_q`. But `d` is a *constant*, so
+`c d = 0` forces `d` to vanish modulo the prime of every slot where `c` does
+not; as `d` is non-zero modulo `p_2`, that means `c` vanishes in every slot of
+`p_2`, i.e. `c = 0` modulo `p_2`, and `c` short forces `c = 0`, contradicting
+`c` non-zero. The same argument covers `c_i - g(j)`, since `c g(j)` is short for
+`g(j) < MSGS`. []
 
-Two remarks. The relaxation factor `c` cancels, so the slack of `Pi_BND` costs
-nothing here; only its norm bound is used. And the extra assumption is a real
-one: MSIS modulo `p_j` is *stronger* than MSIS modulo `q`, since a short kernel
-element modulo `q` reduces to one modulo `p_j` but not conversely. It is of
-entirely standard form, and it holds here with room. The lattice has dimension
-`N * WIDTH = 16384` and determinant `p_j^N`, and reaching `beta` needs a root
-Hermite factor of `1.00095` at `MSGS = 1000` and `1.00068` at `MSGS = 2`,
-against the `1.0045` or so at which 128-bit security is usually placed -- block
-sizes in the thousands. Note also that if MSIS modulo `p_j` were easy the
-commitment scheme would be in trouble on its own terms, since two openings
-differing by something that vanishes modulo one prime would be findable.
+Three remarks. The relaxation factor `c` never has to be cancelled or inverted,
+so the slack of `Pi_BND` costs nothing; only its norm bound is used. The
+conclusion is the invertibility Lemma 5 asks for, obtained without naming `D` at
+all — there is no membership statement to get wrong. And the inequality the
+argument turns on, `2 B` below `p_min`, is checked rather than assumed: the test
+`the norm bound leaves room for the CRT argument` compares them at the
+parameters in force, with a factor of 762 to spare at `MSGS = 1000`.
+
+The cost is one assumption the mix-net did not make before: MSIS modulo each
+prime of the basis, which is *stronger* than MSIS modulo `q`, since a short
+kernel element modulo `q` reduces to one modulo `p_j` but not conversely. It is
+of entirely standard form and holds here with room — reaching `beta` needs a
+root Hermite factor of `1.00095` at `MSGS = 1000`, against the `1.0045` or so at
+which 128-bit security is usually placed. Note also that if MSIS modulo `p_j`
+were easy the commitment scheme would be in trouble on its own terms.
 
 Two alternatives to the pair of sub-proofs, both larger, and neither needed
 given the above:
 
-1. **Move `D` to the small scalars**, `g(i) = i`, the choice of Costa, Martinez
-   and Morillo, legal here because a non-zero scalar smaller than `p_1` is
-   coprime to `q` and hence a unit. Membership then means "is a small element of
-   degree 0". The degree-0 half is exact even over composite `q`, since `c = 0`
-   has one root and not four, but the smallness half needs the same norm bound
-   and so the same argument.
-2. **Delegate the sub-proof** to a general-purpose lattice proof system, which
+1. **Delegate the sub-proof** to a general-purpose lattice proof system, which
    is what Protocol 1 of ePrint 2025/658 does, at the cost of a large new
    dependency. Such a system proves `is_bin` over the integers, norm included,
    in one proof and with one extraction.
+2. **Make `q` prime**, which would make every coefficient set of `Pi_SMALL`
+   exact and remove `Pi_BND` from the shuffle entirely. This is impossible here:
+   Theorem 2 of the CCS 2023 paper needs `q > 2(B_Dec + B_DDec)`, about
+   `2^77.5`, and NFLlib's `uint64` arithmetic caps a single modulus at 62 bits.
+   The composite modulus is forced, and so is everything that follows from it.
 
 ## 7. Soundness error of the product argument
 
@@ -513,9 +487,10 @@ nothing there depends on a challenge being invertible.
 
 | | before | on this branch |
 | --- | --- | --- |
-| product identity | `prod a_i = prod b_i` | Lemma 5, `D` the monomials |
+| product identity | `prod a_i = prod b_i` | Lemma 5, `g(i) = i` |
 | CRT-mixed messages | accepted | rejected |
 | membership `sigma_i in D` | not proven at all | `Pi_SMALL` and `Pi_BND`, see 6 |
+| algebraic half of membership | n/a | exact over `Z_q`, see 6.1 |
 | `sigma_i` outside `D`, one component | accepted | rejected |
 | CRT-mixed `sigma_i` | accepted | rejected, by the norm bound |
 | coefficient sets of `Pi_SMALL` | per CRT component | per CRT component, see 6.2 |

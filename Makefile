@@ -67,7 +67,8 @@ $(OBJ)/bdlop-size3.o: src/bdlop.cpp | $(OBJ)
 # monomial. The proof is amortized over exactly the MSGS relations the shuffle
 # has, rounded up to the power of two its interpolation nodes need.
 $(OBJ)/pismall-mono.o: src/pismall.cpp | $(OBJ)
-	$(CPP) $(CFLAGS) -DSIZE=3 -UTAU -DTAU='AEX_PAD2(MSGS)' -c $< -o $@
+	$(CPP) $(CFLAGS) -DSIZE=3 -UTAU -DTAU='AEX_PAD2(MSGS)' \
+		-DPISMALL_R='(HEIGHT+1)' -DPISMALL_V='(WIDTH+1)' -c $< -o $@
 
 # pibnd as a library, for the norm bound that makes those coefficient sets
 # exact. Its relation is the commitment equation, so V is WIDTH + 1 rather than

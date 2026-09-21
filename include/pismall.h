@@ -8,17 +8,18 @@
 /**
  * The amortized exact proof of src/pismall.cpp, specialised to the statement
  * the proof of shuffle needs: the message committed in each of the n BDLOP
- * commitments P[i] is a monomial x^j. That is the membership sigma_i in D
- * required by Lemma 5 of ePrint 2025/658, with D the monomials.
+ * commitments P[i] is a ring constant. With g(i) = i, that is the algebraic
+ * half of the membership required by Lemma 5 of ePrint 2025/658.
  *
  * The relation proven is the commitment equation itself, so the witness bound
  * is an opening of P[i] and no link between two commitment schemes is needed.
- * Being a monomial is not a coefficient-wise property, but it splits into two
- * that are: sigma has binary coefficients, and sigma * (2 - sum_j x^j) has all
- * of its coefficients in {-1, 1}, which happens exactly when the binary sigma
- * has Hamming weight one.
+ * Unlike every other coefficient set in that file, this one is exact over Z_q:
+ * the identity is f = 0 at each coefficient above the constant one, and f = 0
+ * has a single root whether or not q is composite. The size half, which is
+ * what makes the committed constants pairwise different by a unit, comes from
+ * the norm bound of pibnd.h.
  */
-typedef struct pismall_mono pismall_mono_t;
+typedef struct pismall_const pismall_const_t;
 
 /** Smallest power of two at least n, for n up to 8192. The proof interpolates
  * over the TAU-th roots of unity, so its amortization parameter has to be a
@@ -30,31 +31,31 @@ typedef struct pismall_mono pismall_mono_t;
 					 (n) <= 2048 ? 2048 : (n) <= 4096 ? 4096 : 8192)
 
 /**
- * Prove that the message committed in each P[i] is a monomial.
+ * Prove that the message committed in each P[i] is a ring constant.
  *
  * @param[in] key			- the commitment key P was committed under.
  * @param[in] P				- the n commitments.
  * @param[in] r				- their randomness, WIDTH ternary polynomials each.
- * @param[in] sigma			- the committed monomials, in the coefficient
+ * @param[in] sigma			- the committed constants, in the coefficient
  *							  domain, as bdlop_commit takes them.
  * @param[in] n				- the number of commitments, at most the
  *							  compile-time TAU of src/pismall.cpp.
- * @return the proof, to be released with pismall_mono_free().
+ * @return the proof, to be released with pismall_const_free().
  */
-pismall_mono_t *pismall_mono_prove(comkey_t & key, commit_t * P,
+pismall_const_t *pismall_const_prove(comkey_t & key, commit_t * P,
 		std::vector < params::poly_q > *r, params::poly_q * sigma, size_t n);
 
 /**
- * Verify a proof produced by pismall_mono_prove() against the same key and
+ * Verify a proof produced by pismall_const_prove() against the same key and
  * commitments.
  *
  * @return 1 if the proof verifies, 0 otherwise.
  */
-int pismall_mono_verify(pismall_mono_t * pi, comkey_t & key, commit_t * P,
+int pismall_const_verify(pismall_const_t * pi, comkey_t & key, commit_t * P,
 		size_t n);
 
 /** Release a proof and the one-time setup it shares with the other proofs. */
-void pismall_mono_free(pismall_mono_t * pi);
-void pismall_mono_clear(void);
+void pismall_const_free(pismall_const_t * pi);
+void pismall_const_clear(void);
 
 #endif

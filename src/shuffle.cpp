@@ -44,57 +44,55 @@
  * was \prod a_i = \prod b_i, which does not imply a permutation even over a
  * field.
  *
- * We take D to be the monomials x^i and g(i) = x^i. In this ring that is the
- * natural choice, and one of very few available: x^a - x^b = x^b (x^{a-b} - 1),
- * every NTT slot is a primitive 2N-th root of unity, and so x^k - 1 vanishes in
- * no slot for 0 < k < N. Neither of the two sets used elsewhere works here. The
+ * We take g(i) = i, the ring constant with that value, and D the set of
+ * constants the prover can be held to. Differences of distinct g(i) are
+ * non-zero integers below MSGS, hence coprime to q and units, which is all
+ * Lemma 5 asks of them. The two sets used elsewhere do not work here: the
  * binary polynomials of Protocol 1 of ePrint 2025/658 and the small-norm ball
- * used on the `fix-pkc` branch of the CT-RSA 2021 code are both justified by
- * [42, Corollary 1.2], which bounds norms by q^(1/k) for a ring splitting into
- * k factors; at k = 2 that is roughly q^(1/2), but at k = 2N it is vacuous. The
- * test "a short polynomial can be a zero divisor" below exhibits a 0/1
- * polynomial of Hamming weight 22 that is a zero divisor in this ring, so no
- * norm bound can place an element in D.
+ * of the `fix-pkc` branch of the CT-RSA 2021 code are both justified by [42,
+ * Corollary 1.2], which bounds norms by q^(1/k) for a ring splitting into k
+ * factors; at k = 2 that is roughly q^(1/2), at k = 2N it is vacuous. The test
+ * "a short polynomial can be a zero divisor" below exhibits a 0/1 polynomial of
+ * Hamming weight 22 that is a zero divisor here, so shortness alone certifies
+ * nothing about a general ring element. It does certify something about a
+ * constant, which is why this encoding works and those do not.
  *
- * Lemma 5 also requires the committed sigma_i to lie in D. That is discharged
- * here by pismall_mono_prove(), which runs the amortized exact proof of
- * src/pismall.cpp over all MSGS commitments to the sigma_i and shows that each
- * committed element has binary coefficients and that multiplying it by the
- * public 2 - sum_j x^j leaves every coefficient in {-1, 1}, the two
- * coefficient-wise conditions that together say "monomial".
+ * Lemma 5 also requires the committed sigma_i to lie in D, and two sub-proofs
+ * over the same commitments discharge it between them.
  *
- * That sub-proof is coefficient-wise but not exact on its own, because q is
- * composite: the identity it checks for the binary set is c (c - 1) = 0, which
- * over Z_q = Z_{p_1} x Z_{p_2} has four roots and not two, namely 0, 1 and the
- * two CRT idempotents. By itself it would therefore say only that sigma_i is a
- * monomial *in each CRT component*, and a prover who CRT-mixes the committed
- * sigma_i the way it mixes the messages would still be accepted. No algebraic
- * identity can do better over a composite modulus: the solution set of a
- * polynomial system over Z_q is the product of the per-component solution sets,
- * while D is the diagonal of such a product.
+ * pismall_const_prove() is the algebraic half: the amortized exact proof of
+ * src/pismall.cpp over all MSGS commitments, showing that every coefficient of
+ * sigma_i above the constant one is zero. That constraint is exact over Z_q,
+ * unlike every other coefficient set in that file -- f = 0 has a single root
+ * however q factors -- so nothing here needs repairing afterwards. It leaves
+ * sigma_i an arbitrary constant c_i.
  *
- * What rules the idempotents out is a norm bound, and pibnd_short_prove() adds
- * one: Pi_BND over the same MSGS commitments, bounding the openings. The
- * idempotents are non-zero multiples of p_2 and of p_1, so their centred
- * representatives exceed 2^38, while the bound proven is below 2^28 at any
- * supported parameters. Binary in each component plus short therefore means
- * binary over the integers, the Y row then pins the Hamming weight to one over
- * the integers as well, and sigma_i in D follows.
+ * pibnd_short_prove() is the size half: Pi_BND over the same commitments,
+ * bounding the openings. Together with the argument of SOUNDNESS.md section
+ * 6.4 it gives sigma'_i = c c_i mod q for a short sigma'_i and the challenge
+ * difference c. Now suppose some difference d = c_i - c_j were a zero divisor,
+ * say p_1 | d. Then c d is short and divisible by p_1, so being smaller than
+ * p_1 it is zero over the integers; c d = 0 with d a scalar not divisible by
+ * p_2 forces c = 0 modulo p_2, and c short forces c = 0, contradiction. The
+ * same argument covers c_i - g(j). So every pairwise difference is a unit,
+ * which is what Lemma 5 needs -- proven directly, without naming D.
  *
  * The two sub-proofs are separate proofs about the same commitments, the
- * membership one extracting an exact opening and the norm one a relaxed
+ * algebraic one extracting an exact opening and the norm one a relaxed
  * opening, so reading them as statements about a single opening takes an
- * argument. It is made modulo each prime of the basis rather than over Z_q,
- * where the exact opening is short in the ordinary sense -- that is what 6.2
- * says, read the other way round -- and it costs one extra assumption, MSIS
- * modulo each p_j and not only modulo their product. See SOUNDNESS.md,
- * section 6.4.
+ * argument. It is made modulo each prime of the basis, and costs one extra
+ * assumption, MSIS modulo each p_j and not only modulo their product. See
+ * SOUNDNESS.md, section 6.4.
  */
 
-/* Monomials are distinct only up to the degree of the ring, and g must be
- * injective on [MSGS]. */
-static_assert((size_t) MSGS <= params::poly_q::degree,
-		"MSGS exceeds the degree of the ring, so x^i cannot index the messages");
+/* Differences of distinct g(i) are non-zero integers below MSGS, and they have
+ * to stay coprime to q for Lemma 5, so MSGS must not reach the smaller prime of
+ * the basis. That is a far weaker bound than the ring degree, which is what the
+ * monomial encoding was limited by. */
+static_assert((unsigned long long) MSGS <
+		(nfl::params < uint64_t >::P[0] < nfl::params < uint64_t >::P[1] ?
+		 nfl::params < uint64_t >::P[0] : nfl::params < uint64_t >::P[1]),
+		"MSGS reaches the smallest prime of the basis, so g(i) - g(j) can be a zero divisor");
 
 /* One pass of the product argument has soundness error at most MSGS / p_min.
  * The challenges are uniform over R_q, which in a ring this split has to be
@@ -140,11 +138,11 @@ static params::poly_q *t, *tp, *_t, *u;
 static params::poly_q *theta, *inv, *inv_tmp;
 static params::poly_q *sg, *fa, *fb;
 
-/* The proof that every committed sigma_i is a monomial, which is the
- * membership sigma_i in D that Lemma 5 requires. It is produced by the prover
- * along with the P_i and consumed by the verifier; it is kept here rather than
+/* The proof that every committed sigma_i is a ring constant, the algebraic
+ * half of the membership Lemma 5 requires. It is produced by the prover along
+ * with the P_i and consumed by the verifier; it is kept here rather than
  * threaded through the already long argument lists of the two. */
-static pismall_mono_t *mono;
+static pismall_const_t *cst;
 
 /* The proof that every committed sigma_i is short, which is what makes the
  * coefficient sets of the membership proof exact; see the header comment. */
@@ -198,16 +196,17 @@ static void shuffle_free(void) {
 	delete[]sg;
 	delete[]fa;
 	delete[]fb;
-	pismall_mono_free(mono);
-	mono = NULL;
-	pismall_mono_clear();
+	pismall_const_free(cst);
+	cst = NULL;
+	pismall_const_clear();
 	pibnd_short_free(bnd);
 	bnd = NULL;
 	pibnd_short_clear();
 }
 
 /**
- * The map g : [N] -> D of Lemma 5, instantiated as the monomial map i -> x^i.
+ * The map g : [N] -> D of Lemma 5, instantiated as g(i) = i, the ring constant
+ * with that value.
  *
  * The result is in the coefficient domain, which is what bdlop_commit expects;
  * callers doing arithmetic with it have to convert.
@@ -215,13 +214,12 @@ static void shuffle_free(void) {
  * @param[out] out			- the resulting ring element.
  * @param[in] i				- the index to encode, below the degree of the ring.
  */
-static void index_monomial(params::poly_q & out, size_t i) {
+static void index_scalar(params::poly_q & out, size_t i) {
 	array < mpz_t, params::poly_q::degree > coeffs;
 
-	assert(i < params::poly_q::degree);
 	for (size_t k = 0; k < params::poly_q::degree; k++) {
 		mpz_init2(coeffs[k], (params::poly_q::bits_in_moduli_product() << 2));
-		mpz_set_ui(coeffs[k], k == i ? 1 : 0);
+		mpz_set_ui(coeffs[k], k == 0 ? i : 0);
 	}
 	out.mpz2poly(coeffs);
 	for (size_t k = 0; k < params::poly_q::degree; k++) {
@@ -714,7 +712,7 @@ static void shuffle_coeffs(params::poly_q coef[3], size_t l,
 		}
 	}
 
-	index_monomial(gl, l);
+	index_scalar(gl, l);
 	gl.ntt_pow_phi();
 	gl = gl * tau - mu;
 	coef[2] = coef[0] * gl + raw * (_ms[l] - mu);
@@ -750,8 +748,8 @@ static void shuffle_commit_sigma(commit_t p[MSGS],
 		sg[i].ntt_pow_phi();
 	}
 
-	pismall_mono_free(mono);
-	mono = pismall_mono_prove(key, p, pr, sigma, MSGS);
+	pismall_const_free(cst);
+	cst = pismall_const_prove(key, p, pr, sigma, MSGS);
 	pibnd_short_free(bnd);
 	bnd = pibnd_short_prove(key, p, pr, sigma, MSGS);
 }
@@ -777,7 +775,7 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 	 * Tying the index to every message is what forces the permutations of the
 	 * CRT components to coincide, and is what the published product lacked. */
 	for (size_t i = 0; i < MSGS; i++) {
-		index_monomial(gl, i);
+		index_scalar(gl, i);
 		gl.ntt_pow_phi();
 		fa[i] = ms[i] + gl * tau - mu;
 		fb[i] = _ms[i] + sg[i] * tau - mu;
@@ -838,7 +836,7 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
 	/* The first message is shared by every pass, so its sub-proofs are checked
 	 * with the first one. */
 	if (rep == 0) {
-		result &= pismall_mono_verify(mono, key, p, MSGS);
+		result &= pismall_const_verify(cst, key, p, MSGS);
 		result &= pibnd_short_verify(bnd, key, p, MSGS);
 	}
 
@@ -1010,7 +1008,7 @@ static void test() {
 		for (int j = 0; j < SIZE; j++) {
 			_m[i][j] = m[pi][j];
 		}
-		index_monomial(sigma[i], pi);
+		index_scalar(sigma[i], pi);
 	}
 
 	TEST_ONCE("polynomial inverse is correct") {
@@ -1035,22 +1033,24 @@ static void test() {
 		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 0, end);
 	} TEST_END;
 
-	TEST_ONCE("monomial differences are invertible") {
-		/* This is what makes the monomials a legal choice of D for Lemma 5:
-		 * x^a - x^b = x^b (x^{a-b} - 1), and every NTT slot is a primitive
-		 * 2N-th root of unity, so x^k - 1 vanishes in no slot for 0 < k < N. */
+	TEST_ONCE("scalar differences are invertible") {
+		/* This is what makes the constants a legal choice for Lemma 5: a
+		 * difference of distinct g(i) is a non-zero integer below MSGS, and
+		 * every such integer is coprime to q because it is smaller than either
+		 * prime of the basis. Note this holds however far the ring splits,
+		 * which is exactly what fails for the short ring elements below. */
 		params::poly_q ga, gb, t0;
 
 		for (size_t k = 1; k < 8; k++) {
-			index_monomial(ga, 0);
-			index_monomial(gb, k);
+			index_scalar(ga, 0);
+			index_scalar(gb, k);
 			ga.ntt_pow_phi();
 			gb.ntt_pow_phi();
 			ga = ga - gb;
 			TEST_ASSERT(poly_inverse(t0, ga) == 1, end);
 		}
-		index_monomial(ga, params::poly_q::degree - 1);
-		index_monomial(gb, 1);
+		index_scalar(ga, MSGS - 1);
+		index_scalar(gb, 0);
 		ga.ntt_pow_phi();
 		gb.ntt_pow_phi();
 		ga = ga - gb;
@@ -1266,7 +1266,7 @@ static void bench() {
 		for (int j = 0; j < SIZE; j++) {
 			_m[i][j] = m[pi][j];
 		}
-		index_monomial(sigma[i], pi);
+		index_scalar(sigma[i], pi);
 	}
 
 	for (size_t i = 0; i < 3; i++) {
