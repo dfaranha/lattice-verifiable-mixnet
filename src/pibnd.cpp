@@ -85,24 +85,28 @@ static const double SIGMA_ANEX_HAT =
 static const bool ANEX_HAT_LARGE = SIGMA_ANEX_HAT > 1e15;
 
 /* A params::poly_q is 64 KiB, so the matrices dimensioned by TAU or NTI are far
- * too large to be locals: C[TAU][NTI] alone is about 8.5 GiB at the default
+ * too large to be locals: s and t alone are 600 MiB at the default
  * parameters. They are allocated on the heap once at start-up, and the pointers
  * below index exactly like the two-dimensional arrays they replace. The prover
  * and the verifier each rederive W and C from the transcript, so one copy of
  * each is enough for both.
  *
- * NOTE: with TAU = 1000 and NTI = 130 this binary needs roughly 9 GiB of RAM.
- * Pass e.g. CONFIG="-DTAU=8 -DNTI=8" to make to try it on a smaller machine. */
+ * NOTE: with TAU = 1000 and NTI = 130 this binary needs roughly 700 MiB, nearly
+ * all of it s and t. It was 9 GiB before the challenge matrix was streamed. */
 static params::poly_q A[R][V];
 static params::poly_q (*s)[V], (*t)[V];
-static params::poly_q (*Z)[NTI], (*W)[NTI], (*C)[NTI], (*SC)[NTI];
+static params::poly_q (*Z)[NTI], (*W)[NTI], (*SC)[NTI];
+/* One row of the challenge matrix. Both sides derive C from the transcript
+ * hash and each consumes it once, row by row, so a row at a time is enough and
+ * the matrix itself is never stored: at TAU = 1000 it would be 8 GiB. */
+static params::poly_q *Crow;
 
 static void pibnd_alloc(void) {
 	s = new params::poly_q[TAU][V];
 	t = new params::poly_q[TAU][V];
 	Z = new params::poly_q[V][NTI];
 	W = new params::poly_q[R][NTI];
-	C = new params::poly_q[TAU][NTI];
+	Crow = new params::poly_q[NTI];
 	SC = new params::poly_q[V][NTI];
 }
 
@@ -111,7 +115,7 @@ static void pibnd_free(void) {
 	delete[]t;
 	delete[]Z;
 	delete[]W;
-	delete[]C;
+	delete[]Crow;
 	delete[]SC;
 }
 
@@ -310,11 +314,23 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		/* Sample challenge from RNG seeded with hash. */
 		nfl::fastrandombytes_seed(h);
 
-		/* Verifier samples challenge matrix C. */
-		for (int i = 0; i < TAU; i++) {
+		/* Verifier samples challenge matrix C, one row at a time, each row
+		 * folded into SC before the next is drawn. The draws happen in the
+		 * same order as the matrix is indexed, so this is the same C. */
+		for (int i = 0; i < V; i++) {
 			for (int j = 0; j < NTI; j++) {
-				C[i][j] = nfl::ZO_dist();
-				C[i][j].ntt_pow_phi();
+				SC[i][j] = 0;
+			}
+		}
+		for (int k = 0; k < TAU; k++) {
+			for (int j = 0; j < NTI; j++) {
+				Crow[j] = nfl::ZO_dist();
+				Crow[j].ntt_pow_phi();
+			}
+			for (int i = 0; i < V; i++) {
+				for (int j = 0; j < NTI; j++) {
+					SC[i][j] = SC[i][j] + s[k][i] * Crow[j];
+				}
 			}
 		}
 
@@ -323,10 +339,6 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		/* Prover computes Z = Y + SC and performs rejection sampling. */
 		for (int i = 0; i < V; i++) {
 			for (int j = 0; j < NTI; j++) {
-				SC[i][j] = 0;
-				for (int k = 0; k < TAU; k++) {
-					SC[i][j] = SC[i][j] + s[k][i] * C[k][j];
-				}
 				Z[i][j] = Z[i][j] + SC[i][j];
 			}
 		}
@@ -349,21 +361,9 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 	uint8_t h2[BLAKE3_OUT_LEN];
 	int result;
 
-	/* Sample challenge from RNG seeded with hash. */
-	nfl::fastrandombytes_seed(h1);
-
-	/* Verifier samples challenge matrix C. */
-	for (int i = 0; i < TAU; i++) {
-		for (int j = 0; j < NTI; j++) {
-			C[i][j] = nfl::ZO_dist();
-			C[i][j].ntt_pow_phi();
-		}
-	}
-
-	/* Restore the global PRNG, which is still seeded with the public hash. */
-	nfl::fastrandombytes_reseed();
-
-	/* Verifier checks that W = AZ - TC. */
+	/* Verifier checks that W = AZ - TC. The A Z half needs no challenge, so it
+	 * comes first and the rows of C are drawn and consumed after it; nothing
+	 * in between touches the PRNG. */
 	for (int i = 0; i < R; i++) {
 		for (int j = 0; j < NTI; j++) {
 			W[i][j] = 0;
@@ -372,13 +372,23 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 			}
 		}
 	}
-	for (int i = 0; i < R; i++) {
+
+	/* Sample challenge from RNG seeded with hash, a row of C at a time. */
+	nfl::fastrandombytes_seed(h1);
+	for (int k = 0; k < TAU; k++) {
 		for (int j = 0; j < NTI; j++) {
-			for (int k = 0; k < TAU; k++) {
-				W[i][j] = W[i][j] - t[k][i] * C[k][j];
+			Crow[j] = nfl::ZO_dist();
+			Crow[j].ntt_pow_phi();
+		}
+		for (int i = 0; i < R; i++) {
+			for (int j = 0; j < NTI; j++) {
+				W[i][j] = W[i][j] - t[k][i] * Crow[j];
 			}
 		}
 	}
+
+	/* Restore the global PRNG, which is still seeded with the public hash. */
+	nfl::fastrandombytes_reseed();
 
 	pibnd_hash(h2, A, t, W);
 
