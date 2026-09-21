@@ -60,6 +60,15 @@ static const double SIGMA_ANEX =
 static const double SIGMA_ANEX_HAT =
 		0.954 * ANEX_E_INF * DEGREE * sqrt((double) NTI * TAU / 2.0);
 
+/* Whether the last row needs the quad-precision sampler. sigma-hat_ANEx runs
+ * past 2^64 when the last witness row is the mix-net's decryption noise, whose
+ * infinity norm is far above BETA, and then it does. When the row is as short
+ * as the others, sigma-hat is a few thousand and the double sampler covers it,
+ * at two orders of magnitude less time. Both sides of the branch are
+ * compile-time constant.
+ */
+static const bool ANEX_HAT_LARGE = SIGMA_ANEX_HAT > 1e15;
+
 /* A params::poly_q is 64 KiB, so the matrices dimensioned by TAU or NTI are far
  * too large to be locals: C[TAU][NTI] alone is about 8.5 GiB at the default
  * parameters. They are allocated on the heap once at start-up, and the pointers
@@ -258,6 +267,8 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 				for (size_t k = 0; k < params::poly_q::degree; k++) {
 					if (i < V - 1) {
 						coeff = sample_z(0.0, SIGMA_ANEX);
+					} else if (!ANEX_HAT_LARGE) {
+						coeff = sample_z(0.0, SIGMA_ANEX_HAT);
 					} else {
 						coeff = sample_z((__float128) 0.0,
 								(__float128) SIGMA_ANEX_HAT);
