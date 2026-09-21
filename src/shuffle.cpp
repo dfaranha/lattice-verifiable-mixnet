@@ -81,11 +81,14 @@
  * binary over the integers, the Y row then pins the Hamming weight to one over
  * the integers as well, and sigma_i in D follows.
  *
- * CAVEAT. The two sub-proofs are run on the same commitments and the same
- * witness, but they are separate proofs: the membership one extracts an exact
- * opening, the norm one a relaxed one, and the argument above reads them as
- * statements about a single opening. Making that step rigorous is the part of
- * this branch that has not been checked; see SOUNDNESS.md, section 6.
+ * The two sub-proofs are separate proofs about the same commitments, the
+ * membership one extracting an exact opening and the norm one a relaxed
+ * opening, so reading them as statements about a single opening takes an
+ * argument. It is made modulo each prime of the basis rather than over Z_q,
+ * where the exact opening is short in the ordinary sense -- that is what 6.2
+ * says, read the other way round -- and it costs one extra assumption, MSIS
+ * modulo each p_j and not only modulo their product. See SOUNDNESS.md,
+ * section 6.4.
  */
 
 /* Monomials are distinct only up to the degree of the ring, and g must be
@@ -1081,6 +1084,22 @@ static void test() {
 		}
 		TEST_ASSERT(weight == 22, end);
 		TEST_ASSERT(poly_inverse(t0, e) == 0, end);
+	} TEST_END;
+
+	TEST_ONCE("the norm bound leaves room for the CRT argument") {
+		/* Section 6.4 of SOUNDNESS.md concludes that sigma_i is the same
+		 * monomial in both CRT components by reading two congruences, one
+		 * modulo each prime of the basis, as equalities over the integers.
+		 * That step needs every quantity in them to stay below p_min / 2:
+		 * twice the norm bound, because extraction compares two transcripts,
+		 * plus the slack of a challenge difference times a monomial. */
+		double slack = 2.0 * pibnd_short_bound() + 2.0 * DEGREE;
+		double pmin = nfl::params < uint64_t >::P[0]
+				< nfl::params < uint64_t >::P[1]
+				? nfl::params < uint64_t >::P[0]
+				: nfl::params < uint64_t >::P[1];
+
+		TEST_ASSERT(slack < pmin / 2.0, end);
 	} TEST_END;
 
 	TEST_ONCE("shuffle proof is consistent") {

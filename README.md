@@ -41,9 +41,11 @@ below 128 bits any more.
 **Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this.** Two things
 in particular. `\Pi_SMALL` is not exact over `Z_q` on its own terms either,
 where "ternary" likewise means "ternary in each CRT component"; a `KNOWN GAP`
-test in `pismall` exhibits a full-size element it accepts as ternary. And the
-argument above reads the two sub-proofs as statements about a single opening of
-`P_i`, which is the step that has not been worked out.
+test in `pismall` exhibits a full-size element it accepts as ternary. And
+reading the two sub-proofs as statements about a single opening of `P_i` takes
+an argument, made in section 6.4 modulo each prime of the basis, which costs one
+assumption the mix-net did not make before: MSIS modulo each `p_j` and not only
+modulo their product.
 
 Dependencies are the [NFLlib](https://github.com/quarkslab/NFLlib) and [FLINT](https://flintlib.org/doc/) libraries.
 NFLlib is already included in this repository, but instructions for installing its dependencies can be found in the link above.

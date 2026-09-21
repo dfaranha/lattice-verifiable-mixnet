@@ -48,6 +48,14 @@ pibnd_short_t *pibnd_short_prove(comkey_t & key, commit_t * P,
 int pibnd_short_verify(pibnd_short_t * pi, comkey_t & key, commit_t * P,
 		size_t n);
 
+/**
+ * The l2-norm bound the verifier enforces on each masked opening. The argument
+ * of SOUNDNESS.md section 6.4 reads two congruences modulo the primes of the
+ * basis as equalities over the integers, which needs twice this bound, plus
+ * the slack of a challenge difference, to stay below p_min / 2.
+ */
+double pibnd_short_bound(void);
+
 /** Release a proof, and the buffers the proofs share. */
 void pibnd_short_free(pibnd_short_t * pi);
 void pibnd_short_clear(void);

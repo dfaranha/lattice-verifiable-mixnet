@@ -5,11 +5,12 @@
 This is a **draft argument, not a reviewed result.** It records what the
 `fix-pkc` branch changes in `src/shuffle.cpp`, why those changes are believed
 to be necessary and sufficient against the published attack, and — just as
-importantly — **what this branch still does not prove.** Section 6 is the part
-to read before trusting anything here: section 6.2 reports a defect in
-`Pi_SMALL` itself, not only in the proof of shuffle, and section 6.4 states the
-one step of the argument that has not been worked out. The test suite asserts
-the defect of 6.2 rather than hiding it.
+importantly — **the assumptions it rests on.** Section 6 is the part to read
+before trusting anything here: section 6.2 reports a defect in `Pi_SMALL`
+itself, not only in the proof of shuffle, and section 6.4 closes the argument at
+the cost of assuming MSIS modulo each prime of the RNS basis and not only modulo
+their product. The test suite asserts the defect of 6.2, and the inequality 6.4
+depends on, rather than hiding either.
 
 ## 1. The attack
 
@@ -191,8 +192,8 @@ on the same commitments: `Pi_SMALL` for the algebraic half, which says that
 `sigma_i` is a monomial in each CRT component, and `Pi_BND` for the half no
 algebraic identity can give over a composite modulus, which says that its
 coefficients are small enough for the two components to be the same monomial.
-What has not been worked out is the step that reads the two as statements about
-one opening; that is 6.4.
+Section 6.4 is the argument that reads the two as statements about one opening,
+which needs MSIS modulo each prime of the basis rather than only modulo `q`.
 
 ### 6.1 What is proven
 
@@ -317,20 +318,74 @@ Two implementation notes, both visible in `src/pibnd.cpp`:
   faster, the mix-net's own instance included, since its test witness is ternary
   as well.
 
-### 6.4 What is still not checked
+### 6.4 Why the two sub-proofs speak about one opening
 
-**The two sub-proofs are read as statements about one opening.** `Pi_SMALL`
-extracts an exact opening of `P_i`. `Pi_BND`, like every Fiat-Shamir Sigma
-protocol of this shape, extracts a relaxed one: a short `s'` with `A s' = t c`
-for `c` a difference of challenges. The argument in 6.3 treats the `sigma_i` of
-the two as the same ring element. Identifying them is the usual appeal to the
-binding of the commitment scheme, except that the usual appeal wants the exact
-opening to be short, which is the thing being proven. This is the step of this
-branch that has not been worked out, and it is why this document still opens by
-saying what it is.
+The two sub-proofs are different kinds of object. `Pi_SMALL` is an *exact* proof
+of knowledge: its extractor outputs a witness satisfying the relation and the
+coefficient sets with no relaxation, which is what "exact" in its name means.
+`Pi_BND`, like every Fiat-Shamir Sigma protocol of its shape, extracts a
+*relaxed* opening: a short `s'` and a short non-zero `c` with `A s' = t c`,
+where `c` is a difference of challenges. Section 6.3 treats the `sigma_i` of the
+two as one ring element, and that step needs an argument, because the obvious
+one does not work: multiplying the exact relation by `c` and subtracting gives
+`A (c r - r') = 0`, and one cannot conclude `c r - r' = 0` from the binding of
+the commitment, since `r` is short only in each CRT component and `c r` need not
+be short over `Z_q` at all.
 
-Two alternatives to the pair of sub-proofs, both larger, and neither needed if
-the step above goes through:
+The way through is to stop working over `Z_q`. Write the extracted witness in
+CRT form, `sigma = e_1 sigma^(1) + e_2 sigma^(2)` and `r = e_1 r^(1) + e_2
+r^(2)`. What 6.2 calls a defect says exactly that `sigma^(j)` is binary and
+`r^(j)` is ternary **as integer polynomials**, for each `j`. In other words the
+exact extraction hands us, for each prime of the basis, an opening of `P_i`
+modulo that prime that is short in the ordinary sense. The comparison that fails
+over `Z_q` therefore succeeds modulo `p_j`.
+
+**Claim.** Suppose MSIS over `R_{p_j} = Z_{p_j}[x]/(x^N + 1)` is hard at norm
+`beta` for each prime `p_j` of the basis, where `beta` is twice the bound of
+`Pi_BND` plus the slack of a challenge difference. Then an accepting transcript
+of the two sub-proofs implies `sigma_i in D`.
+
+*Proof.* Let `(r, sigma)` be the exact opening extracted from `Pi_SMALL` and
+`(r', sigma')`, `c` the relaxed one from `Pi_BND`.
+
+1. **The components are monomials over the integers.** Fix `j`. By 6.2,
+   `sigma^(j)` is a 0/1 polynomial and `Y^(j) = w sigma^(j)` has every
+   coefficient congruent to `+/-1` modulo `p_j`. But `(w sigma^(j))_i = S_j - 2
+   A_{i-1}` is an honest integer in `[-N, N]` and `p_j > 2N`, so those
+   coefficients *are* `+/-1`; the constant one is `S_j`, the Hamming weight,
+   which is in `[0, N]`, so `S_j = 1` and `sigma^(j) = x^{a_j}`. This step needs
+   no norm proof at all.
+2. **The two openings coincide modulo each prime.** Reducing both relations
+   modulo `p_j` gives `A (r', sigma') = (c1, c2) c` and `A (c r^(j), c
+   sigma^(j)) = (c1, c2) c`, so `A1` kills the difference of the randomness
+   parts. Both are short -- `r'` by `Pi_BND`, `c r^(j)` because `c` is short and
+   `r^(j)` ternary -- so their difference is a short element of the kernel of
+   `A1` modulo `p_j`, and by the assumption it is zero. The message row then
+   gives `sigma' = c sigma^(j) = c x^{a_j}` modulo `p_j`.
+3. **The congruences are equalities.** `sigma'`, `c x^{a_1}` and `c x^{a_2}` all
+   have infinity norm below `p_min / 2`, so step 2 read modulo `p_1` and modulo
+   `p_2` gives `sigma' = c x^{a_1}` and `sigma' = c x^{a_2}` in
+   `Z[x]/(x^N + 1)`. The test `the norm bound leaves room for the CRT argument`
+   checks that inequality at the parameters in force rather than assuming it.
+4. **Hence one monomial.** `x^N + 1` is the `2N`-th cyclotomic polynomial and
+   `N` is a power of two, so it is irreducible over `Q` and `Z[x]/(x^N + 1)` is
+   an integral domain. From `c x^{a_1} = c x^{a_2}` and `c` non-zero,
+   `a_1 = a_2`, so `sigma_i = x^{a_1}` is a monomial and lies in `D`. []
+
+Two remarks. The relaxation factor `c` cancels, so the slack of `Pi_BND` costs
+nothing here; only its norm bound is used. And the extra assumption is a real
+one: MSIS modulo `p_j` is *stronger* than MSIS modulo `q`, since a short kernel
+element modulo `q` reduces to one modulo `p_j` but not conversely. It is of
+entirely standard form, and it holds here with room. The lattice has dimension
+`N * WIDTH = 16384` and determinant `p_j^N`, and reaching `beta` needs a root
+Hermite factor of `1.00095` at `MSGS = 1000` and `1.00068` at `MSGS = 2`,
+against the `1.0045` or so at which 128-bit security is usually placed -- block
+sizes in the thousands. Note also that if MSIS modulo `p_j` were easy the
+commitment scheme would be in trouble on its own terms, since two openings
+differing by something that vanishes modulo one prime would be findable.
+
+Two alternatives to the pair of sub-proofs, both larger, and neither needed
+given the above:
 
 1. **Move `D` to the small scalars**, `g(i) = i`, the choice of Costa, Martinez
    and Morillo, legal here because a non-zero scalar smaller than `p_1` is
@@ -383,8 +438,8 @@ the product argument, about `2^-133` for `Pi_SMALL` — `2^-66` per pass from th
 test at `2^-82` or better on 325 of 16384 columns at relative distance 0.48 —
 and `Pi_BND` at its own `NTI = 130`. No term is now below `LEVEL`, so the
 binding constraint is the hardness of the lattice problems the commitment and
-the encryption rest on, which is where it should be. Section 6.4 remains the
-exception, being an unproven step rather than a term with a size.
+the encryption rest on, which is where it should be — with the caveat that
+section 6.4 adds one of them, MSIS modulo each prime of the basis.
 
 ## 8. Summary
 
@@ -396,7 +451,8 @@ exception, being an unproven step rather than a term with a size.
 | `sigma_i` outside `D`, one component | accepted | rejected |
 | CRT-mixed `sigma_i` | accepted | rejected, by the norm bound |
 | coefficient sets of `Pi_SMALL` | per CRT component | per CRT component, see 6.2 |
-| the two sub-proofs as one opening | n/a | **not worked out, see 6.4** |
+| the two sub-proofs as one opening | n/a | argued modulo each `p_j`, see 6.4 |
+| assumptions | MSIS and MLWE mod `q` | and MSIS mod each `p_j`, see 6.4 |
 | verifier equality | one slot in 8192 | all slots |
 | soundness error of the product argument | `~2^-29` | `~2^-140`, see Section 7 |
 | mask on the published `s_i` | ternary | uniform, see Section 5 |

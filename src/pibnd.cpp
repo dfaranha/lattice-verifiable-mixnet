@@ -514,6 +514,12 @@ int pibnd_short_verify(pibnd_short_t * pi, comkey_t & key, commit_t * P,
 	return pibnd_verifier(pi->h, short_scratch, A, t);
 }
 
+double pibnd_short_bound(void) {
+	double sigma = SIGMA_ANEX > SIGMA_ANEX_HAT ? SIGMA_ANEX : SIGMA_ANEX_HAT;
+
+	return sigma * sqrt(2.0 * params::poly_q::degree);
+}
+
 void pibnd_short_free(pibnd_short_t * pi) {
 	if (pi == NULL) {
 		return;
