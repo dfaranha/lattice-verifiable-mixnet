@@ -35,8 +35,12 @@ CRT-mixes the committed `sigma_i` as well as the messages is now rejected.
 
 One pass of the product argument is worth only `MSGS / p_min`, about `2^-29` at
 `MSGS = 1000`, so it is repeated with independent challenges as many times as
-`LEVEL` needs -- four or five at any supported size. No term of the proof is
-below 128 bits any more.
+`LEVEL` needs -- four or five at any supported size. The same repetitions cover
+a second weakness found afterwards: the challenge set of the linear proof is not
+free of zero divisors in a ring splitting this far, so that proof is worth only
+about `2^-39` per pass and has no soundness argument of its own. A `KNOWN GAP`
+test exhibits a legal challenge that is a zero divisor. With the repetitions no
+term of the proof is below 128 bits.
 
 **Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this.** Two things
 in particular. `\Pi_SMALL` is not exact over `Z_q` on its own terms either,

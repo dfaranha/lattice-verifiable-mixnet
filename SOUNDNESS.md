@@ -5,12 +5,14 @@
 This is a **draft argument, not a reviewed result.** It records what the
 `fix-pkc` branch changes in `src/shuffle.cpp`, why those changes are believed
 to be necessary and sufficient against the published attack, and — just as
-importantly — **the assumptions it rests on.** Section 6 is the part to read
-before trusting anything here: section 6.2 reports a defect in `Pi_SMALL`
-itself, not only in the proof of shuffle, and section 6.4 closes the argument at
-the cost of assuming MSIS modulo each prime of the RNS basis and not only modulo
-their product. The test suite asserts the defect of 6.2, and the inequality 6.4
-depends on, rather than hiding either.
+importantly — **the assumptions it rests on.** Sections 6 and 8 are the parts to
+read before trusting anything here: section 6.2 reports a defect in `Pi_SMALL`
+itself, not only in the proof of shuffle, section 6.4 closes the argument at the
+cost of assuming MSIS modulo each prime of the RNS basis and not only modulo
+their product, and section 8 reports that the challenge set of the linear proof
+contains zero divisors, so that proof has no soundness argument of its own and
+is carried by the repetitions of section 7. The test suite asserts both defects,
+and the inequality 6.4 depends on, rather than hiding any of them.
 
 ## 1. The attack
 
@@ -441,7 +443,73 @@ binding constraint is the hardness of the lattice problems the commitment and
 the encryption rest on, which is where it should be — with the caveat that
 section 6.4 adds one of them, MSIS modulo each prime of the basis.
 
-## 8. Summary
+These repetitions turn out to carry more than the term they were sized against.
+Section 8 reports that the linear proof is worth about `2^-39` per pass for an
+unrelated reason, and it is the same repetitions that compose it to `2^-156`.
+Removing them because the product argument had been strengthened by some other
+means would reopen that.
+
+## 8. The challenge sets of the Sigma-protocols
+
+The same disease reaches one level lower than sections 2 and 7, into the
+challenge sets themselves, and it had not been looked at.
+
+`lin_hash` draws the challenge `beta` of the linear proof with
+`bdlop_sample_chal`, the difference of two ternary vectors of Hamming weight
+`NONZERO = 36`. Every argument about that proof wants such elements, and the
+differences of two of them, to be invertible, and the justification is [42,
+Corollary 1.2] once more — vacuous at `k = 2N`, exactly as section 2 says of the
+choice of `D`. Nobody had applied that observation to the challenges.
+
+**It is not invertible.** The test
+
+```
+KNOWN GAP: a challenge difference can be a zero divisor
+```
+
+exhibits a polynomial with 8 coefficients `+1` and 6 coefficients `-1` that
+vanishes in one of the 8192 NTT slots modulo `p_1`, and is non-zero modulo
+`p_2`. It is a legal value of `beta`: put 7 of its 14 support positions on each
+side and add 29 shared positions that cancel, and both sides have Hamming
+weight exactly `NONZERO`. It was found by meet-in-the-middle over subset sums of
+the powers of one primitive `2N`-th root, in seconds, the same way as the short
+zero divisor of section 3.
+
+**What that costs.** The last check of `lin_verifier` reduces, after
+substituting the prover's responses, to
+
+```
+beta * L = 0,      L = coef[0] m_x + coef[1] m_p + coef[2] - m_x'
+```
+
+where `L` is the residual of the linear relation over the committed messages.
+An honest prover has `L = 0`. A prover whose committed messages violate the
+relation in a single CRT slot passes exactly when `beta` vanishes in that slot,
+which for a random `beta` is about `1 / p_min = 2^-39`. The challenge is derived
+by Fiat-Shamir, so this is grindable rather than merely unlucky: re-committing
+`D_i` to the same message with fresh randomness moves `beta` without moving that
+message. So the honest reading is **39 bits per pass, not 128**, and there is no
+soundness proof at all, since the extraction argument needs the invertibility
+the test denies.
+
+**Why the protocol survives.** Section 7 repeats everything after the first
+message `SHUFFLE_REPS` times with independent challenges, and a prover whose
+output list is not a permutation has to defeat every pass, each with its own
+`beta`. At four or five passes that composes to `2^-156` or better. This was not
+the reason the repetitions were introduced — they were sized against the `2^-29`
+of the product argument, which is the weaker term — but they cover this as well.
+The practical conclusion is that the repetitions carry more weight than their
+stated purpose, and removing them on the grounds that the product argument had
+been improved by other means would reopen this.
+
+**What has not been checked.** `Pi_BND` draws its challenge matrix from ternary
+ring elements, and its extraction wants their differences invertible for the
+same reason; a full-weight ternary polynomial is no more likely to be a unit
+here than a sparse one. That argument has not been redone. `bdlop_open` uses the
+same challenge set, but `pismall` calls it with the factor fixed to one, so
+nothing there depends on a challenge being invertible.
+
+## 9. Summary
 
 | | before | on this branch |
 | --- | --- | --- |
@@ -452,6 +520,8 @@ section 6.4 adds one of them, MSIS modulo each prime of the basis.
 | CRT-mixed `sigma_i` | accepted | rejected, by the norm bound |
 | coefficient sets of `Pi_SMALL` | per CRT component | per CRT component, see 6.2 |
 | the two sub-proofs as one opening | n/a | argued modulo each `p_j`, see 6.4 |
+| challenge differences of `Pi_LIN` | assumed invertible | **zero divisors, see Section 8** |
+| soundness error of `Pi_LIN` | `~2^-39`, unnoticed | `~2^-156` by the repetitions |
 | assumptions | MSIS and MLWE mod `q` | and MSIS mod each `p_j`, see 6.4 |
 | verifier equality | one slot in 8192 | all slots |
 | soundness error of the product argument | `~2^-29` | `~2^-140`, see Section 7 |

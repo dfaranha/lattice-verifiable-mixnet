@@ -291,7 +291,11 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 
 	blake3_hasher_finalize(&hasher, hash, BLAKE3_OUT_LEN);
 
-	/* Sample challenge from RNG seeded with hash. */
+	/* Sample challenge from RNG seeded with hash. The challenge set is not free
+	 * of zero divisors in this ring -- the test "KNOWN GAP: a challenge
+	 * difference can be a zero divisor" exhibits one -- so this proof is worth
+	 * only about 1 / p_min on its own and is carried by the repetitions of
+	 * shuffle_prover. See SOUNDNESS.md, sections 7 and 8. */
 	nfl::fastrandombytes_seed(hash);
 	bdlop_sample_chal(beta);
 	nfl::fastrandombytes_reseed();
@@ -1100,6 +1104,51 @@ static void test() {
 				: nfl::params < uint64_t >::P[1];
 
 		TEST_ASSERT(slack < pmin / 2.0, end);
+	} TEST_END;
+
+	TEST_ONCE("KNOWN GAP: a challenge difference can be a zero divisor") {
+		/* The linear proof draws beta with bdlop_sample_chal, the difference of
+		 * two weight-NONZERO ternary vectors, and every argument about it --
+		 * the 2-special-soundness extraction, and the final check, which passes
+		 * exactly when beta times the relation residual vanishes -- wants such
+		 * differences to be invertible. The justification is [42, Corollary
+		 * 1.2] once more, vacuous at k = 2N as Section 2 explains.
+		 *
+		 * The pattern below has 8 coefficients +1 and 6 coefficients -1, so it
+		 * is one of those differences: put 7 of its support positions on each
+		 * side and add 29 shared positions that cancel, and both sides have
+		 * Hamming weight exactly NONZERO. It vanishes in one of the 8192 NTT
+		 * slots. Found by meet-in-the-middle over subset sums of the powers of
+		 * one primitive 2N-th root modulo the first RNS prime, in seconds, the
+		 * same way as the short zero divisor above. Asserting the bug. */
+		const char *pat = "+0+00+0+00++0000000++000000000000--0000---000-";
+		array < mpz_t, params::poly_q::degree > coeffs;
+		params::poly_q e, t0;
+		size_t pos = 0, neg = 0;
+
+		for (size_t i = 0; i < params::poly_q::degree; i++) {
+			mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
+			mpz_set_ui(coeffs[i], 0);
+		}
+		for (size_t i = 0; pat[i] != '\0'; i++) {
+			if (pat[i] == '+') {
+				mpz_set_ui(coeffs[i], 1);
+				pos++;
+			} else if (pat[i] == '-') {
+				mpz_set(coeffs[i], params::poly_q::moduli_product());
+				mpz_sub_ui(coeffs[i], coeffs[i], 1);
+				neg++;
+			}
+		}
+		e.mpz2poly(coeffs);
+		e.ntt_pow_phi();
+		for (size_t i = 0; i < params::poly_q::degree; i++) {
+			mpz_clear(coeffs[i]);
+		}
+		/* a legal difference of two weight-NONZERO vectors */
+		TEST_ASSERT(pos == 8 && neg == 6, end);
+		TEST_ASSERT((pos + neg) % 2 == 0 && (pos + neg) / 2 <= NONZERO, end);
+		TEST_ASSERT(poly_inverse(t0, e) == 0, end);
 	} TEST_END;
 
 	TEST_ONCE("shuffle proof is consistent") {
