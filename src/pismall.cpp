@@ -43,6 +43,27 @@
  * and a reduction. */
 #define AEX_NR      3
 
+/* Coefficient sets a witness component can be proven to live in. The pointwise
+ * identity is the product of (f - v) over the set, so its degree is the size
+ * of the set: AEX_TER is cubic, the other two quadratic. Three quotient levels
+ * cover all of them, the quadratics simply leaving the top one zero, so the
+ * codeword layout does not change with the set.
+ *
+ * AEX_BIN and AEX_SGN exist for the proof of shuffle, which needs a committed
+ * element to be a monomial. That is not a pointwise property, but it splits
+ * into two that are: sigma is binary, and sigma * (2 - sum_j x^j) has all
+ * coefficients in {-1, 1}. The second factor is public, so the product is one
+ * more row of A. */
+typedef enum {
+	AEX_TER = 0,                /* {-1, 0, 1} */
+	AEX_BIN,                    /* {0, 1}     */
+	AEX_SGN                     /* {-1, 1}    */
+} aex_set_t;
+
+/* The set each component of the witness lives in, ternary unless a caller says
+ * otherwise. */
+static aex_set_t aex_sets[V] = { };
+
 /* r <- AEX_NR * a, by addition. Must double into a temporary: gr_inv calls
  * this in place, and accumulating into r would square the doubling and give
  * 4a instead of 3a. */
@@ -150,6 +171,31 @@ static void gr_pow_ui(gr_t & r, const gr_t & a, ulong e,
 	gr_clear(base); gr_clear(acc);
 }
 
+
+/* Sample a ring element whose coefficients are uniform over the set, which
+ * hwt_dist and ZO_dist between them do not cover. */
+static void aex_sample_set(params::poly_q & out, aex_set_t set) {
+	array < mpz_t, params::poly_q::degree > c;
+	uint8_t b[params::poly_q::degree];
+
+	if (getrandom(b, sizeof(b), 0) != (ssize_t) sizeof(b)) {
+		fprintf(stderr, "ERROR: could not read entropy for sampling\n");
+		abort();
+	}
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_init2(c[i], (params::poly_q::bits_in_moduli_product() << 2));
+		if (set == AEX_BIN) {
+			mpz_set_ui(c[i], b[i] & 1);
+		} else {
+			mpz_set_si(c[i], (b[i] & 1) ? 1 : -1);
+		}
+	}
+	out.mpz2poly(c);
+	out.ntt_pow_phi();
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(c[i]);
+	}
+}
 
 /* Everything dimensioned by TAU is far too large to be a local: at TAU = 1000,
  * s is 512 MiB, H is 786 MiB, and the prover's v_i,j are 3 * TAU * V arrays of
@@ -692,10 +738,20 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][2],
 			for (size_t l = 0; l < params::poly_q::degree; l++) {
 				fmpz_mod_poly_get_coeff_fmpz(fv.c0, f[k][0], l, ctx);
 				fmpz_mod_poly_get_coeff_fmpz(fv.c1, f[k][1], l, ctx);
-				gr_sub(cub, fv, one, ctx);
-				gr_mul(cub, cub, fv, ctx);
-				gr_add(t, fv, one, ctx);
-				gr_mul(cub, cub, t, ctx);
+				if (aex_sets[k] == AEX_SGN) {
+					/* (f - 1)(f + 1) */
+					gr_sub(cub, fv, one, ctx);
+					gr_add(t, fv, one, ctx);
+					gr_mul(cub, cub, t, ctx);
+				} else {
+					/* f (f - 1), and one more factor for the ternary set */
+					gr_sub(cub, fv, one, ctx);
+					gr_mul(cub, cub, fv, ctx);
+					if (aex_sets[k] == AEX_TER) {
+						gr_add(t, fv, one, ctx);
+						gr_mul(cub, cub, t, ctx);
+					}
+				}
 				gr_mul(cub, cub, l0inv, ctx);
 				fmpz_mod_poly_set_coeff_fmpz(g[0], l, cub.c0, ctx);
 				fmpz_mod_poly_set_coeff_fmpz(g[1], l, cub.c1, ctx);
@@ -911,7 +967,7 @@ static size_t aex_divl0(aex_u64 * dst, const aex_u64 * src, size_t len,
 /* Extract v[j][i] for one coefficient position modulo one prime. */
 static void aex_extract(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
 		const aex_tw_t & TT, const aex_tw_t & T4, aex_u64 * bufA,
-		aex_u64 * bufB, aex_u64 * buft) {
+		aex_u64 * bufB, aex_u64 * buft, aex_set_t set) {
 	const aex_u64 p = TT.p;
 	/* g = interpolant of b at the nodes */
 	for (size_t i = 0; i < TAU; i++) {
@@ -930,16 +986,23 @@ static void aex_extract(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
 	for (size_t i = 0; i <= TAU; i++) {
 		bufB[i] = bufA[i];
 	}
-	/* f^3 on 4 TAU points, then subtract f */
+	/* The pointwise polynomial on 4 TAU points: f^3 - f for the ternary set,
+	 * f^2 - f for the binary one, f^2 - 1 for the signs. */
 	aex_ntt_tw(bufA, T4, 0);
 	for (size_t i = 0; i < AEX_N4; i++) {
-		bufA[i] = aex_mul(aex_mul(bufA[i], bufA[i], p), bufA[i], p);
+		aex_u64 fi = bufA[i];
+		aex_u64 sq = aex_mul(fi, fi, p);
+		bufA[i] = (set == AEX_TER) ? aex_mul(sq, fi, p) : sq;
 	}
 	aex_ntt_tw(bufA, T4, 1);
-	for (size_t i = 0; i <= TAU; i++) {
-		bufA[i] = aex_sub(bufA[i], bufB[i], p);
+	if (set == AEX_SGN) {
+		bufA[0] = aex_sub(bufA[0], 1, p);
+	} else {
+		for (size_t i = 0; i <= TAU; i++) {
+			bufA[i] = aex_sub(bufA[i], bufB[i], p);
+		}
 	}
-	/* Q = (f^3 - f) / (X^TAU - 1) */
+	/* Q = P(f) / (X^TAU - 1) */
 	size_t len = aex_divl0(bufB, bufA, AEX_N4, p);
 	aex_u64 *cur = bufB, *oth = bufA;
 
@@ -1250,7 +1313,8 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][2],
 			for (size_t l = 0; l < N; l++) {
 				for (size_t j = 0; j < NM; j++) {
 					aex_extract(s0res[j * N + l], sres + (j * N + l) * TAU,
-							out[j], TT[j], T4[j], buf4, buf4b, buft);
+							out[j], TT[j], T4[j], buf4, buf4b, buft,
+							aex_sets[k]);
 				}
 				for (size_t jj = 0; jj < 3; jj++) {
 					for (size_t i = 0; i < TAU; i++) {
@@ -1643,13 +1707,21 @@ static void test(flint_rand_t rand) {
 		gr_init(rh[i]);
 	}
 
-	/* Create a total of TAU relations t_i = A * s_i */
+	/* Create a total of TAU relations t_i = A * s_i. Two components are given
+	 * the sets the proof of shuffle needs, so that those paths are covered
+	 * here too and not only where they are used. */
+	aex_sets[V - 2] = AEX_BIN;
+	aex_sets[V - 1] = AEX_SGN;
 	for (int i = 0; i < TAU; i++) {
 		fmpz_mod_poly_init(lag[i], ctx);
 		for (int j = 0; j < V; j++) {
-			s[i][j] = nfl::hwt_dist {
-			2 *DEGREE / 3};
-			s[i][j].ntt_pow_phi();
+			if (aex_sets[j] == AEX_TER) {
+				s[i][j] = nfl::hwt_dist {
+				2 *DEGREE / 3};
+				s[i][j].ntt_pow_phi();
+			} else {
+				aex_sample_set(s[i][j], aex_sets[j]);
+			}
 		}
 		for (int j = 0; j < R; j++) {
 			t[i][j] = 0;
