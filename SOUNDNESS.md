@@ -354,13 +354,34 @@ argument turns on, `2 B` below `p_min`, is checked rather than assumed: the test
 `the norm bound leaves room for the CRT argument` compares them at the
 parameters in force, with a factor of 762 to spare at `MSGS = 1000`.
 
-The cost is one assumption the mix-net did not make before: MSIS modulo each
-prime of the basis, which is *stronger* than MSIS modulo `q`, since a short
-kernel element modulo `q` reduces to one modulo `p_j` but not conversely. It is
-of entirely standard form and holds here with room — reaching `beta` needs a
-root Hermite factor of `1.00095` at `MSGS = 1000`, against the `1.0045` or so at
-which 128-bit security is usually placed. Note also that if MSIS modulo `p_j`
-were easy the commitment scheme would be in trouble on its own terms.
+**The cost is one assumption the mix-net did not make before:** MSIS modulo each
+prime of the basis. It is genuinely additional. A short kernel element modulo
+`q` reduces to one modulo `p_j` but not conversely, so the assumption is
+strictly stronger than MSIS modulo `q`, and it is not implied by the binding of
+the commitment either: breaking binding means finding a vector of `l_2` norm
+`2^20.5` modulo `q`, breaking this one a vector of norm `2^29.4` modulo `p_j`,
+and the second is the easier problem. Nothing already assumed gives it for free.
+
+It is satisfied with a wide margin all the same. Taking the lattice of the `c1`
+row — dimension `N * WIDTH = 16384`, `N * HEIGHT = 4096` constraints modulo
+`p_j` — and the usual BKZ model, reaching `beta = 2^29.4` at `MSGS = 1000` needs
+block size `b = 2698`, against `b = 438` for `2^128` in the classical core-SVP
+cost model and `b = 483` quantum. Roughly six times the block size, and the
+margin grows as `MSGS` falls: `b = 4055` at `MSGS = 2`. These are textbook
+core-SVP figures rather than an estimator run, and the absolute numbers should
+not be taken at face value — the comparison against `b = 438`, and against the
+`b = 14849` that binding needs, is the part that is robust.
+
+**The assumption cannot be discharged within this design.** Identifying two
+openings of one commitment needs the binding of the commitment, which needs both
+openings short; `Pi_SMALL`'s exact opening is short only in each CRT component,
+which is exactly why the comparison has to be made there. One could instead
+compare two *relaxed* openings — `Pi_BND`'s against the linear proof's, both
+short over `Z_q`, so that MSIS modulo `q` suffices — but that establishes
+nothing about the exact witness, and it is the exact witness that carries the
+"is a constant" statement. Removing the assumption means not having an exact
+proof and a relaxed one to reconcile, which is the LaZer route of alternative 1
+below.
 
 Two alternatives to the pair of sub-proofs, both larger, and neither needed
 given the above:
