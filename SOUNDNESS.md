@@ -3,7 +3,7 @@
 ## Status of this document
 
 This is a **draft argument, not a reviewed result.** It records what the
-`fix-ccs` branch changes in `src/shuffle.cpp`, why those changes are believed
+`fix-pkc` branch changes in `src/shuffle.cpp`, why those changes are believed
 to be necessary and sufficient against the published attack, and — just as
 importantly — **what this branch still does not prove.** Section 6 is the part
 to read before trusting anything here: the fix is incomplete by construction,
@@ -169,10 +169,10 @@ then the same for every other index.
 
 `theta_i` is now `nfl::uniform()`, which is what the argument needs and what
 CT-RSA 2021 does; nothing else requires it to be short, since it only ever
-appears inside a committed message, where no norm bound applies. The test
-`published s_i do not reveal the permutation` runs the distinguisher against
-the true `pi(0)` and fails if it succeeds; it does fail if the ternary
-sampling is put back, which is what makes it worth keeping.
+appears inside a committed message, where no norm bound applies. The same
+one-line change landed on `main`, where the defect is milder: there `b_0` is
+the public `_m_0`, so a short `theta_0` costs zero knowledge -- the `s_i` are
+distinguishable from uniform -- without handing over the permutation.
 
 ## 6. What is **not** established
 
