@@ -130,16 +130,19 @@ equation in a single slot and in no other passed.
 This is the same slot-by-slot cheating as the attack above, one level lower,
 and it is fatal to the fix if left in place: the CRT-mixed list is rejected
 because the last relation fails in the slots of `p_1`, but it still holds in
-the slots of `p_2`, so the old check would accept. `poly_equal` and
-`poly_is_zero` compare all residues and are now used instead. Both were
-verified to matter: with the index binding in place but the element-wise
-comparison restored, the attack test goes back to passing.
+the slots of `p_2`, so the old check would accept. `util::equal` and
+`util::is_zero` in `include/util.hpp` compare all residues and are used
+instead. Both fixes were verified to matter on their own: with the index
+binding in place but the element-wise comparison restored, the attack test
+goes back to passing.
+
+That fix is independent of the rest of this branch and landed on `main`
+separately, together with the same correction to the assertions in `bgv.cpp`;
+this branch inherits it by merge.
 
 Note that `operator!=` is *not* affected in the same way — "some slot differs"
 is the right semantics for an inequality — so `bdlop_open`, which uses `!=`,
-was always strict. The `==` form appears in tests elsewhere in the repository
-(for instance the BGV decryption tests), where it makes those tests weaker than
-they look; that is outside this branch.
+was always strict.
 
 ## 5. What is **not** established
 

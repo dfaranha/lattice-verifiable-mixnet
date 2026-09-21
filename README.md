@@ -15,10 +15,10 @@ component, and the components need not agree.
 
 The `fix-ccs` branch replaces that product with the one from Lemma 5 of their
 paper, taking the set `D` to be the monomials `x^i`, which is one of the few
-legal choices in the fully splitting ring NFLlib gives us. It also fixes a
-second, independent hole: every equality the verifier checked was NFLlib's
-element-wise `operator==`, which is true as soon as the two sides agree in one
-of the 8192 NTT slots.
+legal choices in the fully splitting ring NFLlib gives us. A second, independent hole found along the way — every
+equality the verifier checked was NFLlib's element-wise `operator==`, true as
+soon as the two sides agree in one of the 8192 NTT slots — was fixed on `main`
+and is inherited here.
 
 **The fix is deliberately incomplete.** Lemma 5 also requires the committed
 permutation elements to lie in `D`, and proving that needs machinery this

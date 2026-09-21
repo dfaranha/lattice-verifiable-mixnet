@@ -239,40 +239,6 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 	nfl::fastrandombytes_reseed();
 }
 
-/* Test whether two ring elements are equal, and whether one is zero.
- *
- * NFLlib's operator== is element-wise and its operator bool is "some
- * coefficient is non-zero", so `a == b` is true as soon as a and b agree in a
- * single one of the nmoduli * N NTT slots, and `a == zero` as soon as a single
- * slot of a vanishes. That is far weaker than a verification equation needs:
- * in a ring that splits this far, a prover who satisfies an equation in one
- * slot and in no other would pass, which is the same slot-by-slot cheating
- * that the proof of shuffle itself has to rule out. Both arguments have to be
- * in the same domain; the residues NFLlib stores are always reduced, so
- * comparing them is exact.
- */
-static bool poly_equal(const params::poly_q & a, const params::poly_q & b) {
-	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-		for (size_t i = 0; i < params::poly_q::degree; i++) {
-			if (a(cm, i) != b(cm, i)) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
-
-static bool poly_is_zero(const params::poly_q & a) {
-	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-		for (size_t i = 0; i < params::poly_q::degree; i++) {
-			if (a(cm, i) != 0) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
-
 /* a^-1 mod pm, by the extended Euclidean algorithm. Every modulus of the basis
  * is 39 bits, so the Bezout coefficients stay well inside int64_t. */
 static uint64_t residue_inverse(uint64_t a, uint64_t pm) {
@@ -520,11 +486,11 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
 	/* Being zero is preserved by the inverse transform, so these compare in
 	 * the NTT domain and skip it. */
 	tmp = t + beta * x.c1 - v;
-	result &= poly_is_zero(tmp);
+	result &= util::is_zero(tmp);
 	tmp = tp + beta * p.c1 - pv;
-	result &= poly_is_zero(tmp);
+	result &= util::is_zero(tmp);
 	tmp = _t + beta * _x.c1 - _v;
-	result &= poly_is_zero(tmp);
+	result &= util::is_zero(tmp);
 
 	v = 0;
 	for (int i = 0; i < WIDTH; i++) {
@@ -535,7 +501,7 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
 	t = coef[0] * x.c2[0] + coef[1] * p.c2[0] + coef[2] - _x.c2[0];
 	t = t * beta + u;
 
-	result &= poly_equal(t, v);
+	result &= util::equal(t, v);
 	return result;
 }
 
@@ -950,7 +916,7 @@ static void test() {
 		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 1, end);
 		alpha[0] = alpha[0] * alpha[1];
 		alpha[0] = alpha[0] * alpha[1];
-		TEST_ASSERT(poly_equal(alpha[0], alpha[1]), end);
+		TEST_ASSERT(util::equal(alpha[0], alpha[1]), end);
 	} TEST_END;
 
 	TEST_ONCE("polynomial inverse reports a zero divisor") {
@@ -1049,11 +1015,11 @@ static void test() {
 			av[i] = am[i][0];
 			av[i].ntt_pow_phi();
 		}
-		TEST_ASSERT(!poly_equal(am[0][0], _m[0][0]), end);
-		TEST_ASSERT(!poly_equal(am[0][0], _m[1][0]), end);
+		TEST_ASSERT(!util::equal(am[0][0], _m[0][0]), end);
+		TEST_ASSERT(!util::equal(am[0][0], _m[1][0]), end);
 		neff_product(p0, v, chi);
 		neff_product(p1, av, chi);
-		TEST_ASSERT(poly_equal(p0, p1), end);
+		TEST_ASSERT(util::equal(p0, p1), end);
 	} TEST_END;
 
 	TEST_ONCE("shuffle proof rejects the CRT-mixing attack") {
