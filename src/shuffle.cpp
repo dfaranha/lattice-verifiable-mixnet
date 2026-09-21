@@ -19,57 +19,174 @@
 #define MSGS        2
 #endif
 
+/*
+ * The proof of shuffle below follows Neff's paradigm, but it does *not* use the
+ * plain product identity
+ *
+ *     \prod (a_i - X) = \prod (b_i - X)                                    (*)
+ *
+ * that the published version of this code used. Over R_q = Z_q[x]/(x^N + 1) the
+ * polynomial x^N + 1 factors, so R_q is not a field and (*) does not imply that
+ * the two lists are related by a permutation: it only implies that they are
+ * permuted inside each CRT component, possibly by *different* permutations.
+ * Bootle, Lyubashevsky and Merino-Gallardo, "Efficient Verifiable Mixnets from
+ * Lattices, Revisited" (ePrint 2025/658), exploit exactly that gap to break the
+ * soundness of the proof of shuffle of CT-RSA 2021 that this work extends. The
+ * gap is wide open here: NFLlib needs an NTT-friendly modulus, so every prime
+ * of the RNS basis is 1 mod 2N and R_q splits all the way into 2N linear
+ * factors, 8192 of them at these parameters.
+ *
+ * We therefore use the product from their Lemma 5, which ties every message to
+ * its index and forces the per-component permutations to agree:
+ *
+ *     \prod (a_i + g(i) * X1 - X2) = \prod (b_i + sigma_i * X1 - X2),
+ *
+ * where g : [N] -> D is injective, D is a set whose pairwise differences are
+ * invertible, and sigma_i \in D is committed by the prover before the
+ * challenges X1, X2 are drawn. An honest prover sets sigma_i = g(pi(i)) for the
+ * secret permutation pi. Note that the identity above also reinstates the
+ * evaluation point X2 that the published protocol had dropped: what it proved
+ * was \prod a_i = \prod b_i, which does not imply a permutation even over a
+ * field.
+ *
+ * We take D to be the monomials x^i and g(i) = x^i. In this ring that is the
+ * natural choice, and one of very few available: x^a - x^b = x^b (x^{a-b} - 1),
+ * every NTT slot is a primitive 2N-th root of unity, and so x^k - 1 vanishes in
+ * no slot for 0 < k < N. Neither of the two sets used elsewhere works here. The
+ * binary polynomials of Protocol 1 of ePrint 2025/658 and the small-norm ball
+ * used on the `fix-pkc` branch of the CT-RSA 2021 code are both justified by
+ * [42, Corollary 1.2], which bounds norms by q^(1/k) for a ring splitting into
+ * k factors; at k = 2 that is roughly q^(1/2), but at k = 2N it is vacuous. The
+ * test "a short polynomial can be a zero divisor" below exhibits a 0/1
+ * polynomial of Hamming weight 22 that is a zero divisor in this ring, so no
+ * norm bound can place an element in D.
+ *
+ * CAVEAT, and it is a large one. Lemma 5 requires the committed sigma_i to lie
+ * in D, and *this code does not prove that*. Protocol 1 of ePrint 2025/658
+ * discharges the requirement with a sub-proof of is_bin(sigma_i) delegated to a
+ * general-purpose proof system; the `fix-pkc` branch of the CT-RSA 2021 code
+ * discharges it with a norm check on a masked opening of sigma_i. The first is
+ * not available here and the second, as argued above, would establish nothing.
+ * What is implemented below is therefore Protocol 1 without its membership
+ * sub-proof: it stops a prover who CRT-mixes the *messages*, which is the
+ * attack of Section 4.1 of that paper and the one mounted against the CT-RSA
+ * 2021 implementation, and it does not stop a prover who CRT-mixes the
+ * committed sigma_i as well. The test "KNOWN GAP" below demonstrates precisely
+ * that. See SOUNDNESS.md for what closing the gap would take.
+ */
+
+/* Monomials are distinct only up to the degree of the ring, and g must be
+ * injective on [MSGS]. */
+static_assert((size_t) MSGS <= params::poly_q::degree,
+		"MSGS exceeds the degree of the ring, so x^i cannot index the messages");
+
 /* A params::poly_q is 64 KiB, so anything dimensioned by MSGS is far too large
- * to be a local variable: at MSGS = 1000 the buffers below add up to well over
- * a gigabyte. They are allocated on the heap once at start-up, and the pointers
+ * to be a local variable: at MSGS = 1000 the buffers below add up to several
+ * gigabytes. They are allocated on the heap once at start-up, and the pointers
  * index exactly like the arrays they replace. theta/inv and inv_tmp are the
- * prover's and simul_inverse's scratch space, which are equally oversized. */
-static commit_t *com, *d, *cs;
-static vector < params::poly_q > *r;
+ * prover's and simul_inverse's scratch space, which are equally oversized, and
+ * so are sg, fa and fb.
+ *
+ * pcom, pr, w and tp are the commitments to the sigma_i of Lemma 5, their
+ * randomness, and the responses and first messages of the third opening that
+ * the linear proof now carries for them. */
+static commit_t *com, *d, *cs, *pcom;
+static vector < params::poly_q > *r, *pr;
 static params::poly_q *ms, *_ms, *s;
-static params::poly_q (*y)[WIDTH], (*_y)[WIDTH];
-static params::poly_q *t, *_t, *u;
+static params::poly_q (*y)[WIDTH], (*w)[WIDTH], (*_y)[WIDTH];
+static params::poly_q *t, *tp, *_t, *u;
 static params::poly_q *theta, *inv, *inv_tmp;
+static params::poly_q *sg, *fa, *fb;
 
 static void shuffle_alloc(void) {
 	com = new commit_t[MSGS];
 	d = new commit_t[MSGS];
 	cs = new commit_t[MSGS];
+	pcom = new commit_t[MSGS];
 	r = new vector < params::poly_q >[MSGS];
+	pr = new vector < params::poly_q >[MSGS];
 	ms = new params::poly_q[MSGS];
 	_ms = new params::poly_q[MSGS];
 	s = new params::poly_q[MSGS];
 	y = new params::poly_q[MSGS][WIDTH];
+	w = new params::poly_q[MSGS][WIDTH];
 	_y = new params::poly_q[MSGS][WIDTH];
 	t = new params::poly_q[MSGS];
+	tp = new params::poly_q[MSGS];
 	_t = new params::poly_q[MSGS];
 	u = new params::poly_q[MSGS];
 	theta = new params::poly_q[MSGS];
 	inv = new params::poly_q[MSGS];
 	inv_tmp = new params::poly_q[MSGS];
+	sg = new params::poly_q[MSGS];
+	fa = new params::poly_q[MSGS];
+	fb = new params::poly_q[MSGS];
 }
 
 static void shuffle_free(void) {
 	delete[]com;
 	delete[]d;
 	delete[]cs;
+	delete[]pcom;
 	delete[]r;
+	delete[]pr;
 	delete[]ms;
 	delete[]_ms;
 	delete[]s;
 	delete[]y;
+	delete[]w;
 	delete[]_y;
 	delete[]t;
+	delete[]tp;
 	delete[]_t;
 	delete[]u;
 	delete[]theta;
 	delete[]inv;
 	delete[]inv_tmp;
+	delete[]sg;
+	delete[]fa;
+	delete[]fb;
 }
 
+/**
+ * The map g : [N] -> D of Lemma 5, instantiated as the monomial map i -> x^i.
+ *
+ * The result is in the coefficient domain, which is what bdlop_commit expects;
+ * callers doing arithmetic with it have to convert.
+ *
+ * @param[out] out			- the resulting ring element.
+ * @param[in] i				- the index to encode, below the degree of the ring.
+ */
+static void index_monomial(params::poly_q & out, size_t i) {
+	array < mpz_t, params::poly_q::degree > coeffs;
+
+	assert(i < params::poly_q::degree);
+	for (size_t k = 0; k < params::poly_q::degree; k++) {
+		mpz_init2(coeffs[k], (params::poly_q::bits_in_moduli_product() << 2));
+		mpz_set_ui(coeffs[k], k == i ? 1 : 0);
+	}
+	out.mpz2poly(coeffs);
+	for (size_t k = 0; k < params::poly_q::degree; k++) {
+		mpz_clear(coeffs[k]);
+	}
+}
+
+/*
+ * The linear proof relates *three* commitments instead of two. It proves
+ * knowledge of openings of x, p and _x such that
+ *
+ *     coef[0] * <msg of x> + coef[1] * <msg of p> + coef[2] = <msg of _x>,
+ *
+ * for public coef[0] (alpha), coef[1] (gamma) and coef[2] (the additive term,
+ * which the two-commitment version called beta). The extra commitment p is what
+ * carries the committed permutation element sigma_i of Lemma 5: in the shuffle
+ * the factor b_i = _m_i + sigma_i * tau - mu is no longer public, and splits
+ * into the public part (_m_i - mu), folded into coef[2], and the committed part
+ * sigma_i scaled by the public tau, folded into coef[1].
+ */
 static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
-		commit_t y, params::poly_q alpha[2], params::poly_q & u,
-		params::poly_q t, params::poly_q _t) {
+		commit_t p, commit_t y, params::poly_q coef[3], params::poly_q & u,
+		params::poly_q t, params::poly_q tp, params::poly_q _t) {
 	uint8_t hash[BLAKE3_OUT_LEN];
 	blake3_hasher hasher;
 
@@ -87,19 +204,23 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 				16 * DEGREE);
 	}
 
-	/* Hash alpha, beta from linear relation. */
-	for (size_t i = 0; i < 2; i++) {
-		blake3_hasher_update(&hasher, (const uint8_t *)alpha[i].data(),
+	/* Hash the coefficients of the linear relation. */
+	for (size_t i = 0; i < 3; i++) {
+		blake3_hasher_update(&hasher, (const uint8_t *)coef[i].data(),
 				16 * DEGREE);
 	}
 
 	blake3_hasher_update(&hasher, (const uint8_t *)x.c1.data(), 16 * DEGREE);
+	blake3_hasher_update(&hasher, (const uint8_t *)p.c1.data(), 16 * DEGREE);
 	blake3_hasher_update(&hasher, (const uint8_t *)y.c1.data(), 16 * DEGREE);
-	/* Both commitments must have the same number of components, otherwise
+	/* All three commitments must have the same number of components, otherwise
 	 * hashing y.c2 with x.c2's length reads past the end of y.c2. */
 	assert(x.c2.size() == y.c2.size());
+	assert(x.c2.size() == p.c2.size());
 	for (size_t i = 0; i < x.c2.size(); i++) {
 		blake3_hasher_update(&hasher, (const uint8_t *)x.c2[i].data(),
+				16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)p.c2[i].data(),
 				16 * DEGREE);
 		blake3_hasher_update(&hasher, (const uint8_t *)y.c2[i].data(),
 				16 * DEGREE);
@@ -107,6 +228,7 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 
 	blake3_hasher_update(&hasher, (const uint8_t *)u.data(), 16 * DEGREE);
 	blake3_hasher_update(&hasher, (const uint8_t *)t.data(), 16 * DEGREE);
+	blake3_hasher_update(&hasher, (const uint8_t *)tp.data(), 16 * DEGREE);
 	blake3_hasher_update(&hasher, (const uint8_t *)_t.data(), 16 * DEGREE);
 
 	blake3_hasher_finalize(&hasher, hash, BLAKE3_OUT_LEN);
@@ -115,6 +237,40 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 	nfl::fastrandombytes_seed(hash);
 	bdlop_sample_chal(beta);
 	nfl::fastrandombytes_reseed();
+}
+
+/* Test whether two ring elements are equal, and whether one is zero.
+ *
+ * NFLlib's operator== is element-wise and its operator bool is "some
+ * coefficient is non-zero", so `a == b` is true as soon as a and b agree in a
+ * single one of the nmoduli * N NTT slots, and `a == zero` as soon as a single
+ * slot of a vanishes. That is far weaker than a verification equation needs:
+ * in a ring that splits this far, a prover who satisfies an equation in one
+ * slot and in no other would pass, which is the same slot-by-slot cheating
+ * that the proof of shuffle itself has to rule out. Both arguments have to be
+ * in the same domain; the residues NFLlib stores are always reduced, so
+ * comparing them is exact.
+ */
+static bool poly_equal(const params::poly_q & a, const params::poly_q & b) {
+	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
+		for (size_t i = 0; i < params::poly_q::degree; i++) {
+			if (a(cm, i) != b(cm, i)) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+static bool poly_is_zero(const params::poly_q & a) {
+	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
+		for (size_t i = 0; i < params::poly_q::degree; i++) {
+			if (a(cm, i) != 0) {
+				return false;
+			}
+		}
+	}
+	return true;
 }
 
 /* a^-1 mod pm, by the extended Euclidean algorithm. Every modulus of the basis
@@ -249,21 +405,22 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 	return result;
 }
 
-static void lin_prover(params::poly_q y[WIDTH], params::poly_q _y[WIDTH],
-		params::poly_q & t, params::poly_q & _t, params::poly_q & u,
-		commit_t x, commit_t _x, params::poly_q alpha[2],
-		comkey_t & key, vector < params::poly_q > r,
+static void lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
+		params::poly_q _y[WIDTH], params::poly_q & t, params::poly_q & tp,
+		params::poly_q & _t, params::poly_q & u, commit_t x, commit_t p,
+		commit_t _x, params::poly_q coef[3], comkey_t & key,
+		vector < params::poly_q > r, vector < params::poly_q > pr,
 		vector < params::poly_q > _r) {
-	params::poly_q beta, tmp[WIDTH], _tmp[WIDTH];
+	params::poly_q beta, tmp[WIDTH], ptmp[WIDTH], _tmp[WIDTH];
 	array < mpz_t, params::poly_q::degree > coeffs;
-	int rej0, rej1;
+	int rej0, rej1, rej2;
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
 	}
 
 	do {
-		/* Prover samples y,y' from Gaussian. */
+		/* Prover samples y, y_p and y' from Gaussian. */
 		for (int i = 0; i < WIDTH; i++) {
 			for (size_t k = 0; k < params::poly_q::degree; k++) {
 				int64_t coeff = sample_z(0.0, SIGMA_C);
@@ -275,55 +432,72 @@ static void lin_prover(params::poly_q y[WIDTH], params::poly_q _y[WIDTH],
 				int64_t coeff = sample_z(0.0, SIGMA_C);
 				mpz_set_si(coeffs[k], coeff);
 			}
+			w[i].mpz2poly(coeffs);
+			w[i].ntt_pow_phi();
+			for (size_t k = 0; k < params::poly_q::degree; k++) {
+				int64_t coeff = sample_z(0.0, SIGMA_C);
+				mpz_set_si(coeffs[k], coeff);
+			}
 			_y[i].mpz2poly(coeffs);
 			_y[i].ntt_pow_phi();
 		}
 
 		t = y[0];
+		tp = w[0];
 		_t = _y[0];
 		for (int i = 0; i < HEIGHT; i++) {
 			for (int j = 0; j < WIDTH - HEIGHT; j++) {
 				t = t + key.A1[i][j] * y[j + HEIGHT];
+				tp = tp + key.A1[i][j] * w[j + HEIGHT];
 				_t = _t + key.A1[i][j] * _y[j + HEIGHT];
 			}
 		}
 
 		u = 0;
 		for (int i = 0; i < WIDTH; i++) {
-			u = u + alpha[0] * (key.A2[0][i] * y[i]) - (key.A2[0][i] * _y[i]);
+			u = u + coef[0] * (key.A2[0][i] * y[i]);
+			u = u + coef[1] * (key.A2[0][i] * w[i]);
+			u = u - (key.A2[0][i] * _y[i]);
 		}
 
 		/* Sample challenge. */
-		lin_hash(beta, key, x, _x, alpha, u, t, _t);
+		lin_hash(beta, key, x, p, _x, coef, u, t, tp, _t);
 
 		/* Prover */
 		for (int i = 0; i < WIDTH; i++) {
 			tmp[i] = beta * r[i];
+			ptmp[i] = beta * pr[i];
 			_tmp[i] = beta * _r[i];
 			y[i] = y[i] + tmp[i];
+			w[i] = w[i] + ptmp[i];
 			_y[i] = _y[i] + _tmp[i];
 		}
 		rej0 = rej_sampling(y, tmp, SIGMA_C * SIGMA_C);
-		rej1 = rej_sampling(_y, _tmp, SIGMA_C * SIGMA_C);
-	} while (rej0 || rej1);
+		rej1 = rej_sampling(w, ptmp, SIGMA_C * SIGMA_C);
+		rej2 = rej_sampling(_y, _tmp, SIGMA_C * SIGMA_C);
+	} while (rej0 || rej1 || rej2);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
 	}
 }
 
-static int lin_verifier(params::poly_q z[WIDTH], params::poly_q _z[WIDTH],
-		params::poly_q t, params::poly_q _t, params::poly_q u,
-		commit_t x, commit_t _x, params::poly_q alpha[2], comkey_t & key) {
-	params::poly_q beta, v, _v, tmp, zero = 0;
+static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
+		params::poly_q _z[WIDTH], params::poly_q t, params::poly_q tp,
+		params::poly_q _t, params::poly_q u, commit_t x, commit_t p,
+		commit_t _x, params::poly_q coef[3], comkey_t & key) {
+	params::poly_q beta, v, pv, _v, tmp;
 	int result = 1;
 
 	/* Sample challenge. */
-	lin_hash(beta, key, x, _x, alpha, u, t, _t);
+	lin_hash(beta, key, x, p, _x, coef, u, t, tp, _t);
 
 	/* Verifier checks norm, reconstruct from NTT representation. */
 	for (int i = 0; i < WIDTH; i++) {
 		v = z[i];
+		v.invntt_pow_invphi();
+		result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
+		v = zp[i];
 		v.invntt_pow_invphi();
 		result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
 		v = _z[i];
@@ -331,41 +505,59 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q _z[WIDTH],
 		result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
 	}
 
-	/* Verifier computes A1z and A1z'. */
+	/* Verifier computes A1z, A1z_p and A1z'. */
 	v = z[0];
+	pv = zp[0];
 	_v = _z[0];
 	for (int i = 0; i < HEIGHT; i++) {
 		for (int j = 0; j < WIDTH - HEIGHT; j++) {
 			v = v + key.A1[i][j] * z[j + HEIGHT];
+			pv = pv + key.A1[i][j] * zp[j + HEIGHT];
 			_v = _v + key.A1[i][j] * _z[j + HEIGHT];
 		}
 	}
 
+	/* Being zero is preserved by the inverse transform, so these compare in
+	 * the NTT domain and skip it. */
 	tmp = t + beta * x.c1 - v;
-	tmp.invntt_pow_invphi();
-	result &= (tmp == zero);
+	result &= poly_is_zero(tmp);
+	tmp = tp + beta * p.c1 - pv;
+	result &= poly_is_zero(tmp);
 	tmp = _t + beta * _x.c1 - _v;
-	tmp.invntt_pow_invphi();
-	result &= (tmp == zero);
+	result &= poly_is_zero(tmp);
 
 	v = 0;
 	for (int i = 0; i < WIDTH; i++) {
-		v = v + alpha[0] * (key.A2[0][i] * z[i]) - (key.A2[0][i] * _z[i]);
+		v = v + coef[0] * (key.A2[0][i] * z[i]);
+		v = v + coef[1] * (key.A2[0][i] * zp[i]);
+		v = v - (key.A2[0][i] * _z[i]);
 	}
-	t = (alpha[0] * x.c2[0] + alpha[1] - _x.c2[0]) * beta + u;
+	t = coef[0] * x.c2[0] + coef[1] * p.c2[0] + coef[2] - _x.c2[0];
+	t = t * beta + u;
 
-	t.invntt_pow_invphi();
-	v.invntt_pow_invphi();
-
-	result &= ((t - v) == 0);
+	result &= poly_equal(t, v);
 	return result;
 }
 
-void shuffle_hash(params::poly_q & beta, commit_t c[MSGS], commit_t d[MSGS],
-		params::poly_q _ms[MSGS], params::poly_q rho[SIZE]) {
+/**
+ * Derive the challenges X1 = tau and X2 = mu of Lemma 5.
+ *
+ * They are drawn after the commitments P_i to the permutation elements, and
+ * bind them: the soundness argument needs the sigma_i to be fixed before the
+ * two challenges, or the prover could pick them to fit.
+ *
+ * @param[out] tau			- the challenge X1.
+ * @param[out] mu			- the challenge X2.
+ * @param[in] c				- the commitments to the input messages.
+ * @param[in] p				- the commitments to the permutation elements.
+ * @param[in] _ms			- the public output list of messages.
+ * @param[in] rho			- the challenges compressing the SIZE components.
+ */
+static void shuffle_chal_hash(params::poly_q & tau, params::poly_q & mu,
+		commit_t c[MSGS], commit_t p[MSGS], params::poly_q _ms[MSGS],
+		params::poly_q rho[SIZE]) {
 	uint8_t hash[BLAKE3_OUT_LEN];
 	blake3_hasher hasher;
-	blake3_hasher_init(&hasher);
 
 	blake3_hasher_init(&hasher);
 
@@ -373,6 +565,45 @@ void shuffle_hash(params::poly_q & beta, commit_t c[MSGS], commit_t d[MSGS],
 		blake3_hasher_update(&hasher, (const uint8_t *)_ms[i].data(),
 				16 * DEGREE);
 		blake3_hasher_update(&hasher, (const uint8_t *)c[i].c1.data(),
+				16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)p[i].c1.data(),
+				16 * DEGREE);
+		for (size_t j = 0; j < c[i].c2.size(); j++) {
+			blake3_hasher_update(&hasher, (const uint8_t *)c[i].c2[j].data(),
+					16 * DEGREE);
+		}
+		for (size_t j = 0; j < p[i].c2.size(); j++) {
+			blake3_hasher_update(&hasher, (const uint8_t *)p[i].c2[j].data(),
+					16 * DEGREE);
+		}
+	}
+
+	for (int i = 0; i < SIZE; i++) {
+		blake3_hasher_update(&hasher, (const uint8_t *)rho[i].data(),
+				16 * DEGREE);
+	}
+	blake3_hasher_finalize(&hasher, hash, BLAKE3_OUT_LEN);
+
+	/* Sample challenges from RNG seeded with hash. */
+	nfl::fastrandombytes_seed(hash);
+	tau = nfl::uniform();
+	mu = nfl::uniform();
+	nfl::fastrandombytes_reseed();
+}
+
+void shuffle_hash(params::poly_q & beta, commit_t c[MSGS], commit_t p[MSGS],
+		commit_t d[MSGS], params::poly_q _ms[MSGS], params::poly_q & tau,
+		params::poly_q & mu, params::poly_q rho[SIZE]) {
+	uint8_t hash[BLAKE3_OUT_LEN];
+	blake3_hasher hasher;
+	blake3_hasher_init(&hasher);
+
+	for (int i = 0; i < MSGS; i++) {
+		blake3_hasher_update(&hasher, (const uint8_t *)_ms[i].data(),
+				16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)c[i].c1.data(),
+				16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)p[i].c1.data(),
 				16 * DEGREE);
 		blake3_hasher_update(&hasher, (const uint8_t *)d[i].c1.data(),
 				16 * DEGREE);
@@ -382,8 +613,14 @@ void shuffle_hash(params::poly_q & beta, commit_t c[MSGS], commit_t d[MSGS],
 			blake3_hasher_update(&hasher, (const uint8_t *)d[i].c2[j].data(),
 					16 * DEGREE);
 		}
+		for (size_t j = 0; j < p[i].c2.size(); j++) {
+			blake3_hasher_update(&hasher, (const uint8_t *)p[i].c2[j].data(),
+					16 * DEGREE);
+		}
 	}
 
+	blake3_hasher_update(&hasher, (const uint8_t *)tau.data(), 16 * DEGREE);
+	blake3_hasher_update(&hasher, (const uint8_t *)mu.data(), 16 * DEGREE);
 	for (int i = 0; i < SIZE; i++) {
 		blake3_hasher_update(&hasher, (const uint8_t *)rho[i].data(),
 				16 * DEGREE);
@@ -396,111 +633,177 @@ void shuffle_hash(params::poly_q & beta, commit_t c[MSGS], commit_t d[MSGS],
 	nfl::fastrandombytes_reseed();
 }
 
+/**
+ * Compute the public coefficients of the l-th linear relation of the product
+ * argument, namely
+ *
+ *     coef[0] * a_l + raw * b_l = <message committed in D_l>,
+ *
+ * with a_l = m_l + g(l) * tau - mu and b_l = _m_l + sigma_l * tau - mu. Only
+ * m_l (inside cs[l]) and sigma_l (inside P[l]) are secret, so the relation
+ * handed to the linear proof is
+ *
+ *     coef[0] * m_l + coef[1] * sigma_l + coef[2] = <message of D_l>,
+ *     coef[1] = raw * tau,
+ *     coef[2] = coef[0] * (g(l) * tau - mu) + raw * (_m_l - mu).
+ *
+ * The (-1)^N sign of the last equation is folded into raw, so that prover and
+ * verifier treat every index uniformly.
+ *
+ * @param[out] coef			- the three coefficients of the linear relation.
+ * @param[in] l				- the index of the relation.
+ * @param[in] s				- the values s_i sent by the prover.
+ * @param[in] _ms			- the public output list of messages.
+ * @param[in] beta			- the challenge of the product argument.
+ * @param[in] tau			- the challenge X1 of Lemma 5.
+ * @param[in] mu			- the challenge X2 of Lemma 5.
+ */
+static void shuffle_coeffs(params::poly_q coef[3], size_t l,
+		params::poly_q s[MSGS], params::poly_q _ms[MSGS],
+		params::poly_q & beta, params::poly_q & tau, params::poly_q & mu) {
+	params::poly_q raw, gl, zero = 0;
+
+	if (l == 0) {
+		coef[0] = beta;
+	} else {
+		coef[0] = s[l - 1];
+	}
+
+	if (l < MSGS - 1) {
+		raw = s[l];
+	} else {
+		/* Coefficient (-1)^N of b_{N-1} in the last equation. */
+		if (MSGS & 1) {
+			raw = zero - beta;
+		} else {
+			raw = beta;
+		}
+	}
+
+	index_monomial(gl, l);
+	gl.ntt_pow_phi();
+	gl = gl * tau - mu;
+	coef[2] = coef[0] * gl + raw * (_ms[l] - mu);
+	coef[1] = raw * tau;
+}
+
 static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
-		params::poly_q _y[MSGS][WIDTH], params::poly_q t[MSGS],
+		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
+		params::poly_q t[MSGS], params::poly_q tp[MSGS],
 		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
+		commit_t p[MSGS], vector < params::poly_q > pr[MSGS],
 		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
-		params::poly_q _ms[MSGS], vector < params::poly_q > r[MSGS],
-		params::poly_q rho[SIZE], comkey_t & key) {
+		params::poly_q _ms[MSGS], params::poly_q sigma[MSGS],
+		vector < params::poly_q > r[MSGS], params::poly_q rho[SIZE],
+		comkey_t & key) {
 	vector < params::poly_q > t0(1);
 	vector < params::poly_q > _r[MSGS];
-	params::poly_q alpha[2], beta;
+	params::poly_q coef[3], beta, tau, mu, gl;
+
+	/* Prover commits to the permutation elements sigma_i of Lemma 5. An honest
+	 * prover has sigma_i = g(pi(i)) = x^pi(i), in the coefficient domain as
+	 * bdlop_commit expects. This is the prover's first message and has to
+	 * precede the challenges tau and mu below. */
+	for (size_t i = 0; i < MSGS; i++) {
+		pr[i].resize(WIDTH);
+		bdlop_sample_rand(pr[i]);
+		t0[0] = sigma[i];
+		bdlop_commit(p[i], t0, key, pr[i]);
+		sg[i] = sigma[i];
+		sg[i].ntt_pow_phi();
+	}
+
+	shuffle_chal_hash(tau, mu, c, p, _ms, rho);
+
+	/* Build the factors of the product of Lemma 5:
+	 *     a_i = m_i + g(i) * tau - mu,
+	 *     b_i = _m_i + sigma_i * tau - mu.
+	 * Tying the index to every message is what forces the permutations of the
+	 * CRT components to coincide, and is what the published product lacked. */
+	for (size_t i = 0; i < MSGS; i++) {
+		index_monomial(gl, i);
+		gl.ntt_pow_phi();
+		fa[i] = ms[i] + gl * tau - mu;
+		fb[i] = _ms[i] + sg[i] * tau - mu;
+	}
 
 	/* Prover samples theta_i and computes commitments D_i. */
 	for (size_t i = 0; i < MSGS - 1; i++) {
 		theta[i] = nfl::ZO_dist();
 		theta[i].ntt_pow_phi();
 		if (i == 0) {
-			t0[0] = theta[0] * _ms[0];
+			t0[0] = theta[0] * fb[0];
 		} else {
-			t0[0] = theta[i - 1] * ms[i] + theta[i] * _ms[i];
+			t0[0] = theta[i - 1] * fa[i] + theta[i] * fb[i];
 		}
 		t0[0].invntt_pow_invphi();
 		_r[i].resize(WIDTH);
 		bdlop_sample_rand(_r[i]);
 		bdlop_commit(d[i], t0, key, _r[i]);
 	}
-	t0[0] = theta[MSGS - 2] * ms[MSGS - 1];
+	t0[0] = theta[MSGS - 2] * fa[MSGS - 1];
 	t0[0].invntt_pow_invphi();
 	_r[MSGS - 1].resize(WIDTH);
 	bdlop_sample_rand(_r[MSGS - 1]);
 	bdlop_commit(d[MSGS - 1], t0, key, _r[MSGS - 1]);
 
-	shuffle_hash(beta, c, d, _ms, rho);
+	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho);
 
 	//Check relationship here
-	simul_inverse(inv, _ms);
+	simul_inverse(inv, fb);
 	for (size_t i = 0; i < MSGS - 1; i++) {
 		if (i == 0) {
-			s[0] = theta[0] * _ms[0] - beta * ms[0];
+			s[0] = theta[0] * fb[0] - beta * fa[0];
 		} else {
-			s[i] = theta[i - 1] * ms[i] + theta[i] * _ms[i] - s[i - 1] * ms[i];
+			s[i] = theta[i - 1] * fa[i] + theta[i] * fb[i] - s[i - 1] * fa[i];
 		}
 		s[i] = s[i] * inv[i];
 	}
 
 	/* Now run \Prod_LIN instances, one for each commitment. */
 	for (size_t l = 0; l < MSGS; l++) {
-		if (l < MSGS - 1) {
-			t0[0] = s[l] * _ms[l];
-		} else {
-			if (MSGS & 1) {
-				params::poly_q zero = 0;
-				t0[0] = zero - beta * _ms[l];
-			} else {
-				t0[0] = beta * _ms[l];
-			}
-		}
-
-		if (l == 0) {
-			alpha[0] = beta;
-		} else {
-			alpha[0] = s[l - 1];
-		}
-		alpha[1] = t0[0];
-		lin_prover(y[l], _y[l], t[l], _t[l], u[l], c[l], d[l], alpha, key, r[l],
-				_r[l]);
+		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
+		lin_prover(y[l], w[l], _y[l], t[l], tp[l], _t[l], u[l], c[l], p[l],
+				d[l], coef, key, r[l], pr[l], _r[l]);
 	}
 }
 
 static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
-		params::poly_q _y[MSGS][WIDTH], params::poly_q t[MSGS],
+		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
+		params::poly_q t[MSGS], params::poly_q tp[MSGS],
 		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
-		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q _ms[MSGS],
-		params::poly_q rho[SIZE], comkey_t & key) {
-	params::poly_q alpha[2], beta;
-	vector < params::poly_q > t0(1);
+		commit_t p[MSGS], params::poly_q s[MSGS], commit_t c[MSGS],
+		params::poly_q _ms[MSGS], params::poly_q rho[SIZE], comkey_t & key) {
+	params::poly_q coef[3], beta, tau, mu;
 	int result = 1;
 
-	shuffle_hash(beta, c, d, _ms, rho);
+	shuffle_chal_hash(tau, mu, c, p, _ms, rho);
+	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho);
 	for (size_t l = 0; l < MSGS; l++) {
-		if (l < MSGS - 1) {
-			t0[0] = s[l] * _ms[l];
-		} else {
-			if (MSGS & 1) {
-				params::poly_q zero = 0;
-				t0[0] = zero - beta * _ms[l];
-			} else {
-				t0[0] = beta * _ms[l];
-			}
-		}
-
-		if (l == 0) {
-			alpha[0] = beta;
-		} else {
-			alpha[0] = s[l - 1];
-		}
-		alpha[1] = t0[0];
+		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
 		result &=
-				lin_verifier(y[l], _y[l], t[l], _t[l], u[l], c[l], d[l], alpha,
-				key);
+				lin_verifier(y[l], w[l], _y[l], t[l], tp[l], _t[l], u[l], c[l],
+				p[l], d[l], coef, key);
 	}
 
 	return result;
 }
 
+/**
+ * Run a full proof of shuffle.
+ *
+ * @param[in] m				- the input messages, as committed in com.
+ * @param[in] _m			- the public output (shuffled) messages.
+ * @param[in] sigma			- the permutation elements claimed by the prover, in
+ *							  the coefficient domain. An honest prover sets
+ *							  sigma[i] = g(pi(i)) = x^pi(i) for the permutation
+ *							  with _m[i] = m[pi(i)].
+ * @param[in] key			- the commitment key.
+ * @return 1 if the proof verifies, 0 otherwise.
+ */
 static int run(vector < vector < params::poly_q >> m,
-		vector < vector < params::poly_q >> _m, comkey_t & key) {
+		vector < vector < params::poly_q >> _m,
+		vector < params::poly_q > &sigma, comkey_t & key) {
 	vector < params::poly_q > t0(1);
 	params::poly_q one, t1, rho[SIZE];
 	comkey_t _key;
@@ -546,15 +849,73 @@ static int run(vector < vector < params::poly_q >> m,
 		}
 	}
 
-	shuffle_prover(y, _y, t, _t, u, d, s, cs, ms, _ms, r, rho, _key);
+	shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms, _ms,
+			sigma.data(), r, rho, _key);
 
-	return shuffle_verifier(y, _y, t, _t, u, d, s, cs, _ms, rho, _key);
+	return shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms, rho,
+			_key);
 }
 
 #ifdef MAIN
+/**
+ * Swap the residues of the first RNS modulus of two ring elements, leaving the
+ * residues of the second untouched. Both elements are in the NTT domain.
+ *
+ * @param[in,out] a			- the first element.
+ * @param[in,out] b			- the second element.
+ */
+static void crt_swap(params::poly_q & a, params::poly_q & b) {
+	uint64_t t;
+
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		t = a(0, i);
+		a(0, i) = b(0, i);
+		b(0, i) = t;
+	}
+}
+
+/**
+ * Mix two ring elements given in the coefficient domain, by swapping the CRT
+ * components belonging to the first RNS modulus. This is the manipulation of
+ * Section 4.1 of ePrint 2025/658: the outputs are a permutation of the inputs
+ * inside each of the fields the ring splits into, but not over the ring.
+ *
+ * @param[in,out] a			- the first element.
+ * @param[in,out] b			- the second element.
+ */
+static void crt_mix(params::poly_q & a, params::poly_q & b) {
+	a.ntt_pow_phi();
+	b.ntt_pow_phi();
+	crt_swap(a, b);
+	a.invntt_pow_invphi();
+	b.invntt_pow_invphi();
+}
+
+/**
+ * Compute the product \prod (v_i - chi) that the published proof of shuffle
+ * relied on, used by the tests to exhibit the attack. Everything is in the NTT
+ * domain.
+ *
+ * @param[out] out			- the resulting product.
+ * @param[in] v				- the list of messages.
+ * @param[in] chi			- the evaluation point.
+ */
+static void neff_product(params::poly_q & out, vector < params::poly_q > &v,
+		params::poly_q & chi) {
+	params::poly_q acc = 1;
+
+	acc.ntt_pow_phi();
+	for (size_t i = 0; i < v.size(); i++) {
+		acc = acc * (v[i] - chi);
+	}
+	out = acc;
+}
+
 static void test() {
 	comkey_t key;
-	vector < vector < params::poly_q >> m(MSGS), _m(MSGS);
+	vector < vector < params::poly_q >> m(MSGS), _m(MSGS), am(MSGS);
+	vector < params::poly_q > sigma(MSGS), asigma(MSGS);
+	size_t pi;
 
 	/* Generate commitment key. */
 	bdlop_keygen(key);
@@ -568,12 +929,15 @@ static void test() {
 		bdlop_commit(com[i], m[i], key, r[i]);
 	}
 
-	/* Prover shuffles messages (only a circular shift for simplicity). */
+	/* Prover shuffles messages (only a circular shift for simplicity), and
+	 * commits to the matching permutation elements sigma_i = g(pi(i)). */
 	for (int i = 0; i < MSGS; i++) {
+		pi = (i + 1) % MSGS;
 		_m[i].resize(SIZE);
 		for (int j = 0; j < SIZE; j++) {
-			_m[i][j] = m[(i + 1) % MSGS][j];
+			_m[i][j] = m[pi][j];
 		}
+		index_monomial(sigma[i], pi);
 	}
 
 	TEST_ONCE("polynomial inverse is correct") {
@@ -586,7 +950,7 @@ static void test() {
 		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 1, end);
 		alpha[0] = alpha[0] * alpha[1];
 		alpha[0] = alpha[0] * alpha[1];
-		TEST_ASSERT(alpha[0] == alpha[1], end);
+		TEST_ASSERT(poly_equal(alpha[0], alpha[1]), end);
 	} TEST_END;
 
 	TEST_ONCE("polynomial inverse reports a zero divisor") {
@@ -598,8 +962,121 @@ static void test() {
 		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 0, end);
 	} TEST_END;
 
+	TEST_ONCE("monomial differences are invertible") {
+		/* This is what makes the monomials a legal choice of D for Lemma 5:
+		 * x^a - x^b = x^b (x^{a-b} - 1), and every NTT slot is a primitive
+		 * 2N-th root of unity, so x^k - 1 vanishes in no slot for 0 < k < N. */
+		params::poly_q ga, gb, t0;
+
+		for (size_t k = 1; k < 8; k++) {
+			index_monomial(ga, 0);
+			index_monomial(gb, k);
+			ga.ntt_pow_phi();
+			gb.ntt_pow_phi();
+			ga = ga - gb;
+			TEST_ASSERT(poly_inverse(t0, ga) == 1, end);
+		}
+		index_monomial(ga, params::poly_q::degree - 1);
+		index_monomial(gb, 1);
+		ga.ntt_pow_phi();
+		gb.ntt_pow_phi();
+		ga = ga - gb;
+		TEST_ASSERT(poly_inverse(t0, ga) == 1, end);
+	} TEST_END;
+
+	TEST_ONCE("a short polynomial can be a zero divisor") {
+		/* The reason D cannot be a ball of small norm here, unlike in a ring
+		 * splitting into few factors. The pattern below is a 0/1 polynomial of
+		 * Hamming weight 22 whose value in one of the 8192 NTT slots is zero;
+		 * it was found by meet-in-the-middle over subset sums of the powers of
+		 * one primitive 2N-th root of unity modulo the first RNS prime, which
+		 * costs seconds. Its l_infinity norm is 1, so no norm bound can tell it
+		 * apart from a monomial, yet it is a zero divisor and multiplying by it
+		 * loses information in that slot. */
+		const char *bits = "11001001010001101110011101110010111000010100";
+		array < mpz_t, params::poly_q::degree > coeffs;
+		params::poly_q e, t0;
+		size_t weight = 0;
+
+		for (size_t i = 0; i < params::poly_q::degree; i++) {
+			mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
+			mpz_set_ui(coeffs[i], 0);
+		}
+		for (size_t i = 0; bits[i] != '\0'; i++) {
+			if (bits[i] == '1') {
+				mpz_set_ui(coeffs[i], 1);
+				weight++;
+			}
+		}
+		e.mpz2poly(coeffs);
+		e.ntt_pow_phi();
+		for (size_t i = 0; i < params::poly_q::degree; i++) {
+			mpz_clear(coeffs[i]);
+		}
+		TEST_ASSERT(weight == 22, end);
+		TEST_ASSERT(poly_inverse(t0, e) == 0, end);
+	} TEST_END;
+
 	TEST_ONCE("shuffle proof is consistent") {
-		TEST_ASSERT(run(m, _m, key) == 1, end);
+		TEST_ASSERT(run(m, _m, sigma, key) == 1, end);
+	} TEST_END;
+
+	/* Mount the attack of Section 4.1: the output list is obtained from the
+	 * honest one by swapping the CRT components of two messages that belong to
+	 * the first RNS modulus. It is therefore *not* a permutation of the input
+	 * over R_q, yet the product identity that the published proof checked is
+	 * still satisfied. */
+	for (int i = 0; i < MSGS; i++) {
+		am[i].resize(SIZE);
+		for (int j = 0; j < SIZE; j++) {
+			am[i][j] = _m[i][j];
+		}
+	}
+	for (int j = 0; j < SIZE; j++) {
+		crt_mix(am[0][j], am[1][j]);
+	}
+
+	TEST_ONCE("CRT-mixed list is not a permutation but passes Neff's product") {
+		vector < params::poly_q > v(MSGS), av(MSGS);
+		params::poly_q chi = nfl::uniform(), p0, p1;
+
+		/* One component of the messages is enough to make the point, and the
+		 * compression by rho that the protocol applies is slot-wise, so it
+		 * preserves the mixing. */
+		for (int i = 0; i < MSGS; i++) {
+			v[i] = _m[i][0];
+			v[i].ntt_pow_phi();
+			av[i] = am[i][0];
+			av[i].ntt_pow_phi();
+		}
+		TEST_ASSERT(!poly_equal(am[0][0], _m[0][0]), end);
+		TEST_ASSERT(!poly_equal(am[0][0], _m[1][0]), end);
+		neff_product(p0, v, chi);
+		neff_product(p1, av, chi);
+		TEST_ASSERT(poly_equal(p0, p1), end);
+	} TEST_END;
+
+	TEST_ONCE("shuffle proof rejects the CRT-mixing attack") {
+		TEST_ASSERT(run(m, am, sigma, key) == 0, end);
+	} TEST_END;
+
+	/* Second-order attack, targeting the missing membership sub-proof: the
+	 * cheating prover applies to the permutation elements the very same CRT
+	 * swap it applied to the messages. Then sigma_0 = g(pi(1)) and
+	 * sigma_1 = g(pi(0)) in the first CRT component, while sigma_i = g(pi(i))
+	 * in the second, so the product of Lemma 5 balances in both components
+	 * again. Those sigma_i are not monomials, hence outside D, and nothing in
+	 * this implementation rules them out. */
+	for (int i = 0; i < MSGS; i++) {
+		asigma[i] = sigma[i];
+	}
+	crt_mix(asigma[0], asigma[1]);
+
+	TEST_ONCE("KNOWN GAP: CRT-mixed sigma is accepted, D is not proven") {
+		/* Asserting the bug, so that adding a membership sub-proof for
+		 * sigma_i in D turns this test red and it can be rewritten as the
+		 * rejection it should be. */
+		TEST_ASSERT(run(m, am, asigma, key) == 1, end);
 	} TEST_END;
 
   end:
@@ -628,7 +1105,10 @@ static void microbench() {
 static void bench() {
 	comkey_t key;
 	vector < vector < params::poly_q >> m(MSGS), _m(MSGS);
-	params::poly_q by[WIDTH], _by[WIDTH], bt, _bt, bu, alpha[2], beta;
+	vector < params::poly_q > sigma(MSGS);
+	params::poly_q by[WIDTH], bw[WIDTH], _by[WIDTH];
+	params::poly_q bt, btp, _bt, bu, coef[3], beta;
+	size_t pi;
 
 	/* Generate commitment key. */
 	bdlop_keygen(key);
@@ -644,33 +1124,36 @@ static void bench() {
 
 	/* Prover shuffles messages (only a circular shift for simplicity). */
 	for (int i = 0; i < MSGS; i++) {
+		pi = (i + 1) % MSGS;
 		_m[i].resize(SIZE);
 		for (int j = 0; j < SIZE; j++) {
-			_m[i][j] = m[(i + 1) % MSGS][j];
+			_m[i][j] = m[pi][j];
 		}
+		index_monomial(sigma[i], pi);
 	}
 
-	alpha[0] = nfl::ZO_dist();
-	alpha[1] = nfl::ZO_dist();
-	alpha[0].ntt_pow_phi();
-	alpha[1].ntt_pow_phi();
+	for (size_t i = 0; i < 3; i++) {
+		coef[i] = nfl::ZO_dist();
+		coef[i].ntt_pow_phi();
+	}
 	bdlop_sample_chal(beta);
 
 	BENCH_BEGIN("linear hash") {
-		BENCH_ADD(lin_hash(beta, key, com[0], com[1], alpha, bu, bt, _bt));
+		BENCH_ADD(lin_hash(beta, key, com[0], com[1], com[1], coef, bu, bt,
+						btp, _bt));
 	} BENCH_END;
 
 	BENCH_BEGIN("linear proof") {
-		BENCH_ADD(lin_prover(by, _by, bt, _bt, bu, com[0], com[1], alpha, key,
-						r[0], r[0]));
+		BENCH_ADD(lin_prover(by, bw, _by, bt, btp, _bt, bu, com[0], com[1],
+						com[1], coef, key, r[0], r[1], r[1]));
 	} BENCH_END;
 
 	BENCH_BEGIN("linear verifier") {
-		BENCH_ADD(lin_verifier(by, _by, bt, _bt, bu, com[0], com[1], alpha,
-						key));
+		BENCH_ADD(lin_verifier(by, bw, _by, bt, btp, _bt, bu, com[0], com[1],
+						com[1], coef, key));
 	} BENCH_END;
 
-	BENCH_SMALL("shuffle-proof (N messages)", run(m, _m, key));
+	BENCH_SMALL("shuffle-proof (N messages)", run(m, _m, sigma, key));
 }
 
 int main(int argc, char *argv[]) {

@@ -129,15 +129,19 @@ jobs:
           cmake ../NFLlib -DCMAKE_BUILD_TYPE=Release -DNFL_OPTIMIZED=ON
           make -j"$(nproc)"
 
+      # shuffle is included since the proof of shuffle was fixed: it draws half
+      # again as many Gaussians as before, which exposed a misaligned load in
+      # the sampler that UBSan reports and that is fixed in sample_z_small.c.
       # -march=native stays, because NFLlib is built with NTT_AVX2 and needs it.
       # -flto is dropped: it obscures sanitizer stack traces. Leak detection is
       # off because NFLlib and FLINT both keep static caches alive at exit.
       - name: Build and run under sanitizers
         run: |
-          make CONFIG="-I$FLINT_PREFIX/include -DBENCH=1 -DTAU=8" \
+          make CONFIG="-I$FLINT_PREFIX/include -DBENCH=1 -DTAU=8 -DMSGS=4" \
                FLINT="-L$FLINT_PREFIX/lib -lflint" \
                OPT="-O1 -march=native -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
-               bdlop bgv pismall
+               bdlop bgv pismall shuffle
           ./bdlop
           ./bgv
           ./pismall
+          ./shuffle
