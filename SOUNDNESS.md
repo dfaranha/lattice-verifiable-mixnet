@@ -119,6 +119,9 @@ vector `w`, one more first message `t_p`, and one more rejection-sampling test.
    `P_i`, one amortized proof each that every committed `sigma_i` is a monomial
    in each CRT component and that the openings are short, and the verifier
    checks both before anything else. Section 6 says why it takes two.
+6. Everything after the `P_i` is run `SHUFFLE_REPS` times with independent
+   challenges, because one pass of the product argument is worth only
+   `MSGS / p_min`. Section 7.
 
 ## 4. The second bug: element-wise equality
 
@@ -342,32 +345,46 @@ the step above goes through:
 
 ## 7. Soundness error of the product argument
 
-Worth stating plainly, because it is a property of the parameters rather than
-of this branch, and the fix does not change it. Lemma 2 of ePrint 2025/658
-(Schwartz-Zippel over a ring) needs a challenge set whose pairwise differences
-are not zero divisors. The challenges here are uniform elements of `R_q`, which
-in a ring this split is best analysed slot by slot: if the product identity
-fails in some slot, the check passes only if the challenge hits a root of a
-degree-`MSGS` polynomial in that slot, with probability at most
-`MSGS / p_min`, about `2^-29` at `MSGS = 1000`. That is the soundness error of
-the product argument, and it is far short of the 128 bits the parameters are
-otherwise chosen for.
+Lemma 2 of ePrint 2025/658 (Schwartz-Zippel over a ring) needs a challenge set
+whose pairwise differences are not zero divisors. The challenges here are
+uniform elements of `R_q`, which in a ring this split is best analysed slot by
+slot: if the product identity fails in some slot, the check passes only if the
+challenge hits a root of a degree-`MSGS` polynomial in that slot, with
+probability at most `MSGS / p_min`, about `2^-29` at `MSGS = 1000`. That is the
+soundness error of **one pass**, and it is far short of the `LEVEL` bits the
+parameters are otherwise chosen for.
 
-The same observation is made, and dealt with, elsewhere in this repository:
-`pismall` draws its challenges from the quadratic Galois extension `GR(q,2)`
-precisely so that a single challenge is worth `deg / p_min^2` rather than
-`deg / p_min`. The remedies for the shuffle are the same — repeat the argument
-with independent challenges, or draw them from an extension.
+The product argument is therefore run `SHUFFLE_REPS` times with independent
+challenges and the verifier requires every pass. Repetition is sound here
+because the slot in which the identity fails is fixed by the commitments before
+any challenge is drawn, so the passes really are independent and the error is
+the per-pass error raised to `SHUFFLE_REPS`. The count is derived at compile
+time from the basis, as `ceil(LEVEL / (floor(log2 p_min) - ceil(log2 MSGS)))`:
+four passes at `MSGS = 2` for `2^-148`, five at `MSGS = 1000` for `2^-140`, five
+at `MSGS = 4096` for `2^-130`.
 
-This term, and not the membership sub-proofs, is what bounds the whole protocol.
-At `MSGS = 1000` the sub-proofs of section 6 contribute about `2^-133` for
-`Pi_SMALL` — `2^-66` per pass from the `GR(q,2)` challenge, squared by the two
-repetitions, with the column-opening test at `2^-82` or better on 325 of 16384
-columns at relative distance 0.48 — and `Pi_BND` runs at its own `NTI = 130`.
-All of that sits a hundred bits behind the `2^-29` above. Reading the fix of
-section 6 as raising the soundness of the shuffle would therefore be a mistake:
-it closes a hole that no number of bits would have closed, and leaves the
-quantitative bound exactly where it was.
+Only the product argument repeats. The prover's first message -- the
+commitments `P_i` to the `sigma_i` and the two sub-proofs of section 6 that
+place them in `D` -- is sent once and shared by every pass, which is also
+forced: the `sigma_i` have to be fixed before any challenge, so a pass cannot
+re-commit to them.
+
+The alternative remedy is the one `pismall` uses, drawing the challenges from
+the quadratic Galois extension `GR(q,2)` so that a single challenge is worth
+`deg / p_min^2`. It was not taken. It buys `2^-68` per pass and so still needs
+two passes, while lifting `a_i`, `b_i`, the masks `theta_i`, the published
+`s_i` and the commitments `D_i` into the extension doubles every element of the
+argument: about four times the size against five for plain repetition, in
+exchange for a protocol that would have to be designed rather than repeated.
+
+**Where this leaves the protocol.** At `MSGS = 1000` the terms are `2^-140` for
+the product argument, about `2^-133` for `Pi_SMALL` — `2^-66` per pass from the
+`GR(q,2)` challenge, squared by its two repetitions, with the column-opening
+test at `2^-82` or better on 325 of 16384 columns at relative distance 0.48 —
+and `Pi_BND` at its own `NTI = 130`. No term is now below `LEVEL`, so the
+binding constraint is the hardness of the lattice problems the commitment and
+the encryption rest on, which is where it should be. Section 6.4 remains the
+exception, being an unproven step rather than a term with a size.
 
 ## 8. Summary
 
@@ -381,5 +398,5 @@ quantitative bound exactly where it was.
 | coefficient sets of `Pi_SMALL` | per CRT component | per CRT component, see 6.2 |
 | the two sub-proofs as one opening | n/a | **not worked out, see 6.4** |
 | verifier equality | one slot in 8192 | all slots |
-| soundness error of the product argument | `~2^-29` | `~2^-29`, unchanged |
+| soundness error of the product argument | `~2^-29` | `~2^-140`, see Section 7 |
 | mask on the published `s_i` | ternary | uniform, see Section 5 |

@@ -33,6 +33,11 @@ the CRT idempotents, whose centred representatives exceed `2^39` for any basis
 of this size and `2^75` for this one, against a bound below `2^28`. A prover who
 CRT-mixes the committed `sigma_i` as well as the messages is now rejected.
 
+One pass of the product argument is worth only `MSGS / p_min`, about `2^-29` at
+`MSGS = 1000`, so it is repeated with independent challenges as many times as
+`LEVEL` needs -- four or five at any supported size. No term of the proof is
+below 128 bits any more.
+
 **Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this.** Two things
 in particular. `\Pi_SMALL` is not exact over `Z_q` on its own terms either,
 where "ternary" likewise means "ternary in each CRT component"; a `KNOWN GAP`

@@ -93,6 +93,32 @@
 static_assert((size_t) MSGS <= params::poly_q::degree,
 		"MSGS exceeds the degree of the ring, so x^i cannot index the messages");
 
+/* One pass of the product argument has soundness error at most MSGS / p_min.
+ * The challenges are uniform over R_q, which in a ring this split has to be
+ * analysed slot by slot: if the identity fails in some slot, the check passes
+ * only if the challenge hits a root of a degree-MSGS polynomial in that slot.
+ * That is about 2^-29 at MSGS = 1000, far short of the LEVEL bits the
+ * parameters are otherwise chosen for, so the argument is repeated with
+ * independent challenges and the verifier requires every pass. Repetition is
+ * sound here because the slot in which the identity fails is fixed by the
+ * commitments before any challenge is drawn, so the passes are independent.
+ *
+ * Nothing else is repeated: the commitments, the linear proofs and the two
+ * sub-proofs that establish sigma_i in D are already at or beyond LEVEL. */
+static constexpr int shuffle_ilog2(unsigned long long x) {
+	return x <= 1 ? 0 : 1 + shuffle_ilog2(x >> 1);
+}
+
+/* Bits gained per pass, floor(log2(p_min)) - ceil(log2(MSGS)). */
+static constexpr int SHUFFLE_BITS =
+		shuffle_ilog2(nfl::params < uint64_t >::P[0] <
+				nfl::params < uint64_t >::P[1] ?
+				nfl::params < uint64_t >::P[0] :
+				nfl::params < uint64_t >::P[1]) -
+		shuffle_ilog2(2 * (unsigned long long) MSGS - 1);
+static_assert(SHUFFLE_BITS > 0, "MSGS is too large for the RNS basis");
+static constexpr int SHUFFLE_REPS = (LEVEL + SHUFFLE_BITS - 1) / SHUFFLE_BITS;
+
 /* A params::poly_q is 64 KiB, so anything dimensioned by MSGS is far too large
  * to be a local variable: at MSGS = 1000 the buffers below add up to several
  * gigabytes. They are allocated on the heap once at start-up, and the pointers
@@ -550,11 +576,15 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
  */
 static void shuffle_chal_hash(params::poly_q & tau, params::poly_q & mu,
 		commit_t c[MSGS], commit_t p[MSGS], params::poly_q _ms[MSGS],
-		params::poly_q rho[SIZE]) {
+		params::poly_q rho[SIZE], int rep) {
 	uint8_t hash[BLAKE3_OUT_LEN];
+	uint8_t sep = (uint8_t) rep;
 	blake3_hasher hasher;
 
 	blake3_hasher_init(&hasher);
+	/* The passes differ only in this byte, which is what makes their
+	 * challenges independent. */
+	blake3_hasher_update(&hasher, &sep, 1);
 
 	for (int i = 0; i < MSGS; i++) {
 		blake3_hasher_update(&hasher, (const uint8_t *)_ms[i].data(),
@@ -588,10 +618,12 @@ static void shuffle_chal_hash(params::poly_q & tau, params::poly_q & mu,
 
 void shuffle_hash(params::poly_q & beta, commit_t c[MSGS], commit_t p[MSGS],
 		commit_t d[MSGS], params::poly_q _ms[MSGS], params::poly_q & tau,
-		params::poly_q & mu, params::poly_q rho[SIZE]) {
+		params::poly_q & mu, params::poly_q rho[SIZE], int rep) {
 	uint8_t hash[BLAKE3_OUT_LEN];
+	uint8_t sep = (uint8_t) rep;
 	blake3_hasher hasher;
 	blake3_hasher_init(&hasher);
+	blake3_hasher_update(&hasher, &sep, 1);
 
 	for (int i = 0; i < MSGS; i++) {
 		blake3_hasher_update(&hasher, (const uint8_t *)_ms[i].data(),
@@ -683,23 +715,25 @@ static void shuffle_coeffs(params::poly_q coef[3], size_t l,
 }
 
 
-static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
-		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
-		params::poly_q t[MSGS], params::poly_q tp[MSGS],
-		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
-		commit_t p[MSGS], vector < params::poly_q > pr[MSGS],
-		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
-		params::poly_q _ms[MSGS], params::poly_q sigma[MSGS],
-		vector < params::poly_q > r[MSGS], params::poly_q rho[SIZE],
+/* The prover's first message, sent once and shared by every pass: commit to
+ * the permutation elements sigma_i of Lemma 5 and prove that they lie in D. An
+ * honest prover has sigma_i = g(pi(i)) = x^pi(i), in the coefficient domain as
+ * bdlop_commit expects. It has to precede the challenges tau and mu, which is
+ * exactly why it cannot be inside a pass.
+ *
+ * Membership needs two sub-proofs because a product identity alone cannot give
+ * it -- a prover who CRT-mixes the sigma_i the way it mixes the messages
+ * balances the product again. pismall shows, coefficient by coefficient, that
+ * the element opened by each P_i is binary and that multiplying it by the
+ * public 2 - sum_j x^j leaves every coefficient in {-1, 1}, which pins the
+ * Hamming weight to one; pibnd bounds the norm of the openings, which is what
+ * makes those coefficient sets exact over Z_q. See SOUNDNESS.md, section 6.
+ */
+static void shuffle_commit_sigma(commit_t p[MSGS],
+		vector < params::poly_q > pr[MSGS], params::poly_q sigma[MSGS],
 		comkey_t & key) {
 	vector < params::poly_q > t0(1);
-	vector < params::poly_q > _r[MSGS];
-	params::poly_q coef[3], beta, tau, mu, gl;
 
-	/* Prover commits to the permutation elements sigma_i of Lemma 5. An honest
-	 * prover has sigma_i = g(pi(i)) = x^pi(i), in the coefficient domain as
-	 * bdlop_commit expects. This is the prover's first message and has to
-	 * precede the challenges tau and mu below. */
 	for (size_t i = 0; i < MSGS; i++) {
 		pr[i].resize(WIDTH);
 		bdlop_sample_rand(pr[i]);
@@ -709,19 +743,26 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 		sg[i].ntt_pow_phi();
 	}
 
-	/* Lemma 5 also asks for sigma_i in D, and a product identity alone cannot
-	 * give it: a prover who CRT-mixes the sigma_i the way it mixes the
-	 * messages balances the product again. pismall proves membership
-	 * directly, exactly and amortized over all MSGS commitments, by showing
-	 * that the element opened by each P_i has binary coefficients and that
-	 * multiplying it by the public 2 - sum_j x^j leaves every coefficient in
-	 * {-1, 1}, which pins its Hamming weight to one. */
 	pismall_mono_free(mono);
 	mono = pismall_mono_prove(key, p, pr, sigma, MSGS);
 	pibnd_short_free(bnd);
 	bnd = pibnd_short_prove(key, p, pr, sigma, MSGS);
+}
 
-	shuffle_chal_hash(tau, mu, c, p, _ms, rho);
+static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
+		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
+		params::poly_q t[MSGS], params::poly_q tp[MSGS],
+		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
+		commit_t p[MSGS], vector < params::poly_q > pr[MSGS],
+		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
+		params::poly_q _ms[MSGS], params::poly_q sigma[MSGS],
+		vector < params::poly_q > r[MSGS], params::poly_q rho[SIZE],
+		comkey_t & key, int rep) {
+	vector < params::poly_q > t0(1);
+	vector < params::poly_q > _r[MSGS];
+	params::poly_q coef[3], beta, tau, mu, gl;
+
+	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
 
 	/* Build the factors of the product of Lemma 5:
 	 *     a_i = m_i + g(i) * tau - mu,
@@ -756,7 +797,7 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 	bdlop_sample_rand(_r[MSGS - 1]);
 	bdlop_commit(d[MSGS - 1], t0, key, _r[MSGS - 1]);
 
-	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho);
+	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho, rep);
 
 	//Check relationship here
 	simul_inverse(inv, fb);
@@ -782,15 +823,20 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
 		params::poly_q t[MSGS], params::poly_q tp[MSGS],
 		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
 		commit_t p[MSGS], params::poly_q s[MSGS], commit_t c[MSGS],
-		params::poly_q _ms[MSGS], params::poly_q rho[SIZE], comkey_t & key) {
+		params::poly_q _ms[MSGS], params::poly_q rho[SIZE], comkey_t & key,
+		int rep) {
 	params::poly_q coef[3], beta, tau, mu;
 	int result = 1;
 
-	result &= pismall_mono_verify(mono, key, p, MSGS);
-	result &= pibnd_short_verify(bnd, key, p, MSGS);
+	/* The first message is shared by every pass, so its sub-proofs are checked
+	 * with the first one. */
+	if (rep == 0) {
+		result &= pismall_mono_verify(mono, key, p, MSGS);
+		result &= pibnd_short_verify(bnd, key, p, MSGS);
+	}
 
-	shuffle_chal_hash(tau, mu, c, p, _ms, rho);
-	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho);
+	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
+	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho, rep);
 	for (size_t l = 0; l < MSGS; l++) {
 		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
 		result &=
@@ -861,11 +907,19 @@ static int run(vector < vector < params::poly_q >> m,
 		}
 	}
 
-	shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms, _ms,
-			sigma.data(), r, rho, _key);
+	shuffle_commit_sigma(pcom, pr, sigma.data(), _key);
 
-	return shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms, rho,
-			_key);
+	/* The passes share the first message and reuse these buffers, which is
+	 * why each one is verified as it is produced rather than at the end. */
+	int result = 1;
+	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
+		shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms, _ms,
+				sigma.data(), r, rho, _key, rep);
+		result &= shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms,
+				rho, _key, rep);
+	}
+
+	return result;
 }
 
 #ifdef MAIN
