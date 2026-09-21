@@ -63,10 +63,11 @@ $(BLAKE3): $(BLAKE3_SRC) | $(OBJ)
 $(OBJ)/bdlop-size3.o: src/bdlop.cpp | $(OBJ)
 	$(CPP) $(CFLAGS) -DSIZE=3 -c $< -o $@
 
-# pismall as a library, for the proof that each committed sigma_i is a
-# monomial. The proof is amortized over exactly the MSGS relations the shuffle
-# has, rounded up to the power of two its interpolation nodes need.
-$(OBJ)/pismall-mono.o: src/pismall.cpp | $(OBJ)
+# pismall as a library, for the proof that each committed sigma_i is a ring
+# constant. The proof is amortized over exactly the MSGS relations the shuffle
+# has, rounded up to the power of two its interpolation nodes need, and takes
+# the shape of a commitment equation rather than the mix-net's own.
+$(OBJ)/pismall-const.o: src/pismall.cpp | $(OBJ)
 	$(CPP) $(CFLAGS) -DSIZE=3 -UTAU -DTAU='AEX_PAD2(MSGS)' \
 		-DPISMALL_R='(HEIGHT+1)' -DPISMALL_V='(WIDTH+1)' -c $< -o $@
 
@@ -83,11 +84,11 @@ bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON)
 bgv: src/bgv.cpp $(COMMON)
 	$(CPP) $(CFLAGS) -DMAIN src/bgv.cpp $(COMMON) -o $@ $(LIBS)
 
-shuffle: src/shuffle.cpp $(OBJ)/bdlop-size3.o $(OBJ)/pismall-mono.o \
+shuffle: src/shuffle.cpp $(OBJ)/bdlop-size3.o $(OBJ)/pismall-const.o \
 		$(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o \
 		$(COMMON) $(BLAKE3)
 	$(CPP) $(CFLAGS) -DSIZE=3 -DMAIN src/shuffle.cpp $(OBJ)/bdlop-size3.o \
-		$(OBJ)/pismall-mono.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
+		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
 		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
 
 pismall: src/pismall.cpp $(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3)
@@ -101,4 +102,8 @@ pibnd: src/pibnd.cpp $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o $(COMMON) $
 clean:
 	rm -rf $(OBJ) $(BIN)
 
--include $(wildcard $(OBJ)/*.d)
+# The object rules drop their dependency files in $(OBJ); the rules that compile
+# and link a binary from its source in one step drop theirs next to the binary,
+# in the working directory. Both sets have to be included or editing a header
+# leaves the binaries stale, which is silent and costs a debugging session.
+-include $(wildcard $(OBJ)/*.d) $(wildcard *.d)

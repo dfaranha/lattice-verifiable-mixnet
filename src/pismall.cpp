@@ -2299,11 +2299,11 @@ static void test(flint_rand_t rand) {
 		 * The witness below is +1 modulo the first prime and -1 modulo the
 		 * second in every coefficient, which is as far from ternary over Z_q
 		 * as an element gets, and the proof accepts it. The same holds for the
-		 * binary and sign sets, so the monomial instance above establishes
-		 * membership in D only up to a CRT mix; the proof of shuffle rules
-		 * that out with a norm bound from pibnd.cpp rather than here. See
-		 * SOUNDNESS.md. Asserting the bug, so that a Pi_SMALL that became
-		 * exact over Z_q would turn this test red. */
+		 * binary and sign sets, and it is why the proof of shuffle declares its
+		 * sigma_i AEX_SCALAR rather than using any of them: the singleton {0}
+		 * behind that declaration is the one set here that is exact over Z_q.
+		 * See SOUNDNESS.md, sections 6.1 and 6.2. Asserting the bug, so that a
+		 * Pi_SMALL that became exact throughout would turn this test red. */
 		aex_open_t o;
 		params::poly_q z;
 		int ok;

@@ -1063,9 +1063,11 @@ static void test() {
 		 * Hamming weight 22 whose value in one of the 8192 NTT slots is zero;
 		 * it was found by meet-in-the-middle over subset sums of the powers of
 		 * one primitive 2N-th root of unity modulo the first RNS prime, which
-		 * costs seconds. Its l_infinity norm is 1, so no norm bound can tell it
-		 * apart from a monomial, yet it is a zero divisor and multiplying by it
-		 * loses information in that slot. */
+		 * costs seconds. Its l_infinity norm is 1, so no norm bound separates
+		 * it from the short elements a ball of small norm would contain, yet it
+		 * is a zero divisor and multiplying by it loses information in that
+		 * slot. A constant of the same norm is a small integer and cannot do
+		 * this, which is what makes g(i) = i work where a ball does not. */
 		const char *bits = "11001001010001101110011101110010111000010100";
 		array < mpz_t, params::poly_q::degree > coeffs;
 		params::poly_q e, t0;
@@ -1092,11 +1094,11 @@ static void test() {
 
 	TEST_ONCE("the norm bound leaves room for the CRT argument") {
 		/* Section 6.4 of SOUNDNESS.md concludes that sigma_i is the same
-		 * monomial in both CRT components by reading two congruences, one
+		 * constant in both CRT components by reading two congruences, one
 		 * modulo each prime of the basis, as equalities over the integers.
 		 * That step needs every quantity in them to stay below p_min / 2:
 		 * twice the norm bound, because extraction compares two transcripts,
-		 * plus the slack of a challenge difference times a monomial. */
+		 * plus the slack of a challenge difference times an index g(j). */
 		double slack = 2.0 * pibnd_short_bound() + 2.0 * DEGREE;
 		double pmin = nfl::params < uint64_t >::P[0]
 				< nfl::params < uint64_t >::P[1]
@@ -1199,19 +1201,20 @@ static void test() {
 	 * swap it applied to the messages. Then sigma_0 = g(pi(1)) and
 	 * sigma_1 = g(pi(0)) in the first CRT component, while sigma_i = g(pi(i))
 	 * in the second, so the product of Lemma 5 balances in both components
-	 * again. Those sigma_i are monomials in each CRT component, which is all
-	 * the membership sub-proof checks, but their coefficients are CRT
-	 * idempotents, which is what the norm bound rejects. */
+	 * again. A CRT mix of two constants is still a constant, so the algebraic
+	 * half of the membership proof accepts these sigma_i; what rules them out
+	 * is that the constant is a CRT idempotent, far too large for the norm
+	 * bound. */
 	for (int i = 0; i < MSGS; i++) {
 		asigma[i] = sigma[i];
 	}
 	crt_mix(asigma[0], asigma[1]);
 
 	TEST_ONCE("shuffle proof rejects CRT-mixed sigma") {
-		/* The membership sub-proof accepts these sigma_i, because they are
-		 * monomials in each CRT component and its coefficient sets are
-		 * per-component too. It is the norm bound that rejects them: their
-		 * coefficients are CRT idempotents, far too large for the masked
+		/* pismall_const_prove() accepts these sigma_i: a CRT mix of two
+		 * constants is a constant, so the exact half of the membership proof
+		 * has nothing to object to. It is the norm bound that rejects them,
+		 * their value being a CRT idempotent and far too large for the masked
 		 * opening to stay inside the bound the verifier checks. */
 		TEST_ASSERT(run(m, am, asigma, key) == 0, end);
 	} TEST_END;

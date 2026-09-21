@@ -78,7 +78,7 @@ static const double SIGMA_ANEX_HAT =
 /* Whether the last row needs the quad-precision sampler. sigma-hat_ANEx runs
  * past 2^64 when the last witness row is the mix-net's decryption noise, whose
  * infinity norm is far above BETA, and then it does. When the row is as short
- * as the others -- the proof of shuffle bounds a committed monomial with it --
+ * as the others -- the proof of shuffle bounds a committed constant with it --
  * sigma-hat is a few thousand and the double sampler covers it, at two orders
  * of magnitude less time. Both sides of the branch are compile-time constant.
  */

@@ -236,7 +236,8 @@ afterwards. The tests `constant membership proof is consistent` and
 
 What it leaves open is the *value*: `sigma_i` is some constant `c_i in Z_q`,
 and the set of all constants is not admissible, since a difference divisible by
-`p_1` is a zero divisor. That is what Section 6.3 supplies.
+`p_1` is a zero divisor. That is what Sections 6.3 and 6.4 supply between
+them.
 
 The soundness error of one pass of the AEx proof is not negligible -- the
 challenge lives in `GR(q,2)`, so a pass is worth about `3 tau / p_min^2`, around
@@ -491,9 +492,9 @@ nothing there depends on a challenge being invertible.
 | CRT-mixed messages | accepted | rejected |
 | membership `sigma_i in D` | not proven at all | `Pi_SMALL` and `Pi_BND`, see 6 |
 | algebraic half of membership | n/a | exact over `Z_q`, see 6.1 |
-| `sigma_i` outside `D`, one component | accepted | rejected |
+| `sigma_i` not a ring constant | accepted | rejected, exactly, see 6.1 |
 | CRT-mixed `sigma_i` | accepted | rejected, by the norm bound |
-| coefficient sets of `Pi_SMALL` | per CRT component | per CRT component, see 6.2 |
+| the *other* sets of `Pi_SMALL` | per CRT component | per CRT component, see 6.2 |
 | the two sub-proofs as one opening | n/a | argued modulo each `p_j`, see 6.4 |
 | challenge differences of `Pi_LIN` | assumed invertible | **zero divisors, see Section 8** |
 | soundness error of `Pi_LIN` | `~2^-39`, unnoticed | `~2^-156` by the repetitions |
