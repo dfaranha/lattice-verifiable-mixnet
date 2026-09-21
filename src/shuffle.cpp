@@ -405,8 +405,9 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 
 	/* Prover samples theta_i and computes commitments D_i. */
 	for (size_t i = 0; i < MSGS - 1; i++) {
-		theta[i] = nfl::ZO_dist();
-		theta[i].ntt_pow_phi();
+		/* Uniform, not short: theta_i is the only mask on the s_i the prover
+		 * publishes, and nfl::uniform already fills the NTT domain. */
+		theta[i] = nfl::uniform();
 		if (i == 0) {
 			t0[0] = theta[0] * _ms[0];
 		} else {
