@@ -5,7 +5,7 @@
 This is a **draft argument, not a reviewed result.** It records what the
 `fix-ccs` branch changes in `src/shuffle.cpp`, why those changes are believed
 to be necessary and sufficient against the published attack, and — just as
-importantly — **what this branch still does not prove.** Section 5 is the part
+importantly — **what this branch still does not prove.** Section 6 is the part
 to read before trusting anything here: the fix is incomplete by construction,
 and the test suite asserts the remaining hole rather than hiding it.
 
@@ -144,7 +144,37 @@ Note that `operator!=` is *not* affected in the same way — "some slot differs"
 is the right semantics for an inequality — so `bdlop_open`, which uses `!=`,
 was always strict.
 
-## 5. What is **not** established
+## 5. Zero knowledge: the mask on the published s_i
+
+The fix introduced a privacy problem, which this branch also fixes. The prover
+publishes the values `s_i` in the clear, and
+
+```
+s_0 = theta_0 - beta * a_0 / b_0 .
+```
+
+Before the fix, `b_0` was the public `_m_0` and the only secret in sight was
+the prover's own randomness `theta_0`. After it, `b_0 = _m_0 + sigma_0 tau -
+mu` carries the committed `sigma_0 = x^pi(0)`, so `s_0` is a function of the
+permutation, and the *only* thing hiding it is `theta_0`.
+
+`theta_i` was sampled from `nfl::ZO_dist`, which is ternary, where the CT-RSA
+2021 code it is adapted from samples it uniformly over the whole ring. A short
+mask is not a mask: an adversary who knows the two lists — in the mix-net they
+are the previous server's published output and this server's — guesses
+`pi(0) = j`, rebuilds `b_0`, and recovers the `theta_0` that guess implies.
+For a wrong guess that value is a ring element with no reason to be short; for
+the right one it is ternary. One inversion per candidate recovers `pi(0)`, and
+then the same for every other index.
+
+`theta_i` is now `nfl::uniform()`, which is what the argument needs and what
+CT-RSA 2021 does; nothing else requires it to be short, since it only ever
+appears inside a committed message, where no norm bound applies. The test
+`published s_i do not reveal the permutation` runs the distinguisher against
+the true `pi(0)` and fails if it succeeds; it does fail if the ternary
+sampling is put back, which is what makes it worth keeping.
+
+## 6. What is **not** established
 
 **Lemma 5 requires `sigma_i in D`, and this branch does not prove it.**
 
@@ -190,7 +220,7 @@ Three ways to close the gap, none of them small:
 3. **Delegate the sub-proof** to a general-purpose lattice proof system, which
    is what Protocol 1 does, at the cost of a large new dependency.
 
-## 6. Soundness error of the product argument
+## 7. Soundness error of the product argument
 
 Worth stating plainly, because it is a property of the parameters rather than
 of this branch, and the fix does not change it. Lemma 2 of ePrint 2025/658
@@ -209,12 +239,13 @@ precisely so that a single challenge is worth `deg / p_min^2` rather than
 `deg / p_min`. The remedies for the shuffle are the same — repeat the argument
 with independent challenges, or draw them from an extension.
 
-## 7. Summary
+## 8. Summary
 
 | | before | on this branch |
 | --- | --- | --- |
 | product identity | `prod a_i = prod b_i` | Lemma 5, `D` the monomials |
 | CRT-mixed messages | accepted | rejected |
-| CRT-mixed `sigma_i` | n/a | **accepted, see Section 5** |
+| CRT-mixed `sigma_i` | n/a | **accepted, see Section 6** |
 | verifier equality | one slot in 8192 | all slots |
 | soundness error of the product argument | `~2^-29` | `~2^-29`, unchanged |
+| mask on the published `s_i` | ternary | uniform, see Section 5 |

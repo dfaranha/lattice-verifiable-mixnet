@@ -653,6 +653,70 @@ static void shuffle_coeffs(params::poly_q coef[3], size_t l,
 	coef[1] = raw * tau;
 }
 
+
+/* Does the published s_i give the permutation away?
+ *
+ * The prover publishes s_0 = theta_0 - beta * a_0 / b_0, where a_0 and b_0 are
+ * the factors of Lemma 5 and b_0 = _m_0 + sigma_0 tau - mu carries the secret
+ * sigma_0 = x^pi(0). An adversary who knows the two lists -- in the mix-net
+ * they are the previous server's published output and this server's -- can
+ * guess pi(0) = j, rebuild b_0 and recover a candidate theta_0. If theta_0 is
+ * uniform every candidate looks alike and nothing is learned. If theta_0 is
+ * short, only the true guess comes back short, and the permutation falls out
+ * one index at a time. That is why theta is sampled uniformly and not, as it
+ * once was here, from nfl::ZO_dist.
+ *
+ * The check is off unless leak_check is set, since it costs an inversion and
+ * only the test suite wants it. It only looks at the true pi(0): a mask that
+ * hides it hides the wrong guesses too.
+ */
+static int leak_check = 0, leak_hit = 0;
+
+static int is_ternary(params::poly_q a) {
+	array < mpz_t, params::poly_q::degree > c;
+	mpz_t qDivBy2, t;
+	int ok = 1;
+
+	mpz_inits(qDivBy2, t, nullptr);
+	mpz_fdiv_q_2exp(qDivBy2, params::poly_q::moduli_product(), 1);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_init2(c[i], (params::poly_q::bits_in_moduli_product() << 2));
+	}
+	a.invntt_pow_invphi();
+	a.poly2mpz(c);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		util::center(c[i], c[i], params::poly_q::moduli_product(), qDivBy2);
+		mpz_abs(t, c[i]);
+		if (mpz_cmp_ui(t, 1) > 0) {
+			ok = 0;
+		}
+	}
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(c[i]);
+	}
+	mpz_clears(qDivBy2, t, nullptr);
+	return ok;
+}
+
+static void leak_probe(params::poly_q rho[SIZE], params::poly_q sigma0) {
+	params::poly_q tau, mu, beta, gl, a0, b0, inv0, t0;
+
+	shuffle_chal_hash(tau, mu, cs, pcom, _ms, rho);
+	shuffle_hash(beta, cs, pcom, d, _ms, tau, mu, rho);
+
+	index_monomial(gl, 0);
+	gl.ntt_pow_phi();
+	a0 = ms[0] + gl * tau - mu;
+	sigma0.ntt_pow_phi();
+	b0 = _ms[0] + sigma0 * tau - mu;
+
+	leak_hit = 0;
+	if (poly_inverse(inv0, b0)) {
+		t0 = s[0] + beta * a0 * inv0;
+		leak_hit = is_ternary(t0);
+	}
+}
+
 static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
 		params::poly_q t[MSGS], params::poly_q tp[MSGS],
@@ -695,8 +759,13 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 
 	/* Prover samples theta_i and computes commitments D_i. */
 	for (size_t i = 0; i < MSGS - 1; i++) {
-		theta[i] = nfl::ZO_dist();
-		theta[i].ntt_pow_phi();
+		/* Uniform, not short: theta_i is the only thing masking the s_i the
+		 * prover publishes, and s_0 = theta_0 - beta a_0 / b_0 has the secret
+		 * sigma_0 inside b_0. A short theta_i lets an adversary who knows the
+		 * two lists test a guess of pi(0) by checking whether the theta_0 it
+		 * implies is short. nfl::uniform fills the residues, which is where
+		 * the arithmetic below happens, so no transform is needed. */
+		theta[i] = nfl::uniform();
 		if (i == 0) {
 			t0[0] = theta[0] * fb[0];
 		} else {
@@ -817,6 +886,10 @@ static int run(vector < vector < params::poly_q >> m,
 
 	shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms, _ms,
 			sigma.data(), r, rho, _key);
+
+	if (leak_check) {
+		leak_probe(rho, sigma[0]);
+	}
 
 	return shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms, rho,
 			_key);
@@ -985,6 +1058,18 @@ static void test() {
 
 	TEST_ONCE("shuffle proof is consistent") {
 		TEST_ASSERT(run(m, _m, sigma, key) == 1, end);
+	} TEST_END;
+
+	TEST_ONCE("published s_i do not reveal the permutation") {
+		/* theta_i is the only mask on the s_i the prover publishes, and the
+		 * secret sigma_0 sits inside the b_0 they are divided by. While theta
+		 * was sampled from nfl::ZO_dist, the true pi(0) was the one guess
+		 * whose implied theta_0 came back short, so the permutation could be
+		 * read off one index at a time. */
+		leak_check = 1;
+		TEST_ASSERT(run(m, _m, sigma, key) == 1, end);
+		leak_check = 0;
+		TEST_ASSERT(leak_hit == 0, end);
 	} TEST_END;
 
 	/* Mount the attack of Section 4.1: the output list is obtained from the
