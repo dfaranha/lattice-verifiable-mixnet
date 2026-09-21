@@ -53,7 +53,7 @@
  * Corollary 1.2], which bounds norms by q^(1/k) for a ring splitting into k
  * factors; at k = 2 that is roughly q^(1/2), at k = 2N it is vacuous. The test
  * "a short polynomial can be a zero divisor" below exhibits a 0/1 polynomial of
- * Hamming weight 22 that is a zero divisor here, so shortness alone certifies
+ * Hamming weight 19 that is a zero divisor here, so shortness alone certifies
  * nothing about a general ring element. It does certify something about a
  * constant, which is why this encoding works and those do not.
  *
@@ -579,6 +579,56 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
  * @param[in] _ms			- the public output list of messages.
  * @param[in] rho			- the challenges compressing the SIZE components.
  */
+/**
+ * Derive the compression vector rho of a pass.
+ *
+ * rho folds the SIZE components of each message into the single value the
+ * proof works on, so anything it absorbs is invisible: an output list altered
+ * by any Delta with sum_j rho_j Delta_j = 0 leaves every value the proof sees
+ * unchanged. That costs a prover 1 / p_min per pass, but only if it has to fix
+ * the list before rho is known -- which is why rho is derived here from the
+ * input commitments and the *components* of the output list rather than
+ * sampled. Altering the list changes rho, so a collision computed for one list
+ * is not a collision for the list that induces it.
+ *
+ * It cannot be derived from the compressed _ms, which depends on rho.
+ *
+ * @param[out] rho			- the resulting compression vector.
+ * @param[in] c				- the commitments to the input messages.
+ * @param[in] _m			- the output list, component by component.
+ * @param[in] rep			- the pass, which separates the passes' rho.
+ */
+static void shuffle_rho_hash(params::poly_q rho[SIZE], commit_t c[MSGS],
+		vector < vector < params::poly_q >> &_m, int rep) {
+	uint8_t hash[BLAKE3_OUT_LEN];
+	uint8_t sep = (uint8_t) rep;
+	blake3_hasher hasher;
+
+	blake3_hasher_init(&hasher);
+	blake3_hasher_update(&hasher, &sep, 1);
+	for (int i = 0; i < MSGS; i++) {
+		blake3_hasher_update(&hasher, (const uint8_t *)c[i].c1.data(),
+				16 * DEGREE);
+		for (size_t j = 0; j < c[i].c2.size(); j++) {
+			blake3_hasher_update(&hasher, (const uint8_t *)c[i].c2[j].data(),
+					16 * DEGREE);
+		}
+		for (size_t j = 0; j < _m[i].size(); j++) {
+			blake3_hasher_update(&hasher, (const uint8_t *)_m[i][j].data(),
+					16 * DEGREE);
+		}
+	}
+	blake3_hasher_finalize(&hasher, hash, BLAKE3_OUT_LEN);
+
+	nfl::fastrandombytes_seed(hash);
+	rho[0] = 1;
+	rho[0].ntt_pow_phi();
+	for (size_t j = 1; j < SIZE; j++) {
+		rho[j] = nfl::uniform();
+	}
+	nfl::fastrandombytes_reseed();
+}
+
 static void shuffle_chal_hash(params::poly_q & tau, params::poly_q & mu,
 		commit_t c[MSGS], commit_t p[MSGS], params::poly_q _ms[MSGS],
 		params::poly_q rho[SIZE], int rep) {
@@ -833,12 +883,8 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
 	params::poly_q coef[3], beta, tau, mu;
 	int result = 1;
 
-	/* The first message is shared by every pass, so its sub-proofs are checked
-	 * with the first one. */
-	if (rep == 0) {
-		result &= pismall_const_verify(cst, key, p, MSGS);
-		result &= pibnd_short_verify(bnd, key, p, MSGS);
-	}
+	result &= pismall_const_verify(cst, key, p, MSGS);
+	result &= pibnd_short_verify(bnd, key, p, MSGS);
 
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
 	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho, rep);
@@ -870,13 +916,17 @@ static int run(vector < vector < params::poly_q >> m,
 	vector < params::poly_q > t0(1);
 	params::poly_q one, t1, rho[SIZE];
 	comkey_t _key;
+	int result = 1;
 
-	/* Extend commitments and adjust key. */
-	rho[0] = 1;
-	rho[0].ntt_pow_phi();
-	for (size_t j = 1; j < SIZE; j++) {
-		rho[j] = nfl::uniform();
-	}
+	/* Everything below depends on rho, which is drawn afresh for each pass, so
+	 * the whole body is the pass: the compression, the key it induces, the
+	 * commitments to the sigma_i under that key, and the sub-proofs about them.
+	 * That is what makes the repetitions amplify the compression as well as the
+	 * product argument; sharing one rho across the passes would leave a single
+	 * collision good for all of them. */
+	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
+	shuffle_rho_hash(rho, com, _m, rep);
+
 	for (size_t i = 0; i < MSGS; i++) {
 		ms[i] = m[i][0];
 		ms[i].ntt_pow_phi();
@@ -914,14 +964,10 @@ static int run(vector < vector < params::poly_q >> m,
 
 	shuffle_commit_sigma(pcom, pr, sigma.data(), _key);
 
-	/* The passes share the first message and reuse these buffers, which is
-	 * why each one is verified as it is produced rather than at the end. */
-	int result = 1;
-	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
-		shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms, _ms,
-				sigma.data(), r, rho, _key, rep);
-		result &= shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms,
-				rho, _key, rep);
+	shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms, _ms,
+			sigma.data(), r, rho, _key, rep);
+	result &= shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms,
+			rho, _key, rep);
 	}
 
 	return result;
@@ -984,8 +1030,9 @@ static void neff_product(params::poly_q & out, vector < params::poly_q > &v,
 
 static void test() {
 	comkey_t key;
-	vector < vector < params::poly_q >> m(MSGS), _m(MSGS), am(MSGS);
+	vector < vector < params::poly_q >> m(MSGS), _m(MSGS), am(MSGS), bm(MSGS);
 	vector < params::poly_q > sigma(MSGS), asigma(MSGS);
+	params::poly_q rho[SIZE];
 	size_t pi;
 
 	/* Generate commitment key. */
@@ -1060,7 +1107,7 @@ static void test() {
 	TEST_ONCE("a short polynomial can be a zero divisor") {
 		/* The reason D cannot be a ball of small norm here, unlike in a ring
 		 * splitting into few factors. The pattern below is a 0/1 polynomial of
-		 * Hamming weight 22 whose value in one of the 8192 NTT slots is zero;
+		 * Hamming weight 19 whose value in one of the NTT slots is zero;
 		 * it was found by meet-in-the-middle over subset sums of the powers of
 		 * one primitive 2N-th root of unity modulo the first RNS prime, which
 		 * costs seconds. Its l_infinity norm is 1, so no norm bound separates
@@ -1068,7 +1115,7 @@ static void test() {
 		 * is a zero divisor and multiplying by it loses information in that
 		 * slot. A constant of the same norm is a small integer and cannot do
 		 * this, which is what makes g(i) = i work where a ball does not. */
-		const char *bits = "11001001010001101110011101110010111000010100";
+		const char *bits = "010011110110000101000001110000110001100100010001";
 		array < mpz_t, params::poly_q::degree > coeffs;
 		params::poly_q e, t0;
 		size_t weight = 0;
@@ -1088,7 +1135,7 @@ static void test() {
 		for (size_t i = 0; i < params::poly_q::degree; i++) {
 			mpz_clear(coeffs[i]);
 		}
-		TEST_ASSERT(weight == 22, end);
+		TEST_ASSERT(weight == 19, end);
 		TEST_ASSERT(poly_inverse(t0, e) == 0, end);
 	} TEST_END;
 
@@ -1116,14 +1163,14 @@ static void test() {
 		 * differences to be invertible. The justification is [42, Corollary
 		 * 1.2] once more, vacuous at k = 2N as Section 2 explains.
 		 *
-		 * The pattern below has 8 coefficients +1 and 6 coefficients -1, so it
-		 * is one of those differences: put 7 of its support positions on each
-		 * side and add 29 shared positions that cancel, and both sides have
-		 * Hamming weight exactly NONZERO. It vanishes in one of the 8192 NTT
+		 * The pattern below has 9 coefficients +1 and 9 coefficients -1, so it
+		 * is one of those differences: put those 18 support positions on the
+		 * two sides and add 27 shared positions that cancel, and both sides
+		 * have Hamming weight exactly NONZERO. It vanishes in one of the NTT
 		 * slots. Found by meet-in-the-middle over subset sums of the powers of
 		 * one primitive 2N-th root modulo the first RNS prime, in seconds, the
 		 * same way as the short zero divisor above. Asserting the bug. */
-		const char *pat = "+0+00+0+00++0000000++000000000000--0000---000-";
+		const char *pat = "000+++++0+00+000+00000+00000--0-00-000-0-00--00-";
 		array < mpz_t, params::poly_q::degree > coeffs;
 		params::poly_q e, t0;
 		size_t pos = 0, neg = 0;
@@ -1148,7 +1195,7 @@ static void test() {
 			mpz_clear(coeffs[i]);
 		}
 		/* a legal difference of two weight-NONZERO vectors */
-		TEST_ASSERT(pos == 8 && neg == 6, end);
+		TEST_ASSERT(pos == 9 && neg == 9, end);
 		TEST_ASSERT((pos + neg) % 2 == 0 && (pos + neg) / 2 <= NONZERO, end);
 		TEST_ASSERT(poly_inverse(t0, e) == 0, end);
 	} TEST_END;
@@ -1217,6 +1264,37 @@ static void test() {
 		 * their value being a CRT idempotent and far too large for the masked
 		 * opening to stay inside the bound the verifier checks. */
 		TEST_ASSERT(run(m, am, asigma, key) == 0, end);
+	} TEST_END;
+
+	/* Third attack, on the compression rather than on the product. The SIZE
+	 * components of each message are folded into one with rho before the proof
+	 * ever sees them, so a prover who alters the output list by any Delta with
+	 * sum_j rho_j Delta_j = 0 changes nothing the proof looks at. The Delta
+	 * below is that collision, built against the rho the honest list induces --
+	 * which is the best a prover can do, and is not enough, because rho is
+	 * derived from the list it compresses: altering the list moves rho, and the
+	 * collision is a collision for the old one only. */
+	for (int i = 0; i < MSGS; i++) {
+		bm[i].resize(SIZE);
+		for (int j = 0; j < SIZE; j++) {
+			bm[i][j] = _m[i][j];
+		}
+	}
+	{
+		params::poly_q delta = 0, d0, zero = 0, rho[SIZE];
+
+		shuffle_rho_hash(rho, com, _m, 0);
+		delta(0, 0) = 1;                /* one slot of the first prime */
+		d0 = zero - rho[1] * delta;     /* so that d0 + rho_1 delta = 0 */
+		delta.invntt_pow_invphi();
+		d0.invntt_pow_invphi();
+		bm[0][0] = bm[0][0] + d0;
+		bm[0][1] = bm[0][1] + delta;
+	}
+
+	TEST_ONCE("shuffle proof rejects a compression collision") {
+		TEST_ASSERT(!util::equal(bm[0][1], _m[0][1]), end);
+		TEST_ASSERT(run(m, bm, sigma, key) == 0, end);
 	} TEST_END;
 
   end:

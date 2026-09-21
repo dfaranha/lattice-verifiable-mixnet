@@ -56,10 +56,16 @@ $(OBJ)/%.o: src/%.cpp | $(OBJ)
 $(BLAKE3): $(BLAKE3_SRC) | $(OBJ)
 	$(CPP) $(CFLAGS) -r -nostdlib $(BLAKE3_SRC) -o $@
 
-# pismall commits to SIZE=3 messages, and so does shuffle, which links it for
-# the membership sub-proof; bdlop and bgv keep the default SIZE. The two
+# The standalone pismall proves a relation of R = HEIGHT + 2 rows and so commits
+# to SIZE=3 messages; every other binary keeps the default SIZE. The two
 # configurations must not share an object file, or whichever target is built
 # last silently links the wrong one.
+#
+# shuffle used to be built at SIZE=3 as well, back when its membership relation
+# was the monomial one and also had HEIGHT + 2 rows. It must not be: BDLOP hides
+# only while WIDTH > HEIGHT + SIZE, and at WIDTH = 4, HEIGHT = 1 that leaves no
+# margin at SIZE = 3. With g(i) = i the relation is HEIGHT + 1 rows, so the
+# default SIZE = 2 is enough and the margin is back.
 $(OBJ)/bdlop-size3.o: src/bdlop.cpp | $(OBJ)
 	$(CPP) $(CFLAGS) -DSIZE=3 -c $< -o $@
 
@@ -68,7 +74,7 @@ $(OBJ)/bdlop-size3.o: src/bdlop.cpp | $(OBJ)
 # has, rounded up to the power of two its interpolation nodes need, and takes
 # the shape of a commitment equation rather than the mix-net's own.
 $(OBJ)/pismall-const.o: src/pismall.cpp | $(OBJ)
-	$(CPP) $(CFLAGS) -DSIZE=3 -UTAU -DTAU='AEX_PAD2(MSGS)' \
+	$(CPP) $(CFLAGS) -UTAU -DTAU='AEX_PAD2(MSGS)' \
 		-DPISMALL_R='(HEIGHT+1)' -DPISMALL_V='(WIDTH+1)' -c $< -o $@
 
 # pibnd as a library, for the norm bound that makes those coefficient sets
@@ -76,7 +82,7 @@ $(OBJ)/pismall-const.o: src/pismall.cpp | $(OBJ)
 # the HEIGHT + 3 of the mix-net's own instance, and it needs no padding: the
 # amortization parameter is MSGS itself.
 $(OBJ)/pibnd-short.o: src/pibnd.cpp | $(OBJ)
-	$(CPP) $(CFLAGS) -DSIZE=3 -DPIBND_V='(WIDTH+1)' -UTAU -DTAU=MSGS -c $< -o $@
+	$(CPP) $(CFLAGS) -DPIBND_V='(WIDTH+1)' -UTAU -DTAU=MSGS -c $< -o $@
 
 bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON)
 	$(CPP) $(CFLAGS) -DMAIN src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) -o $@ $(LIBS)
@@ -84,10 +90,10 @@ bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON)
 bgv: src/bgv.cpp $(COMMON)
 	$(CPP) $(CFLAGS) -DMAIN src/bgv.cpp $(COMMON) -o $@ $(LIBS)
 
-shuffle: src/shuffle.cpp $(OBJ)/bdlop-size3.o $(OBJ)/pismall-const.o \
+shuffle: src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/pismall-const.o \
 		$(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o \
 		$(COMMON) $(BLAKE3)
-	$(CPP) $(CFLAGS) -DSIZE=3 -DMAIN src/shuffle.cpp $(OBJ)/bdlop-size3.o \
+	$(CPP) $(CFLAGS) -DMAIN src/shuffle.cpp $(OBJ)/bdlop.o \
 		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
 		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
 

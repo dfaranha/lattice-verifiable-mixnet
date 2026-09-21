@@ -31,14 +31,24 @@ openings, and the two together give that every difference of committed constants
 is a unit, by an argument that never has to name the set. A prover who CRT-mixes
 the committed `sigma_i` as well as the messages is rejected.
 
-One pass of the product argument is worth only `MSGS / p_min`, about `2^-29` at
+One pass of the product argument is worth only `MSGS / p_min`, about `2^-34` at
 `MSGS = 1000`, so it is repeated with independent challenges as many times as
 `LEVEL` needs -- four or five at any supported size. The same repetitions cover
-a second weakness found afterwards: the challenge set of the linear proof is not
+two weaknesses found afterwards. The challenge set of the linear proof is not
 free of zero divisors in a ring splitting this far, so that proof is worth only
-about `2^-39` per pass and has no soundness argument of its own. A `KNOWN GAP`
-test exhibits a legal challenge that is a zero divisor. With the repetitions no
-term of the proof is below 128 bits.
+about `2^-44` per pass and has no soundness argument of its own; a `KNOWN GAP`
+test exhibits a legal challenge that is a zero divisor. And the `SIZE` components
+of each message are compressed into one with a vector `rho` before the proof
+sees them, so an output list altered by any `Delta` with
+`\sum_j rho_j Delta_j = 0` was accepted outright, `rho` having been sampled
+rather than derived. It is now hashed from the commitments and the output
+components, and drawn afresh in each pass.
+
+**The modulus has moved from 78 to 88 bits**, because the slack bound feeding
+the distributed-decryption budget drops a factor that the amortized proof's own
+correctness analysis requires. The lattice estimator puts the BGV instance at `2^158` there, against `2^180`
+at the paper's modulus, so the ring degree stays at 4096. See
+[SOUNDNESS.md](SOUNDNESS.md) section 9.
 
 **Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this.** Two things
 in particular. `\Pi_SMALL`'s *other* coefficient sets are not exact over `Z_q`,

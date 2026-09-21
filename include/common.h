@@ -38,7 +38,7 @@ using namespace std;
 #define MSGS        2
 #endif
 /* Large modulus. Not named here: it is the product of the RNS basis below,
- * params::poly_q::moduli_product(). Composite (two 39-bit primes), 78 bits,
+ * params::poly_q::moduli_product(). Composite (two 44-bit primes), 88 bits,
  * with each factor = 1 mod 2N as Table 1 requires and 2^14 | p-1, so Z_q
  * supports the length-16384 NTT the AEx encoding needs. Each factor is also
  * 2 mod 3, which keeps Y^2 - 3 irreducible modulo both and so lets pismall
@@ -60,10 +60,13 @@ using namespace std;
 
 namespace params {
     using poly_p = nfl::poly_from_modulus<uint32_t, DEGREE, 30>;
-    /* Two 39-bit RNS moduli, so the ring modulus is the 78-bit q the protocol
-     * is analysed for rather than the 124 bits NFLlib's stock basis forces. */
-    using poly_q = nfl::poly_from_modulus<uint64_t, DEGREE, 78>;
-    using poly_big = nfl::poly_from_modulus<uint64_t, 4 * DEGREE, 78>;
+    /* Two 44-bit RNS moduli, so q is 88 bits. The paper analyses 78, but its
+     * bound on the slack of Pi_BND drops a factor that proof's own correctness
+     * analysis requires, and with it restored 2^78 is about five bits short of
+     * B_Dec + B_DDec < q/2; see SOUNDNESS.md section 9. Two moduli still, so a
+     * ring element is the same 64 KiB it was. */
+    using poly_q = nfl::poly_from_modulus<uint64_t, DEGREE, 88>;
+    using poly_big = nfl::poly_from_modulus<uint64_t, 4 * DEGREE, 88>;
 }
 
 /*============================================================================*/
