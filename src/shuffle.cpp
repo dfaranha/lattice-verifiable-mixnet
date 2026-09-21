@@ -315,7 +315,7 @@ static void lin_prover(params::poly_q y[WIDTH], params::poly_q _y[WIDTH],
 static int lin_verifier(params::poly_q z[WIDTH], params::poly_q _z[WIDTH],
 		params::poly_q t, params::poly_q _t, params::poly_q u,
 		commit_t x, commit_t _x, params::poly_q alpha[2], comkey_t & key) {
-	params::poly_q beta, v, _v, tmp, zero = 0;
+	params::poly_q beta, v, _v, tmp;
 	int result = 1;
 
 	/* Sample challenge. */
@@ -341,12 +341,12 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q _z[WIDTH],
 		}
 	}
 
+	/* Being zero is preserved by the inverse transform, so these compare in
+	 * the NTT domain and skip it. */
 	tmp = t + beta * x.c1 - v;
-	tmp.invntt_pow_invphi();
-	result &= (tmp == zero);
+	result &= util::is_zero(tmp);
 	tmp = _t + beta * _x.c1 - _v;
-	tmp.invntt_pow_invphi();
-	result &= (tmp == zero);
+	result &= util::is_zero(tmp);
 
 	v = 0;
 	for (int i = 0; i < WIDTH; i++) {
@@ -354,10 +354,7 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q _z[WIDTH],
 	}
 	t = (alpha[0] * x.c2[0] + alpha[1] - _x.c2[0]) * beta + u;
 
-	t.invntt_pow_invphi();
-	v.invntt_pow_invphi();
-
-	result &= ((t - v) == 0);
+	result &= util::equal(t, v);
 	return result;
 }
 
@@ -586,7 +583,7 @@ static void test() {
 		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 1, end);
 		alpha[0] = alpha[0] * alpha[1];
 		alpha[0] = alpha[0] * alpha[1];
-		TEST_ASSERT(alpha[0] == alpha[1], end);
+		TEST_ASSERT(util::equal(alpha[0], alpha[1]), end);
 	} TEST_END;
 
 	TEST_ONCE("polynomial inverse reports a zero divisor") {

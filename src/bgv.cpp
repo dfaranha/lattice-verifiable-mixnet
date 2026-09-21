@@ -244,14 +244,14 @@ static void test() {
 	TEST_BEGIN("BGV encryption is consistent") {
 		bgv_encrypt(c1, pk, m);
 		bgv_decrypt(_m, c1, sk);
-		TEST_ASSERT(m - _m == 0, end);
+		TEST_ASSERT(util::equal(m, _m), end);
 		bgv_sample_message(m);
 		bgv_decrypt(_m, c1, sk);
-		TEST_ASSERT(m - _m != 0, end);
+		TEST_ASSERT(!util::equal(m, _m), end);
 		bgv_encrypt(c1, pk, m);
 		bgv_keygen(pk, sk);
 		bgv_decrypt(_m, c1, sk);
-		TEST_ASSERT(m - _m != 0, end);
+		TEST_ASSERT(!util::equal(m, _m), end);
 	} TEST_END;
 
 	TEST_BEGIN("BGV encryption is additively homomorphic") {
@@ -263,7 +263,7 @@ static void test() {
 		m = m + _m;
 		bgv_rdc(m);
 		bgv_decrypt(_m, c1, sk);
-		TEST_ASSERT(m - _m == 0, end);
+		TEST_ASSERT(util::equal(m, _m), end);
 	} TEST_END;
 
 	TEST_BEGIN("BGV distributed decryption is consistent") {
@@ -274,12 +274,12 @@ static void test() {
 		for (size_t j = 1; j < PARTIES; j++) {
 			acc = acc + s[j];
 		}
-		TEST_ASSERT(sk - acc == 0, end);
+		TEST_ASSERT(util::equal(sk, acc), end);
 		for (size_t j = 0; j < PARTIES; j++) {
 			bgv_distdec(t[j], c1, s[j]);
 		}
 		bgv_comb(_m, c1, t, PARTIES);
-		TEST_ASSERT(m - _m == 0, end);
+		TEST_ASSERT(util::equal(m, _m), end);
 	} TEST_END;
 
   end:

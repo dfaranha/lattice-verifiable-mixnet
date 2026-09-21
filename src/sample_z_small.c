@@ -4,6 +4,7 @@
  * Integer samplers               *
  * ****************************** */
 
+#include <string.h>
 #include <stdint.h>
 #include "sample_z_small.h"
 #include "param.h"
@@ -123,7 +124,11 @@ static inline int64_t cosac_comp(const unsigned char *r, const double x)
 	res_mantissa = (res & COSAC_EXP_MANTISSA_MASK) | (1LL << COSAC_EXP_MANTISSA_PRECISION);
 	res_exponent = COSAC_R_EXPONENT_L - 0x3ff + 1 + (res >> COSAC_EXP_MANTISSA_PRECISION);
 
-	r1 = *((uint64_t *)r);
+	/* The caller passes r + i * COMP_ENTRY_SIZE, and COMP_ENTRY_SIZE is 13,
+	 * so this pointer is not 8-byte aligned on every call. Dereferencing it
+	 * as a uint64_t is undefined behaviour that UBSan reports; memcpy says
+	 * the same thing legally and compiles to the same single load. */
+	memcpy(&r1, r, sizeof(r1));
 	r2 = load_40(r + 8);
 
 	r_mantissa = r1 & COSAC_R_MANTISSA_MASK;
