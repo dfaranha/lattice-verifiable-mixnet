@@ -64,7 +64,17 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
 #endif
 
 /*
- * sigma_ANEx: derive here instead of using the paper's.
+ * sigma_ANEx. Appendix B of the paper bounds
+ *     B_Bnd = sqrt(2N) sigma_Bnd <= 1.35 sqrt(k) N sqrt(N) B_Com,
+ * i.e. sigma_Bnd = 0.954 sqrt(k) N B_Com, which carries no factor for the tau
+ * statements the product S'C' sums over, nor for the NTI columns the rejection
+ * sampling below tests as one vector. Both are needed: sigma has to track
+ * ||S'C'||, and measuring it at TAU = NTI = 16 gives ||S'C'|| = 2^15.8 against
+ * the paper's sigma = 2^12.7, so the honest prover exhausts PIBND_TRIES every
+ * time. The factor below makes sigma track the measured norm to within 1.35.
+ *
+ * This matters beyond this file: the same bound is what the paper's B_DDec and
+ * hence its choice of q rest on. See SOUNDNESS.md, section 9.
  */
 static const double SIGMA_ANEX =
 		0.954 * BETA * DEGREE * sqrt(ANEX_K * (double) NTI * TAU / 2.0);
@@ -265,7 +275,7 @@ void pibnd_sample_chall(params::poly_q & f) {
 	f.ntt_pow_phi();
 }
 
-static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
+static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		params::poly_q A[R][V], params::poly_q t[TAU][V],
 		params::poly_q s[TAU][V]) {
 	std::array < mpz_t, params::poly_q::degree > coeffs;
@@ -354,6 +364,8 @@ static void pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		mpz_clear(coeffs[i]);
 	}
 	mpz_clear(qDivBy2);
+
+	return !(rej0 || rej1);
 }
 
 int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
@@ -408,6 +420,7 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 struct pibnd_short {
 	uint8_t h[BLAKE3_OUT_LEN];
 	params::poly_q (*Z)[NTI];
+	int complete;                   /* rejection sampling succeeded */
 };
 
 static int short_ready;
@@ -502,14 +515,14 @@ pibnd_short_t *pibnd_short_prove(comkey_t & key, commit_t * P,
 	pibnd_commit_wit(r, sigma);
 
 	pi->Z = new params::poly_q[V][NTI];
-	pibnd_prover(pi->h, pi->Z, A, t, s);
+	pi->complete = pibnd_prover(pi->h, pi->Z, A, t, s);
 
 	return pi;
 }
 
 int pibnd_short_verify(pibnd_short_t * pi, comkey_t & key, commit_t * P,
 		size_t n) {
-	if (pi == NULL || n != TAU) {
+	if (pi == NULL || !pi->complete || n != TAU) {
 		return 0;
 	}
 	pibnd_short_init();
@@ -578,7 +591,11 @@ static void test() {
 	}
 
 	TEST_ONCE("BND proof is consistent") {
-		pibnd_prover(h1, Z, A, t, s);
+		/* The prover's return value matters: giving up on rejection sampling
+		 * still leaves a masked opening that passes the norm test, so a test
+		 * that only checked the verifier would report success while the
+		 * transcript leaked the witness. */
+		TEST_ASSERT(pibnd_prover(h1, Z, A, t, s) == 1, end);
 		TEST_ASSERT(pibnd_verifier(h1, Z, A, t) == 1, end);
 	} TEST_END;
 

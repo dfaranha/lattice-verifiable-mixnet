@@ -505,7 +505,74 @@ here than a sparse one. That argument has not been redone. `bdlop_open` uses the
 same challenge set, but `pismall` calls it with the factor fixed to one, so
 nothing there depends on a challenge being invertible.
 
-## 9. Summary
+## 9. The decryption phase: `B_DDec` and the size of `q`
+
+This one is not about the proof of shuffle, and it is recorded here only
+because nowhere else in the repository is.
+
+`Pi_BND` is a *relaxed* proof: it guarantees not that the witness is as short as
+an honest prover made it, but that it is shorter than `2 B_Bnd`, a slack bound
+depending on the statement. In the decryption phase the witness row in question
+is the smudging noise `E_{i,j}`, so that slack propagates straight into how
+large `q` has to be. Appendix B of the CCS 2023 paper bounds it as
+
+```
+B-hat_Bnd <= sqrt(2N) sigma-hat_Bnd <= 1.35 N sqrt(N) ||E_{i,j}||_inf
+```
+
+and with `||E||_inf = 2^54` that is `2^72.4`, giving
+`B_DDec = 2 p xi^2 B-hat_Bnd = 2^76.4` — the `< 2^76.5` the paper states, and
+under `q/2 = 2^77` by about half a bit.
+
+**That bound carries no factor for the `tau` statements.** `sigma_Bnd` is
+defined as `0.954 max ||S' C'||_2`, and `S' C'` sums over the `tau` statements
+of a batch; the chain that bounds it keeps a `sqrt(k)` for the `k` rows and
+nothing for the columns. The implementation's rejection sampling additionally
+tests all `NTI` columns as one vector, which needs another `sqrt(NTI)`.
+
+Measurement settles it. Instrumenting `pibnd_rej_sampling` at
+`TAU = NTI = 16` gives `||S' C||_2 = 2^15.79` against the paper's
+`sigma-hat = 2^12.72`, a ratio of 8.37, and the honest prover then exhausts
+`PIBND_TRIES` on every attempt. With the factor this file uses, `sigma` tracks
+the measured norm to within 1.35 and the prover completes. The test
+`BND proof is consistent` fails with the paper's constant and passes with this
+one, so the difference is not a matter of taste.
+
+**What it costs.** Feeding a bound that tracks the measured norm back through
+`B_DDec = 2 p xi^2 B-hat_Bnd`:
+
+| | `B_DDec` | `q` needed | against `q = 2^78` |
+| --- | --- | --- | --- |
+| paper as written | `2^76.4` | `2^77.5` | fits, 0.5 bits |
+| paper's bound plus `sqrt(tau)`, `tau = N` | `2^82.4` | `2^83.4` | short by 5.4 bits |
+| tracking the measured norm | `2^85.4` | `2^86.4` | short by 8.4 bits |
+
+`B-hat_Bnd` is what the proof guarantees against a *dishonest* prover, so this
+is not a failure of honest decryption. It is that `Pi_BND` does not pin a
+cheating decryption server's `E_j` tightly enough for `B_Dec + B_DDec < q/2`,
+and such a server could push the combined decryption into wraparound and corrupt
+the plaintext — which is what threshold verifiability is meant to prevent.
+Nothing in this repository exercises it, because `ANEX_E_INF` defaults to
+`BETA = 1` and the test gives `Pi_BND` a ternary last row.
+
+**Two caveats, both load-bearing.** The slack comes from Baum et al.
+[8, Lemma 3], which has not been re-derived here; if that lemma's bound is
+already amortized over the batch then the paper is right and the factor in
+`pibnd.cpp` is merely conservative. And the `sigma` in this repository is this
+project's own correction, not the paper's, so the code agreeing with the
+argument above is not independent evidence. The measurement is.
+
+**A trap worth naming.** `PIBND_TRIES` bounds the prover's retries so that a
+witness that is not short cannot loop forever. Giving up leaves the last
+rejected masked opening in `Z`, and that opening will usually still pass the
+verifier's norm test, because rejection sampling protects zero knowledge and not
+the bound. A prover that gives up and publishes anyway therefore produces a
+transcript that verifies and leaks the witness. `pibnd_prover()` returns whether
+it succeeded, `pibnd_short_verify()` refuses a proof it did not, and the test
+asserts the prover's return value — without which a completeness failure reads
+as a pass.
+
+## 10. Summary
 
 | | before | on this branch |
 | --- | --- | --- |
