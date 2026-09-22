@@ -775,30 +775,31 @@ that masks badly does not gain anything by it. Soundness was unaffected.
   the two together are what the standard deviation was chosen for;
 * `LIN_TRIES` goes from 64 to 256.
 
-**What it cost, measured.** Instrumenting `lin_prover` to report the attempts
-each proof needs, over 238 proofs at `MSGS = 4` against 44 of the old code:
+**And the three tests became one.** `lin_prover` ran a rejection test per
+masked opening where the standard procedure runs one over the concatenation,
+which the README had already noted as the obvious saving. Restoring the
+halfspace test made it more than a saving: paid three times it costs a factor
+of two, paid once it costs nothing, and the transcript leaks one halfspace bit
+rather than three, which is tighter zero-knowledge and not merely faster.
+`rej_sampling` is now `rej_accum`, which folds `<z, v>` and `||v||^2` over one
+opening, and `rej_decide`, which tests the three together against an `M` taken
+over the `||v||^2` of the concatenation.
 
-| | acceptance per proof | mean restarts | longest run |
-| --- | --- | --- | --- |
-| before | 0.197 | 4.1 | 21 |
-| after | 0.114 | 7.7 | 56 |
+**Measured**, instrumenting `lin_prover` to report the attempts each proof
+needs, at `MSGS = 4`:
 
-So the linear proofs restart about 1.9 times as often — the `linear proof`
-benchmark goes from 277 to 594 Mcycles — which is the price the parameters
-always implied and the code was not paying. The longest run observed is what
-makes `LIN_TRIES` the third change rather than an optional one: at 0.114 the
-old budget of 64 gives up on one proof in 2400, and a shuffle at `MSGS = 1000`
-runs 4000 of them, so four shuffles in five would have failed to produce a
-proof. At 256 it is one proof in `3 * 10^13`.
+| | acceptance | mean restarts | longest run | `linear proof` |
+| --- | --- | --- | --- | --- |
+| before, no halfspace test | 0.197 | 4.1 | 21 | 277 Mcycles |
+| halfspace test, three tests | 0.114 | 7.7 | 56 | 594 Mcycles |
+| halfspace test, batched | **0.491** | 1.0 | 5 | **95 Mcycles** |
 
-**It also makes the batching the README suggests worth more than it was.**
-`lin_prover` runs three rejection tests, one per masked opening, where the
-standard procedure runs one over the concatenation. Batched, the halfspace test
-is paid once instead of three times and `M` is taken over a `||v||^2` three
-times larger, `1.054`: acceptance goes to about **0.47**, which is four times
-today's and more than twice what the code had before this fix. It is also
-tighter zero-knowledge, since the transcript then leaks one halfspace bit
-rather than three. Nothing here needs it, so it stays a note.
+So the correct sampler, batched, is three times *cheaper* than the incorrect
+one it replaces. `LIN_TRIES` went to 256 for the middle row, where
+the old budget of 64 would have given up on one proof in 2400 and a shuffle at
+`MSGS = 1000` runs 4000 of them; at 0.491 it is far past anything needed, and
+it is kept because a cap is only reached when the witness is long, and costs
+nothing when it is not.
 
 ## 10. The compression by rho
 

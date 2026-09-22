@@ -365,30 +365,24 @@ static void simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
 	inv[0] = w;
 }
 
-static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
-		uint64_t s2) {
+/* Accumulate <z, v> and ||v||^2 over one masked opening, centred. A proof has
+ * three of them and they are folded into one pair: the rejection sampling
+ * below is then Figure 2 run on the concatenation, which is the standard
+ * procedure, pays the halfspace test once instead of three times and leaks one
+ * bit rather than three. See SOUNDNESS.md section 9.1. */
+static void rej_accum(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
+		mpz_t dot, mpz_t norm) {
 	array < mpz_t, params::poly_q::degree > coeffs0, coeffs1;
 	params::poly_q t;
-	mpz_t dot, norm, qDivBy2, tmp;
-	double r, M;
-	int64_t seed;
-	mpf_t u;
-	uint8_t buf[8];
-	gmp_randstate_t state;
-	int result;
+	mpz_t qDivBy2, tmp;
 
-	/// Constructors
-	mpf_init(u);
-	gmp_randinit_mt(state);
-	mpz_inits(dot, norm, qDivBy2, tmp, nullptr);
+	mpz_inits(qDivBy2, tmp, nullptr);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_init2(coeffs0[i], (params::poly_q::bits_in_moduli_product() << 2));
 		mpz_init2(coeffs1[i], (params::poly_q::bits_in_moduli_product() << 2));
 	}
 
 	mpz_fdiv_q_2exp(qDivBy2, params::poly_q::moduli_product(), 1);
-	mpz_set_ui(norm, 0);
-	mpz_set_ui(dot, 0);
 	for (int i = 0; i < WIDTH; i++) {
 		t = z[i];
 		t.invntt_pow_invphi();
@@ -408,6 +402,27 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 		}
 	}
 
+	mpz_clears(qDivBy2, tmp, nullptr);
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		mpz_clear(coeffs0[i]);
+		mpz_clear(coeffs1[i]);
+	}
+}
+
+/* Reject when <z, v> < 0, then accept with probability min(1, r) for
+ * r = exp((-2<z, v> + ||v||^2) / 2 s2) / M. The first step is what SIGMA_C is
+ * chosen for: inside the halfspace the ratio to dominate is at most
+ * exp(||v||^2 / 2 s2), which is M. */
+static int rej_decide(mpz_t dot, mpz_t norm, uint64_t s2) {
+	double r, M;
+	int64_t seed;
+	mpf_t u;
+	uint8_t buf[8];
+	gmp_randstate_t state;
+	int result;
+
+	mpf_init(u);
+	gmp_randinit_mt(state);
 	if (getrandom(buf, sizeof(buf), 0) != sizeof(buf)) {
 		fprintf(stderr, "ERROR: could not read entropy for rejection sampling\n");
 		abort();
@@ -416,10 +431,6 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 	gmp_randseed_ui(state, seed);
 	mpf_urandomb(u, state, mpf_get_default_prec());
 
-	/* Reject when <z, v> < 0, then accept with probability min(1, r) for
-	 * r = exp((-2<z, v> + ||v||^2) / 2 s2) / M. The first step is what SIGMA_C
-	 * is chosen for: inside the halfspace the ratio to dominate is at most
-	 * exp(||v||^2 / 2 s2), which is M. See SOUNDNESS.md section 9.1. */
 	M = exp(mpz_get_d(norm) / (2.0 * s2));
 	result = mpz_get_d(dot) < 0;
 	r = -2.0 * mpz_get_d(dot) + mpz_get_d(norm);
@@ -429,20 +440,15 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 
 	mpf_clear(u);
 	gmp_randclear(state);
-	mpz_clears(dot, norm, qDivBy2, tmp, nullptr);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(coeffs0[i]);
-		mpz_clear(coeffs1[i]);
-	}
 	return result;
 }
 
-/* How many times the prover retries rejection sampling before giving up. A
- * proof needs all three checks to pass, which measurement puts at 0.114 of
- * attempts, so about eight restarts; a prover whose witness is not short never
- * succeeds, and without a bound it would spin here forever. At that rate 256
- * tries leave one proof in 3 * 10^13 giving up, against one in 2400 at the 64
- * this used to be, and a shuffle runs MSGS * SHUFFLE_REPS of them.
+/* How many times the prover retries rejection sampling before giving up. The
+ * three openings are tested as one, which measurement puts at 0.49 of
+ * attempts, so a proof usually passes first time; a prover whose witness is not
+ * short never succeeds, and without a bound it would spin here forever. The
+ * budget is far past what that rate needs, and costs nothing, since it is only
+ * reached when the witness is long.
  *
  * Returning whether it succeeded matters as much as the bound. Rejection
  * sampling is what makes the masked opening independent of the witness, not
@@ -459,8 +465,10 @@ static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 		vector < params::poly_q > _r) {
 	params::poly_q beta, tmp[WIDTH], ptmp[WIDTH], _tmp[WIDTH];
 	array < mpz_t, params::poly_q::degree > coeffs;
-	int rej0, rej1, rej2, tries = 0;
+	mpz_t dot, norm;
+	int rej, tries = 0;
 
+	mpz_inits(dot, norm, nullptr);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
 	}
@@ -518,16 +526,20 @@ static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 			w[i] = w[i] + ptmp[i];
 			_y[i] = _y[i] + _tmp[i];
 		}
-		rej0 = rej_sampling(y, tmp, SIGMA_C * SIGMA_C);
-		rej1 = rej_sampling(w, ptmp, SIGMA_C * SIGMA_C);
-		rej2 = rej_sampling(_y, _tmp, SIGMA_C * SIGMA_C);
-	} while ((rej0 || rej1 || rej2) && ++tries < LIN_TRIES);
+		mpz_set_ui(dot, 0);
+		mpz_set_ui(norm, 0);
+		rej_accum(y, tmp, dot, norm);
+		rej_accum(w, ptmp, dot, norm);
+		rej_accum(_y, _tmp, dot, norm);
+		rej = rej_decide(dot, norm, SIGMA_C * SIGMA_C);
+	} while (rej && ++tries < LIN_TRIES);
 
+	mpz_clears(dot, norm, nullptr);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
 	}
 
-	return !(rej0 || rej1 || rej2);
+	return !rej;
 }
 
 static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],

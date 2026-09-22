@@ -109,8 +109,11 @@ two, so it carries a third masked opening, a third first message and a third
 rejection-sampling test. Measured at `MSGS = 4`, the prover went from 578 to
 1102 Mcycles and the verifier from 16.7 to 23.2 Mcycles. Most of the prover
 cost is the extra rejection sampling, which multiplies the expected number of
-restarts rather than adding to the work of one; batching the three tests into a
-single one over the concatenated vectors would recover much of it.
+restarts rather than adding to the work of one. That has since been recovered:
+the three tests are batched into one over the concatenated vectors, which takes
+a proof from 4.1 restarts on average to 1.0 and the `linear proof` benchmark
+from 277 to 95 Mcycles. See SOUNDNESS.md section 9.1, which is also where the
+rejection sampling itself was corrected.
 
 Note that `pismall` defaults to `TAU = 1024` rather than the paper's 1000: its interpolation nodes are the `TAU`-th roots of unity, so `TAU` must be a power of two. The extra 24 relations are padded with zero witnesses and cost nothing in soundness.
 
