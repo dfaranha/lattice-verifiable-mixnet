@@ -565,12 +565,30 @@ millisecond, so `2^75` of them is astronomical wall-clock; the `2^46` of 8.1 was
 days. But `LEVEL` is a count of queries, and by that count `Pi_SMALL` is the
 weakest thing in the protocol at `2^75`, below `Pi_BND`'s `2^-130`.
 
-The repair is 7.1's: one hash over both passes' first messages yielding both
-passes' challenges, and one over both passes' openings yielding both column
-sets, which is the two-phase shape `run()` now has. The paper's own footnote to
-Lemma 2 says the bound "only applies to the interactive version of the proof"
-and has to be raised for Fiat-Shamir, which is the same observation one level
-up.
+**The repair is 7.1's in principle and dearer in practice.** One hash over both
+passes' first messages, yielding both passes' challenges, is the shape `run()`
+now has — but a pass's first message is a Merkle root over its codewords, and
+the codewords are `H[TAU][3][V]` at 256 KB each, **3.75 GB** at `TAU = 1024`.
+Both passes' cannot be held at once, and they cannot be shared either: two
+accepting transcripts over one first message is what the extractor of Lemma 2
+consumes, so a prover that answered two challenge sets from one commitment
+would be handing the verifier the input to its own extraction. What is left is
+to recompute — save each pass's randomness, discard its codewords, and encode a
+second time after the challenge — which binds the passes at the cost of doubling
+the encoding, the dominant cost of this file.
+
+**Or one pass could be made to suffice, which is cheaper than any of that.**
+The per-pass algebraic term is `18 TAU / p_min^2` only because the challenge
+lives in a quadratic extension. In `GR(q,4)` it is `18 TAU / p_min^4 =
+2^-162`, and a single pass then answers to the column term alone, which needs
+`ETA = 437` rather than 325 to reach `2^-128`. That is 35% more opened columns
+against half as many passes: the `Pi_SMALL` of Section 11 falls from 108 MB to
+about 73, the prover halves, the binding question disappears because there is
+nothing to bind, and the arithmetic to write is a quartic extension in place of
+a quadratic one — the same lemma with `p^4` where it had `p^2`. The paper's own
+footnote to Lemma 2 says its bound "only applies to the interactive version of
+the proof" and has to be raised for Fiat-Shamir, which is the same observation
+one level up, and either route answers it.
 
 There is a second, cheaper-to-state instance of the same thing inside a pass:
 the columns are hashed from the openings, so a prover can re-roll the openings'
