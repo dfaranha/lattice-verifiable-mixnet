@@ -545,12 +545,33 @@ The practical conclusion is that the repetitions carry more weight than their
 stated purpose, and removing them on the grounds that the product argument had
 been improved by other means would reopen this.
 
-**What has not been checked.** `Pi_BND` draws its challenge matrix from ternary
-ring elements, and its extraction wants their differences invertible for the
-same reason; a full-weight ternary polynomial is no more likely to be a unit
-here than a sparse one. That argument has not been redone. `bdlop_open` uses the
-same challenge set, but `pismall` calls it with the factor fixed to one, so
-nothing there depends on a challenge being invertible.
+**The same question, asked of `Pi_BND`, has a sharper answer.** Its challenge
+matrix is drawn from `nfl::ZO_dist()`, full-weight ternary ring elements. Baum
+et al. [8] give two instantiations of the amortized proof: Theorem 1 over
+`R = Z` with `C = {0,1}`, and Theorem 2 over `R = Z[X]/(X^d + 1)`, which is the
+one that applies here since `A` is a matrix of polynomials. Theorem 2 fixes
+
+```
+C = {0} union {+/- X^j},
+```
+
+monomials and zero, and its extraction rests on their Lemma 4: for
+`a, b` in that set, `2 (a - b)^-1` has coefficients in `{-1, 0, 1}`. That is a
+statement about monomials, and it is what makes the extractor work. **A ternary
+challenge matrix is not that set**, Lemma 4 says nothing about it, and in this
+ring the differences have no invertibility to fall back on — which is Section 8
+one level up. So `Pi_BND` as implemented runs outside the soundness proof it
+cites.
+
+There is something to gain from fixing it rather than only a debt to pay. With
+the intended challenge set, Theorem 2's extractor returns `A S' = 2 T`, a clean
+factor of two rather than an arbitrary short `c`, and `Section 6.4` would
+simplify accordingly: the argument there carries `c` through only to cancel it
+at the end.
+
+`bdlop_open` uses the same challenge set as `Pi_LIN`, but `pismall` calls it
+with the factor fixed to one, so nothing there depends on a challenge being
+invertible.
 
 ## 9. The decryption phase: `B_DDec` and the size of `q`
 

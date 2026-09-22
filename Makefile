@@ -28,6 +28,18 @@ FLINT    = -L deps/ -lflint
 OBJ      = obj
 BIN      = bdlop bgv shuffle pismall pibnd
 
+# The objects bake MSGS, SIZE and the amortization parameters in, and make has
+# no way to notice that CONFIG changed since they were built: it compares
+# timestamps against the sources, which have not moved. Without this, building
+# at one MSGS and then another silently links objects compiled for the first,
+# and what you get is an assertion at best. Record CONFIG in a stamp that every
+# object depends on, rewritten only when it actually changes so that repeated
+# builds at the same settings still do nothing.
+STAMP    = $(OBJ)/.config
+.PHONY: FORCE
+$(STAMP): FORCE | $(OBJ)
+	@printf '%s' '$(CONFIG)' | cmp -s - $@ 2>/dev/null || printf '%s' '$(CONFIG)' > $@
+
 BLAKE3_SRC = src/blake3/blake3.c src/blake3/blake3_dispatch.c \
              src/blake3/blake3_portable.c \
              src/blake3/blake3_sse2_x86-64_unix.S \
@@ -46,10 +58,10 @@ $(OBJ):
 	mkdir -p $(OBJ)
 
 # Support code, compiled once and shared by every binary.
-$(OBJ)/%.o: src/%.c | $(OBJ)
+$(OBJ)/%.o: src/%.c $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -c $< -o $@
 
-$(OBJ)/%.o: src/%.cpp | $(OBJ)
+$(OBJ)/%.o: src/%.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -c $< -o $@
 
 # BLAKE3 is bundled as a mix of C and assembly; keep it in a single object.
@@ -66,14 +78,14 @@ $(BLAKE3): $(BLAKE3_SRC) | $(OBJ)
 # only while WIDTH > HEIGHT + SIZE, and at WIDTH = 4, HEIGHT = 1 that leaves no
 # margin at SIZE = 3. With g(i) = i the relation is HEIGHT + 1 rows, so the
 # default SIZE = 2 is enough and the margin is back.
-$(OBJ)/bdlop-size3.o: src/bdlop.cpp | $(OBJ)
+$(OBJ)/bdlop-size3.o: src/bdlop.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -DSIZE=3 -c $< -o $@
 
 # pismall as a library, for the proof that each committed sigma_i is a ring
 # constant. The proof is amortized over exactly the MSGS relations the shuffle
 # has, rounded up to the power of two its interpolation nodes need, and takes
 # the shape of a commitment equation rather than the mix-net's own.
-$(OBJ)/pismall-const.o: src/pismall.cpp | $(OBJ)
+$(OBJ)/pismall-const.o: src/pismall.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -UTAU -DTAU='AEX_PAD2(MSGS)' \
 		-DPISMALL_R='(HEIGHT+1)' -DPISMALL_V='(WIDTH+1)' -c $< -o $@
 
@@ -81,27 +93,27 @@ $(OBJ)/pismall-const.o: src/pismall.cpp | $(OBJ)
 # exact. Its relation is the commitment equation, so V is WIDTH + 1 rather than
 # the HEIGHT + 3 of the mix-net's own instance, and it needs no padding: the
 # amortization parameter is MSGS itself.
-$(OBJ)/pibnd-short.o: src/pibnd.cpp | $(OBJ)
+$(OBJ)/pibnd-short.o: src/pibnd.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -DPIBND_V='(WIDTH+1)' -UTAU -DTAU=MSGS -c $< -o $@
 
-bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON)
+bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) $(STAMP)
 	$(CPP) $(CFLAGS) -DMAIN src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) -o $@ $(LIBS)
 
-bgv: src/bgv.cpp $(COMMON)
+bgv: src/bgv.cpp $(COMMON) $(STAMP)
 	$(CPP) $(CFLAGS) -DMAIN src/bgv.cpp $(COMMON) -o $@ $(LIBS)
 
 shuffle: src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/pismall-const.o \
 		$(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o \
-		$(COMMON) $(BLAKE3)
+		$(COMMON) $(BLAKE3) $(STAMP)
 	$(CPP) $(CFLAGS) -DMAIN src/shuffle.cpp $(OBJ)/bdlop.o \
 		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
 		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
 
-pismall: src/pismall.cpp $(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3)
+pismall: src/pismall.cpp $(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3) $(STAMP)
 	$(CPP) $(CFLAGS) -DSIZE=3 -DMAIN src/pismall.cpp \
 		$(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
 
-pibnd: src/pibnd.cpp $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3)
+pibnd: src/pibnd.cpp $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) $(STAMP)
 	$(CPP) $(CFLAGS) -DMAIN src/pibnd.cpp $(OBJ)/sample_z_small.o \
 		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS)
 
