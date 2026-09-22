@@ -1,0 +1,6 @@
+Amortized across \tau = 10000.
+
+pilin: (46.7 + 7.8)\tau ms
+pishuffle: (52 + 8.2)\tau ms
+pismall: (167.8 + 2.4)\tau ms
+pibnd: (292 + 22)\tau ms

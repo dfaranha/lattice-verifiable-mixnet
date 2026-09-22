@@ -111,15 +111,31 @@ static constexpr int shuffle_ilog2(unsigned long long x) {
 	return x <= 1 ? 0 : 1 + shuffle_ilog2(x >> 1);
 }
 
+/* The smaller prime of the RNS basis. A challenge is a uniform element of R_q
+ * and the ring is fully split, so what a false statement needs is a challenge
+ * vanishing in one slot, which is 1 / p_min. */
+static constexpr unsigned long long P_MIN =
+		nfl::params < uint64_t >::P[0] < nfl::params < uint64_t >::P[1] ?
+		nfl::params < uint64_t >::P[0] : nfl::params < uint64_t >::P[1];
+
 /* Bits gained per pass, floor(log2(p_min)) - ceil(log2(MSGS)). */
 static constexpr int SHUFFLE_BITS =
-		shuffle_ilog2(nfl::params < uint64_t >::P[0] <
-				nfl::params < uint64_t >::P[1] ?
-				nfl::params < uint64_t >::P[0] :
-				nfl::params < uint64_t >::P[1]) -
-		shuffle_ilog2(2 * (unsigned long long) MSGS - 1);
+		shuffle_ilog2(P_MIN) - shuffle_ilog2(2 * (unsigned long long) MSGS - 1);
 static_assert(SHUFFLE_BITS > 0, "MSGS is too large for the RNS basis");
 static constexpr int SHUFFLE_REPS = (LEVEL + SHUFFLE_BITS - 1) / SHUFFLE_BITS;
+
+/* How many times each linear proof is run. Its challenge beta is uniform over
+ * R_q and its final check reduces to beta L = 0 for the residual L of the
+ * relation, so a prover whose committed messages violate it passes exactly when
+ * beta vanishes in a slot where L does not: 1 / p_min, and no more, because the
+ * challenge set has zero divisors -- see SOUNDNESS.md section 8. The LIN_REPS
+ * challenges come from one hash of all LIN_REPS first messages, so re-rolling
+ * any of them re-rolls all, and a forged relation has to survive every one of
+ * them at once: (1 / p_min)^LIN_REPS, which is what makes the repetitions
+ * multiply where those of the pass do not. See section 8.1. */
+static constexpr int LIN_REPS =
+		(LEVEL + shuffle_ilog2(P_MIN) - 1) / shuffle_ilog2(P_MIN);
+static_assert(LIN_REPS > 1, "one linear proof cannot reach LEVEL on its own");
 
 /* A params::poly_q is 64 KiB, so anything dimensioned by MSGS is far too large
  * to be a local variable: at MSGS = 1000 the buffers below add up to several
@@ -134,8 +150,11 @@ static constexpr int SHUFFLE_REPS = (LEVEL + SHUFFLE_BITS - 1) / SHUFFLE_BITS;
 static commit_t *com, *d, *cs, *pcom;
 static vector < params::poly_q > *r, *pr, *_r;
 static params::poly_q *ms, *_ms, *s;
-static params::poly_q (*y)[WIDTH], (*w)[WIDTH], (*_y)[WIDTH];
-static params::poly_q *t, *tp, *_t, *u;
+static params::poly_q (*y)[LIN_REPS][WIDTH], (*w)[LIN_REPS][WIDTH],
+		(*_y)[LIN_REPS][WIDTH];
+/* What a linear proof publishes besides its responses: the hash its challenges
+ * come from. The first messages are rebuilt by the verifier. */
+static uint8_t (*lh)[BLAKE3_OUT_LEN];
 static params::poly_q *theta, *inv, *inv_tmp;
 static params::poly_q *sg, *fa, *fb;
 
@@ -164,13 +183,10 @@ static void shuffle_alloc(void) {
 	ms = new params::poly_q[MSGS];
 	_ms = new params::poly_q[MSGS];
 	s = new params::poly_q[MSGS];
-	y = new params::poly_q[MSGS][WIDTH];
-	w = new params::poly_q[MSGS][WIDTH];
-	_y = new params::poly_q[MSGS][WIDTH];
-	t = new params::poly_q[MSGS];
-	tp = new params::poly_q[MSGS];
-	_t = new params::poly_q[MSGS];
-	u = new params::poly_q[MSGS];
+	y = new params::poly_q[MSGS][LIN_REPS][WIDTH];
+	w = new params::poly_q[MSGS][LIN_REPS][WIDTH];
+	_y = new params::poly_q[MSGS][LIN_REPS][WIDTH];
+	lh = new uint8_t[MSGS][BLAKE3_OUT_LEN];
 	theta = new params::poly_q[SHUFFLE_REPS * MSGS];
 	inv = new params::poly_q[MSGS];
 	inv_tmp = new params::poly_q[MSGS];
@@ -193,10 +209,7 @@ static void shuffle_free(void) {
 	delete[]y;
 	delete[]w;
 	delete[]_y;
-	delete[]t;
-	delete[]tp;
-	delete[]_t;
-	delete[]u;
+	delete[]lh;
 	delete[]theta;
 	delete[]inv;
 	delete[]inv_tmp;
@@ -247,15 +260,19 @@ static void index_scalar(params::poly_q & out, size_t i) {
  * into the public part (_m_i - mu), folded into coef[2], and the committed part
  * sigma_i scaled by the public tau, folded into coef[1].
  */
-/* The middle commitment of the relation, the one to sigma_l, lives under a key
+/* The transcript hash of one linear proof: the statement, and the first messages
+ * of all LIN_REPS repetitions together. Binding them is what makes the
+ * repetitions multiply, since re-rolling any one of them moves every challenge.
+ *
+ * The middle commitment of the relation, the one to sigma_l, lives under a key
  * of its own: it is committed once and shared by every pass, while x and _x are
  * under the rho-compressed key of this pass. The two share A1 and differ only in
- * the A2 row. See SOUNDNESS.md section 7.1. */
-static void lin_hash(params::poly_q & beta, comkey_t & key, comkey_t & pkey,
-		commit_t x, commit_t p, commit_t y, params::poly_q coef[3],
-		params::poly_q & u, params::poly_q t, params::poly_q tp,
-		params::poly_q _t) {
-	uint8_t hash[BLAKE3_OUT_LEN];
+ * the A2 row. See SOUNDNESS.md sections 7.1 and 8.1. */
+static void lin_hash(uint8_t hash[BLAKE3_OUT_LEN], comkey_t & key,
+		comkey_t & pkey, commit_t x, commit_t p, commit_t y,
+		params::poly_q coef[3], params::poly_q u[LIN_REPS],
+		params::poly_q t[LIN_REPS], params::poly_q tp[LIN_REPS],
+		params::poly_q _t[LIN_REPS]) {
 	blake3_hasher hasher;
 
 	blake3_hasher_init(&hasher);
@@ -296,20 +313,27 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, comkey_t & pkey,
 				16 * DEGREE);
 	}
 
-	blake3_hasher_update(&hasher, (const uint8_t *)u.data(), 16 * DEGREE);
-	blake3_hasher_update(&hasher, (const uint8_t *)t.data(), 16 * DEGREE);
-	blake3_hasher_update(&hasher, (const uint8_t *)tp.data(), 16 * DEGREE);
-	blake3_hasher_update(&hasher, (const uint8_t *)_t.data(), 16 * DEGREE);
+	for (int j = 0; j < LIN_REPS; j++) {
+		blake3_hasher_update(&hasher, (const uint8_t *)u[j].data(), 16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)t[j].data(), 16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)tp[j].data(), 16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)_t[j].data(), 16 * DEGREE);
+	}
 
 	blake3_hasher_finalize(&hasher, hash, BLAKE3_OUT_LEN);
+}
 
-	/* Sample challenge from RNG seeded with hash. The challenge set is not free
-	 * of zero divisors in this ring -- the test "KNOWN GAP: a challenge
-	 * difference can be a zero divisor" exhibits one -- so this proof is worth
-	 * only about 1 / p_min on its own and is carried by the repetitions of
-	 * shuffle_prover. See SOUNDNESS.md, sections 7 and 8. */
+/* The LIN_REPS challenges the hash above commits to. The challenge set is not
+ * free of zero divisors in this ring -- the test "KNOWN GAP: a challenge
+ * difference can be a zero divisor" exhibits one -- so one of them is worth
+ * only about 1 / p_min, and it is the repetitions that carry the proof to
+ * LEVEL. See SOUNDNESS.md, sections 8 and 8.1. */
+static void lin_chal(params::poly_q beta[LIN_REPS],
+		const uint8_t hash[BLAKE3_OUT_LEN]) {
 	nfl::fastrandombytes_seed(hash);
-	bdlop_sample_chal(beta);
+	for (int j = 0; j < LIN_REPS; j++) {
+		bdlop_sample_chal(beta[j]);
+	}
 	nfl::fastrandombytes_reseed();
 }
 
@@ -471,13 +495,20 @@ static int rej_decide(mpz_t dot, mpz_t norm, uint64_t s2) {
  * is why the status is threaded back to run(). */
 #define LIN_TRIES   256
 
-static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
-		params::poly_q _y[WIDTH], params::poly_q & t, params::poly_q & tp,
-		params::poly_q & _t, params::poly_q & u, commit_t x, commit_t p,
-		commit_t _x, params::poly_q coef[3], comkey_t & key, comkey_t & pkey,
+/* One linear proof, run LIN_REPS times against challenges drawn from a single
+ * hash of all LIN_REPS first messages. What it publishes is that hash and the
+ * responses: the verifier rebuilds t, tp, t' and u from the responses and the
+ * challenges, which is the transcript the paper describes, and saves four ring
+ * elements a repetition over sending them. */
+static int lin_prover(params::poly_q y[LIN_REPS][WIDTH],
+		params::poly_q w[LIN_REPS][WIDTH], params::poly_q _y[LIN_REPS][WIDTH],
+		uint8_t h[BLAKE3_OUT_LEN], commit_t x, commit_t p, commit_t _x,
+		params::poly_q coef[3], comkey_t & key, comkey_t & pkey,
 		vector < params::poly_q > r, vector < params::poly_q > pr,
 		vector < params::poly_q > _r) {
-	params::poly_q beta, tmp[WIDTH], ptmp[WIDTH], _tmp[WIDTH];
+	params::poly_q beta[LIN_REPS], t[LIN_REPS], tp[LIN_REPS], _t[LIN_REPS];
+	params::poly_q u[LIN_REPS];
+	params::poly_q tmp[WIDTH], ptmp[WIDTH], _tmp[WIDTH];
 	array < mpz_t, params::poly_q::degree > coeffs;
 	mpz_t dot, norm;
 	int rej, tries = 0;
@@ -488,63 +519,70 @@ static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 	}
 
 	do {
-		/* Prover samples y, y_p and y' from Gaussian. */
-		for (int i = 0; i < WIDTH; i++) {
-			for (size_t k = 0; k < params::poly_q::degree; k++) {
-				int64_t coeff = sample_z(0.0, SIGMA_C);
-				mpz_set_si(coeffs[k], coeff);
+		/* Prover samples y, y_p and y' from Gaussian, once per repetition. */
+		for (int j = 0; j < LIN_REPS; j++) {
+			for (int i = 0; i < WIDTH; i++) {
+				for (size_t k = 0; k < params::poly_q::degree; k++) {
+					int64_t coeff = sample_z(0.0, SIGMA_C);
+					mpz_set_si(coeffs[k], coeff);
+				}
+				y[j][i].mpz2poly(coeffs);
+				y[j][i].ntt_pow_phi();
+				for (size_t k = 0; k < params::poly_q::degree; k++) {
+					int64_t coeff = sample_z(0.0, SIGMA_C);
+					mpz_set_si(coeffs[k], coeff);
+				}
+				w[j][i].mpz2poly(coeffs);
+				w[j][i].ntt_pow_phi();
+				for (size_t k = 0; k < params::poly_q::degree; k++) {
+					int64_t coeff = sample_z(0.0, SIGMA_C);
+					mpz_set_si(coeffs[k], coeff);
+				}
+				_y[j][i].mpz2poly(coeffs);
+				_y[j][i].ntt_pow_phi();
 			}
-			y[i].mpz2poly(coeffs);
-			y[i].ntt_pow_phi();
-			for (size_t k = 0; k < params::poly_q::degree; k++) {
-				int64_t coeff = sample_z(0.0, SIGMA_C);
-				mpz_set_si(coeffs[k], coeff);
+
+			t[j] = y[j][0];
+			tp[j] = w[j][0];
+			_t[j] = _y[j][0];
+			for (int i = 0; i < HEIGHT; i++) {
+				for (int k = 0; k < WIDTH - HEIGHT; k++) {
+					t[j] = t[j] + key.A1[i][k] * y[j][k + HEIGHT];
+					tp[j] = tp[j] + pkey.A1[i][k] * w[j][k + HEIGHT];
+					_t[j] = _t[j] + key.A1[i][k] * _y[j][k + HEIGHT];
+				}
 			}
-			w[i].mpz2poly(coeffs);
-			w[i].ntt_pow_phi();
-			for (size_t k = 0; k < params::poly_q::degree; k++) {
-				int64_t coeff = sample_z(0.0, SIGMA_C);
-				mpz_set_si(coeffs[k], coeff);
+
+			u[j] = 0;
+			for (int i = 0; i < WIDTH; i++) {
+				u[j] = u[j] + coef[0] * (key.A2[0][i] * y[j][i]);
+				u[j] = u[j] + coef[1] * (pkey.A2[0][i] * w[j][i]);
+				u[j] = u[j] - (key.A2[0][i] * _y[j][i]);
 			}
-			_y[i].mpz2poly(coeffs);
-			_y[i].ntt_pow_phi();
 		}
 
-		t = y[0];
-		tp = w[0];
-		_t = _y[0];
-		for (int i = 0; i < HEIGHT; i++) {
-			for (int j = 0; j < WIDTH - HEIGHT; j++) {
-				t = t + key.A1[i][j] * y[j + HEIGHT];
-				tp = tp + pkey.A1[i][j] * w[j + HEIGHT];
-				_t = _t + key.A1[i][j] * _y[j + HEIGHT];
-			}
-		}
+		/* Sample every challenge from one hash of every first message. */
+		lin_hash(h, key, pkey, x, p, _x, coef, u, t, tp, _t);
+		lin_chal(beta, h);
 
-		u = 0;
-		for (int i = 0; i < WIDTH; i++) {
-			u = u + coef[0] * (key.A2[0][i] * y[i]);
-			u = u + coef[1] * (pkey.A2[0][i] * w[i]);
-			u = u - (key.A2[0][i] * _y[i]);
-		}
-
-		/* Sample challenge. */
-		lin_hash(beta, key, pkey, x, p, _x, coef, u, t, tp, _t);
-
-		/* Prover */
-		for (int i = 0; i < WIDTH; i++) {
-			tmp[i] = beta * r[i];
-			ptmp[i] = beta * pr[i];
-			_tmp[i] = beta * _r[i];
-			y[i] = y[i] + tmp[i];
-			w[i] = w[i] + ptmp[i];
-			_y[i] = _y[i] + _tmp[i];
-		}
+		/* Prover, and one rejection test over all of the openings: they stand
+		 * or fall together, since a fresh first message anywhere moves every
+		 * challenge. */
 		mpz_set_ui(dot, 0);
 		mpz_set_ui(norm, 0);
-		rej_accum(y, tmp, dot, norm);
-		rej_accum(w, ptmp, dot, norm);
-		rej_accum(_y, _tmp, dot, norm);
+		for (int j = 0; j < LIN_REPS; j++) {
+			for (int i = 0; i < WIDTH; i++) {
+				tmp[i] = beta[j] * r[i];
+				ptmp[i] = beta[j] * pr[i];
+				_tmp[i] = beta[j] * _r[i];
+				y[j][i] = y[j][i] + tmp[i];
+				w[j][i] = w[j][i] + ptmp[i];
+				_y[j][i] = _y[j][i] + _tmp[i];
+			}
+			rej_accum(y[j], tmp, dot, norm);
+			rej_accum(w[j], ptmp, dot, norm);
+			rej_accum(_y[j], _tmp, dot, norm);
+		}
 		rej = rej_decide(dot, norm, SIGMA_C * SIGMA_C);
 	} while (rej && ++tries < LIN_TRIES);
 
@@ -556,96 +594,64 @@ static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 	return !rej;
 }
 
-static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
-		params::poly_q _z[WIDTH], params::poly_q t, params::poly_q tp,
-		params::poly_q _t, params::poly_q u, commit_t x, commit_t p,
-		commit_t _x, params::poly_q coef[3], comkey_t & key, comkey_t & pkey) {
-	params::poly_q beta, v, pv, _v, tmp;
+static int lin_verifier(params::poly_q z[LIN_REPS][WIDTH],
+		params::poly_q zp[LIN_REPS][WIDTH], params::poly_q _z[LIN_REPS][WIDTH],
+		uint8_t h[BLAKE3_OUT_LEN], commit_t x, commit_t p, commit_t _x,
+		params::poly_q coef[3], comkey_t & key, comkey_t & pkey) {
+	params::poly_q beta[LIN_REPS], t[LIN_REPS], tp[LIN_REPS], _t[LIN_REPS];
+	params::poly_q u[LIN_REPS], v, tmp;
+	uint8_t h2[BLAKE3_OUT_LEN];
 	int result = 1;
 
-	/* Sample challenge. */
-	lin_hash(beta, key, pkey, x, p, _x, coef, u, t, tp, _t);
+	lin_chal(beta, h);
 
-	/* Verifier checks norm, reconstruct from NTT representation. */
-	for (int i = 0; i < WIDTH; i++) {
-		v = z[i];
-		v.invntt_pow_invphi();
-		result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
-		v = zp[i];
-		v.invntt_pow_invphi();
-		result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
-		v = _z[i];
-		v.invntt_pow_invphi();
-		result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
-	}
-
-	/* Verifier computes A1z, A1z_p and A1z'. */
-	v = z[0];
-	pv = zp[0];
-	_v = _z[0];
-	for (int i = 0; i < HEIGHT; i++) {
-		for (int j = 0; j < WIDTH - HEIGHT; j++) {
-			v = v + key.A1[i][j] * z[j + HEIGHT];
-			pv = pv + pkey.A1[i][j] * zp[j + HEIGHT];
-			_v = _v + key.A1[i][j] * _z[j + HEIGHT];
+	for (int j = 0; j < LIN_REPS; j++) {
+		/* Verifier checks norm, reconstruct from NTT representation. */
+		for (int i = 0; i < WIDTH; i++) {
+			v = z[j][i];
+			v.invntt_pow_invphi();
+			result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
+			v = zp[j][i];
+			v.invntt_pow_invphi();
+			result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
+			v = _z[j][i];
+			v.invntt_pow_invphi();
+			result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
 		}
+
+		/* The first messages are not sent: they are what the checks say they
+		 * are, A1 z - beta c1 and the A2 combination less beta times the
+		 * statement, and their hash is what has to come out right. */
+		t[j] = z[j][0];
+		tp[j] = zp[j][0];
+		_t[j] = _z[j][0];
+		for (int i = 0; i < HEIGHT; i++) {
+			for (int k = 0; k < WIDTH - HEIGHT; k++) {
+				t[j] = t[j] + key.A1[i][k] * z[j][k + HEIGHT];
+				tp[j] = tp[j] + pkey.A1[i][k] * zp[j][k + HEIGHT];
+				_t[j] = _t[j] + key.A1[i][k] * _z[j][k + HEIGHT];
+			}
+		}
+		t[j] = t[j] - beta[j] * x.c1;
+		tp[j] = tp[j] - beta[j] * p.c1;
+		_t[j] = _t[j] - beta[j] * _x.c1;
+
+		u[j] = 0;
+		for (int i = 0; i < WIDTH; i++) {
+			u[j] = u[j] + coef[0] * (key.A2[0][i] * z[j][i]);
+			u[j] = u[j] + coef[1] * (pkey.A2[0][i] * zp[j][i]);
+			u[j] = u[j] - (key.A2[0][i] * _z[j][i]);
+		}
+		tmp = coef[0] * x.c2[0] + coef[1] * p.c2[0] + coef[2] - _x.c2[0];
+		u[j] = u[j] - tmp * beta[j];
 	}
 
-	/* Being zero is preserved by the inverse transform, so these compare in
-	 * the NTT domain and skip it. */
-	tmp = t + beta * x.c1 - v;
-	result &= util::is_zero(tmp);
-	tmp = tp + beta * p.c1 - pv;
-	result &= util::is_zero(tmp);
-	tmp = _t + beta * _x.c1 - _v;
-	result &= util::is_zero(tmp);
+	lin_hash(h2, key, pkey, x, p, _x, coef, u, t, tp, _t);
+	result &= (memcmp(h, h2, BLAKE3_OUT_LEN) == 0);
 
-	v = 0;
-	for (int i = 0; i < WIDTH; i++) {
-		v = v + coef[0] * (key.A2[0][i] * z[i]);
-		v = v + coef[1] * (pkey.A2[0][i] * zp[i]);
-		v = v - (key.A2[0][i] * _z[i]);
-	}
-	t = coef[0] * x.c2[0] + coef[1] * p.c2[0] + coef[2] - _x.c2[0];
-	t = t * beta + u;
-
-	result &= util::equal(t, v);
 	return result;
 }
 
-/**
- * Derive the challenges X1 = tau and X2 = mu of Lemma 5.
- *
- * They are drawn after the commitments P_i to the permutation elements, and
- * bind them: the soundness argument needs the sigma_i to be fixed before the
- * two challenges, or the prover could pick them to fit.
- *
- * @param[out] tau			- the challenge X1.
- * @param[out] mu			- the challenge X2.
- * @param[in] c				- the commitments to the input messages.
- * @param[in] p				- the commitments to the permutation elements.
- * @param[in] _ms			- the public output list of messages.
- * @param[in] rho			- the challenges compressing the SIZE components.
- */
-/**
- * Derive the compression vector rho of a pass.
- *
- * rho folds the SIZE components of each message into the single value the
- * proof works on, so anything it absorbs is invisible: an output list altered
- * by any Delta with sum_j rho_j Delta_j = 0 leaves every value the proof sees
- * unchanged. That costs a prover 1 / p_min per pass, but only if it has to fix
- * the list before rho is known -- which is why rho is derived here from the
- * input commitments and the *components* of the output list rather than
- * sampled. Altering the list changes rho, so a collision computed for one list
- * is not a collision for the list that induces it.
- *
- * It cannot be derived from the compressed _ms, which depends on rho.
- *
- * @param[out] rho			- the resulting compression vector.
- * @param[in] c				- the commitments to the input messages.
- * @param[in] _m			- the output list, component by component.
- * @param[in] rep			- the pass, which separates the passes' rho.
- */
 static void shuffle_rho_hash(params::poly_q rho[SIZE], commit_t c[MSGS],
 		vector < vector < params::poly_q >> &_m, int rep) {
 	uint8_t hash[BLAKE3_OUT_LEN];
@@ -930,10 +936,10 @@ static void shuffle_prover_commit(params::poly_q & tau, params::poly_q & mu,
 
 /* The other half, once beta is known for every pass: the published s_i and the
  * MSGS linear proofs. */
-static int shuffle_prover_respond(params::poly_q y[MSGS][WIDTH],
-		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
-		params::poly_q t[MSGS], params::poly_q tp[MSGS],
-		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
+static int shuffle_prover_respond(params::poly_q y[MSGS][LIN_REPS][WIDTH],
+		params::poly_q w[MSGS][LIN_REPS][WIDTH],
+		params::poly_q _y[MSGS][LIN_REPS][WIDTH],
+		uint8_t lh[MSGS][BLAKE3_OUT_LEN], commit_t d[MSGS],
 		commit_t p[MSGS], vector < params::poly_q > pr[MSGS],
 		vector < params::poly_q > _r[MSGS], params::poly_q theta[MSGS],
 		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
@@ -957,17 +963,17 @@ static int shuffle_prover_respond(params::poly_q y[MSGS][WIDTH],
 	/* Now run \Prod_LIN instances, one for each commitment. */
 	for (size_t l = 0; l < MSGS; l++) {
 		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
-		complete &= lin_prover(y[l], w[l], _y[l], t[l], tp[l], _t[l], u[l], c[l], p[l],
-				d[l], coef, key, pkey, r[l], pr[l], _r[l]);
+		complete &= lin_prover(y[l], w[l], _y[l], lh[l], c[l], p[l], d[l], coef,
+				key, pkey, r[l], pr[l], _r[l]);
 	}
 
 	return complete;
 }
 
-static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
-		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
-		params::poly_q t[MSGS], params::poly_q tp[MSGS],
-		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
+static int shuffle_verifier(params::poly_q y[MSGS][LIN_REPS][WIDTH],
+		params::poly_q w[MSGS][LIN_REPS][WIDTH],
+		params::poly_q _y[MSGS][LIN_REPS][WIDTH],
+		uint8_t lh[MSGS][BLAKE3_OUT_LEN], commit_t d[MSGS],
 		commit_t p[MSGS], params::poly_q s[MSGS], commit_t c[MSGS],
 		params::poly_q _ms[MSGS], params::poly_q rho[SIZE],
 		params::poly_q & beta, comkey_t & key, comkey_t & pkey, int rep) {
@@ -981,9 +987,8 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
 	for (size_t l = 0; l < MSGS; l++) {
 		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
-		result &=
-				lin_verifier(y[l], w[l], _y[l], t[l], tp[l], _t[l], u[l], c[l],
-				p[l], d[l], coef, key, pkey);
+		result &= lin_verifier(y[l], w[l], _y[l], lh[l], c[l], p[l], d[l], coef,
+				key, pkey);
 	}
 
 	return result;
@@ -1086,11 +1091,11 @@ static int run(vector < vector < params::poly_q >> m,
 
 	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
 		shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
-		result &= shuffle_prover_respond(y, w, _y, t, tp, _t, u,
-				&d[rep * MSGS], pcom, pr, &_r[rep * MSGS], &theta[rep * MSGS],
-				s, cs, ms, _ms, r, beta[rep], tau[rep], mu[rep], _key, key);
-		result &= shuffle_verifier(y, w, _y, t, tp, _t, u, &d[rep * MSGS],
-				pcom, s, cs, _ms, rho[rep], vbeta[rep], _key, key, rep);
+		result &= shuffle_prover_respond(y, w, _y, lh, &d[rep * MSGS], pcom, pr,
+				&_r[rep * MSGS], &theta[rep * MSGS], s, cs, ms, _ms, r,
+				beta[rep], tau[rep], mu[rep], _key, key);
+		result &= shuffle_verifier(y, w, _y, lh, &d[rep * MSGS], pcom, s, cs,
+				_ms, rho[rep], vbeta[rep], _key, key, rep);
 	}
 
 	return result;
@@ -1448,8 +1453,13 @@ static void bench() {
 	comkey_t key;
 	vector < vector < params::poly_q >> m(MSGS), _m(MSGS);
 	vector < params::poly_q > sigma(MSGS);
-	params::poly_q by[WIDTH], bw[WIDTH], _by[WIDTH];
-	params::poly_q bt, btp, _bt, bu, coef[3], beta;
+	/* Heap, not stack: LIN_REPS * WIDTH ring elements three times over is
+	 * megabytes, and the frame limit this file builds with is 4 MiB. */
+	auto by = new params::poly_q[LIN_REPS][WIDTH];
+	auto bw = new params::poly_q[LIN_REPS][WIDTH];
+	auto _by = new params::poly_q[LIN_REPS][WIDTH];
+	uint8_t bh[BLAKE3_OUT_LEN];
+	params::poly_q coef[3];
 	size_t pi;
 
 	/* Generate commitment key. */
@@ -1478,24 +1488,22 @@ static void bench() {
 		coef[i] = nfl::ZO_dist();
 		coef[i].ntt_pow_phi();
 	}
-	bdlop_sample_chal(beta);
-
-	BENCH_BEGIN("linear hash") {
-		BENCH_ADD(lin_hash(beta, key, key, com[0], com[1], com[1], coef, bu, bt,
-						btp, _bt));
-	} BENCH_END;
 
 	BENCH_BEGIN("linear proof") {
-		BENCH_ADD(lin_prover(by, bw, _by, bt, btp, _bt, bu, com[0], com[1],
-						com[1], coef, key, key, r[0], r[1], r[1]));
+		BENCH_ADD(lin_prover(by, bw, _by, bh, com[0], com[1], com[1], coef, key,
+						key, r[0], r[1], r[1]));
 	} BENCH_END;
 
 	BENCH_BEGIN("linear verifier") {
-		BENCH_ADD(lin_verifier(by, bw, _by, bt, btp, _bt, bu, com[0], com[1],
-						com[1], coef, key, key));
+		BENCH_ADD(lin_verifier(by, bw, _by, bh, com[0], com[1], com[1], coef,
+						key, key));
 	} BENCH_END;
 
 	BENCH_SMALL("shuffle-proof (N messages)", run(m, _m, sigma, key));
+
+	delete[]by;
+	delete[]bw;
+	delete[]_by;
 }
 
 int main(int argc, char *argv[]) {

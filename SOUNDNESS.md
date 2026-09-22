@@ -33,9 +33,11 @@ first message shared by every pass — which also took 14% off the proof and a
 factor of 6.5 off the prover — and by drawing every pass's `beta` from one hash
 of every pass's `D_i`. The innermost one is open: the `MSGS * SHUFFLE_REPS`
 instances of `Pi_LIN` still carry their own challenges, which holds the
-protocol at about `2^46`, so the numbers in sections 7, 8 and 10 are what it
-would be worth and not what it is. Section 8.1 prices the ways out and says
-what the `2^46` costs an attacker.
+protocol at about `2^46`. Section 8.1 prices the ways out of that and records
+the one taken, repeating each linear proof against challenges bound to each
+other, which closes the layer at `2^-134` and takes 13% off the proof into the
+bargain. With that the numbers in sections 7, 8 and 10 are what the protocol is
+worth rather than what it would be.
 
 ## 1. The attack
 
@@ -613,20 +615,16 @@ that is about 1.3 GB more than holding one pass, and the measured cost in time
 is 0.6% of `run()` -- the extra hash is 8 to 16 Mcycles against the 18 to 350
 Gcycles the sub-proofs take.
 
-**One layer is still open**, and it is the subject of the estimate above rather
-than of this repair: the `MSGS * SHUFFLE_REPS` instances of `Pi_LIN`, each with
-its own `beta` over its own first message, each worth `1 / p_min` by Section 8
-and each grindable on its own. A prover needs one forged linear proof per pass,
-so the protocol still sits at `SHUFFLE_REPS / p_min`, about `2^46`, and the two
-layers below it are now the ones that are not the weakest. Binding these is the
-wrong lever: one hash for all of them means an abort anywhere re-rolls every
-challenge everywhere, and at the 0.49 acceptance of Section 9.1 all
-`MSGS * SHUFFLE_REPS` of them passing at once never happens, so the maskings
-have to be batched into one rejection test with it. **Section 8.1 prices that
-route and the others**, including the challenge set this document pointed at
-first, which turns out to buy an extraction argument and lose 31 bits, and the
-amortized linear proof, which the large public coefficients of the relation
-rule out.
+**The third layer was the `MSGS * SHUFFLE_REPS` instances of `Pi_LIN`**, each
+with its own `beta` over its own first message, each worth `1 / p_min` by
+Section 8 and each grindable on its own; a prover needs one forged linear proof
+per pass, so the protocol sat at `SHUFFLE_REPS / p_min`, about `2^46`. Binding
+those to each other is the wrong lever, since an abort anywhere would re-roll
+every challenge everywhere and all `MSGS * SHUFFLE_REPS` of them never accept at
+once. **Section 8.1 prices that route and the others** and records the one
+taken: each proof is now run `LIN_REPS = 3` times against challenges drawn from
+one hash of all three first messages, so a forged relation has to survive all of
+them, `2^-132` a relation and `2^-134` for the protocol.
 
 ## 8. The challenge sets of the Sigma-protocols
 
@@ -667,9 +665,11 @@ relation in a single CRT slot passes exactly when `beta` vanishes in that slot,
 which for a random `beta` is about `1 / p_min = 2^-44`. The challenge is derived
 by Fiat-Shamir, so this is grindable rather than merely unlucky: re-committing
 `D_i` to the same message with fresh randomness moves `beta` without moving that
-message. So the honest reading is **39 bits per pass, not 128**, and there is no
-soundness proof at all, since the extraction argument needs the invertibility
-the test denies.
+message. So the honest reading is **44 bits per repetition, not 128**, and
+there is no soundness proof at all, since the extraction argument needs the
+invertibility the test denies. Section 8.1 is what makes that survivable: the proof is run
+`LIN_REPS` times against challenges bound to one another, so the 44 bits
+multiply.
 
 **What was supposed to cover it.** Section 7 repeats everything after the first
 message `SHUFFLE_REPS` times with independent challenges, and a prover whose
@@ -726,11 +726,13 @@ invertible.
 
 ### 8.1 What it would take to make `Pi_LIN` worth `LEVEL`
 
-Section 7.1 leaves the protocol at about `2^46`: a prover needs one forged
-linear relation per pass, each instance is worth `1 / p_min`, and each is
-ground on its own. The lever this section points at is the challenge set. It is
-worth writing down what each candidate is actually worth, because the obvious
-one is worse than what is there and the good one is a redesign.
+Section 7.1 left the protocol at about `2^46`: a prover needs one forged linear
+relation per pass, each instance was worth `1 / p_min`, and each was ground on
+its own. The lever this section pointed at was the challenge set, and it is not
+the one: the obvious repair is worse than what was there and the elegant one
+does not apply. What closed it was repeating each proof, which is the last row
+of the table and the rest of this section. The routes are kept because the
+reasoning for choosing between them is the useful part.
 
 The sizes below are of the published elements at `MSGS = 1000`: per pass the
 `z`, `z_p`, `z'` of the `MSGS` linear proofs come to 90 MB at
@@ -745,7 +747,8 @@ The sizes below are of the published elements at `MSGS = 1000`: per pass the
 | challenges in `GR(q,2)` | `2^-88` | `2^90` | every element of the proof doubles, `+45%` |
 | challenges in `GR(q,3)` | `2^-132` | `2^134` | `+90%` |
 | bind them across the passes | `2^-44` | `2^-176` | `+6%`, but see below |
-| amortize them | — | — | **does not apply here, see below** |
+| amortize them | — | — | does not apply here, see below |
+| **repeat each one `LIN_REPS` times** | `2^-132` | `2^-134` | **`-13%`, and taken** |
 
 **Monomials are the trap.** They do fix what Section 8 says is broken: Lemma 4
 of [8] gives `2 (X^i - X^j)^-1` integer coefficients in `{-1,0,1}`, and `q` is
@@ -800,8 +803,45 @@ argument -- or the general-purpose route of Section 6.4's alternative 1, where
 one proof system handles the whole membership and product statement and this
 question does not arise.
 
-**What leaving it at `2^46` means.** It is a statement about the Fiat-Shamir
-compilation and not about the protocol: as a Sigma-protocol this is `2^-176`,
+**Repeating the proof is what worked, and it is nearly free.** Repeating the
+*pass* is the trap this section opened with: unbound, the passes' costs add.
+Repeating one linear proof is different, because its `LIN_REPS` challenges come
+from a single hash of all `LIN_REPS` first messages. Re-rolling any of them
+moves every one, so a forged relation has to survive all of them at once:
+`(1 / p_min)^LIN_REPS`, which at `p_min = 2^43` and `LEVEL = 128` is
+`LIN_REPS = 3` and `2^-132` a relation, `2^-134` for the protocol.
+
+It avoids everything that made binding across proofs unaffordable. The binding
+is local to one relation, so an abort re-rolls that relation's `3 LIN_REPS = 9`
+openings and not the four thousand proofs of a shuffle: the batched rejection
+test of 9.1 covers them, `M` is `1.17` and acceptance `0.43`, and `sigma_C`
+does not move at all. Section 9's binding margin is therefore untouched, and no
+assumption is added.
+
+**And the budget was already there.** Each proof was sending `t, tp, t'` and `u`
+at full width, 180 KB a relation, when the verifier can rebuild all four from
+the responses and the challenges — `t = A1 z - beta c1`, and `u` the `A2`
+combination less `beta` times the statement — and check their hash instead. That
+is the transcript the paper describes and the implementation was not using.
+Dropping it pays for the extra repetitions and more:
+
+| per pass, `MSGS = 1000` | before | after |
+| --- | --- | --- |
+| responses `z, zp, _z` | 90 MB | 269 MB |
+| first messages | 180 MB | 32 KB of hashes |
+| `D_i`, `s_i` | 135 MB | 135 MB |
+| **per pass** | **405 MB** | **404 MB** |
+
+with `P_i`, `Pi_SMALL` and `Pi_BND` a further 206 MB once for all passes. The
+proof is **1822 KB a vote against 2094**, the prover's linear proofs cost 3.8
+times what they did — 362 against 95 Mcycles — and the `shuffle-proof`
+benchmark at `MSGS = 4` goes from 14.3 to 31.9 Gcycles. Memory at `MSGS = 1000`
+rises by about 1.2 GB, the responses being three times as many and the first
+messages no longer held.
+
+**What leaving it at `2^46` would have meant**, which is also the shape of any
+future gap of this kind. It was a statement about the Fiat-Shamir compilation
+and not about the protocol: as a Sigma-protocol that layer was `2^-176`,
 because a cheating prover would have to land four forgeries against four
 challenges it cannot influence. The whole of the gap is that the implementation
 lets it grind them one at a time, offline.
@@ -1128,14 +1168,19 @@ ballot-submission side, which this repository does not implement.
 
 **Sizes, at `MSGS = 1000`, `q = 2^88`, four passes.**
 
-| | per pass | per vote |
-| --- | --- | --- |
-| shuffle core, `MSGS` linear proofs plus `D_i`, `s_i`, `P_i` | 480.5 MB | 492.0 KB |
-| `Pi_SMALL`, two AEx passes, **once for all passes** | 108.0 MB | 110.5 KB |
-| `Pi_BND`, **once for all passes** | 7.9 MB | 8.1 KB |
-| **total, four passes** | | **2094 KB** |
+| | per pass | once | per vote |
+| --- | --- | --- | --- |
+| responses of the `MSGS` linear proofs, `LIN_REPS` each | 269 MB | | 1076 KB |
+| `D_i` and `s_i` | 135 MB | | 540 KB |
+| `P_i`, the commitments to the `sigma_i` | | 90 MB | 90 KB |
+| `Pi_SMALL`, two AEx passes | | 108.0 MB | 108.0 KB |
+| `Pi_BND` | | 7.9 MB | 7.9 KB |
+| **total, four passes** | | | **1822 KB** |
 
-`Pi_SMALL` is 105 of its 108 MB in opened columns, so its cost is
+The first messages of the linear proofs are not in the table because they are
+not sent: 8.1 replaced them with a hash the verifier checks by rebuilding them,
+which is what paid for the repetitions. `Pi_SMALL` is 105 of its 108 MB in
+opened columns, so its cost is
 `ETA * V * 3 * ceil(q/8)` per relation and flat per vote. The growth from the
 523 KB per vote this branch started at is almost all Section 7's repetitions,
 which multiply everything including the sub-proofs now that `rho` is drawn

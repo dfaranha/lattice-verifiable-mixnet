@@ -99,7 +99,7 @@ Peak resident memory at the parameters currently in the sources. Every buffer he
 | --------- | -------------------- | -------- |
 | `bdlop`   | ~10 MiB | fixed |
 | `bgv`     | ~7 MiB | fixed |
-| `shuffle` | ~3.7 GiB at `MSGS = 1000` | ~3.75 MiB per message |
+| `shuffle` | ~5 GiB at `MSGS = 1000` | ~5 MiB per message, mostly the `LIN_REPS` responses of each linear proof |
 | `pismall` | ~10 GiB at `TAU = 1024` | ~10 MiB per relation, mostly the `H[TAU][3][V]` codewords and the `v_{i,j}` coefficient arrays |
 | `pibnd`   | ~700 MiB at `TAU = 1000`, `NTI = 130` | 64 KiB x (2 TAU V + 2 V NTI + R NTI + NTI), dominated by the witness and statement matrices; it was 8.5 GiB before the challenge matrix was streamed a row at a time |
 
