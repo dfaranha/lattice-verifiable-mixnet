@@ -537,8 +537,9 @@ and the `g` that balances them is 13078, where both are `2^-95`. So `ETA = 325`
 buys `2^-95` and not the `2^-82` Section 7 quotes; the quote is a safe one.
 
 **The term that dominates is the algebraic one**, which is Lemma 2's
-`18 tau / (q - tau)`. Taken over `Z_q` that reads `2^-88`, but the ring is split and an adversary can
-work modulo one prime, which is exactly why this file draws its challenges from
+`18 tau / (q - tau)`. Taken over `Z_q` that reads `2^-88`, but the ring is
+split and an adversary can work modulo one prime, which is exactly why this
+file draws its challenges from
 `GR(q,2)` instead: the per-slot space is `p_min^2` and the term is
 `18 TAU / p_min^2`, which is **`2^-73.8`** at `TAU = 1024` and the 44-bit basis.
 Section 7's `2^-66` a pass is the same quantity at the old 39-bit primes.
