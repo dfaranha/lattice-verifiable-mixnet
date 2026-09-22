@@ -947,6 +947,15 @@ at full width, 180 KB a relation, when the verifier can rebuild all four from
 the responses and the challenges — `t = A1 z - beta c1`, and `u` the `A2`
 combination less `beta` times the statement — and check their hash instead. That
 is the transcript the paper describes and the implementation was not using.
+
+It also rules out the other compression the paper offers, which is worth saying
+because it looks like a further saving and is not: Appendix B.1 suggests sending
+`k - n` of the `k` components of each response and recovering the rest from
+`A1 z = t + beta c1`. That is the same equation read the other way, so the two
+cannot both be used, and this one is worth far more — at `LIN_REPS = 3` the
+first messages are 541 KB a relation against the 67 KB that dropping a component
+would save.
+
 Dropping it pays for the extra repetitions and more:
 
 | per pass, `MSGS = 1000` | before | after |
@@ -957,7 +966,8 @@ Dropping it pays for the extra repetitions and more:
 | **per pass** | **405 MB** | **404 MB** |
 
 with `P_i`, `Pi_SMALL` and `Pi_BND` a further 206 MB once for all passes. The
-proof is **1822 KB a vote against 2094**, which 5.5 then takes to 1790; the
+proof is **1822 KB a vote against 2094**, which 5.5 and the end of section 7
+then take to 1715; the
 prover's linear proofs cost 3.8 times what they did — 362 against 95 Mcycles —
 and the `shuffle-proof`
 benchmark at `MSGS = 4` goes from 14.3 to 31.9 Gcycles. Memory at `MSGS = 1000`
