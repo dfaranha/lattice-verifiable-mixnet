@@ -1325,9 +1325,9 @@ static void test() {
 		 * 1.2] once more, vacuous at k = 2N as Section 2 explains.
 		 *
 		 * The pattern below has 9 coefficients +1 and 9 coefficients -1, so it
-		 * is one of those differences: put those 18 support positions on the
-		 * two sides and add 27 shared positions that cancel, and both sides
-		 * have Hamming weight exactly NONZERO. It vanishes in one of the NTT
+		 * is one of those differences: the +1 positions are one side and the
+		 * -1 positions the other, each of Hamming weight exactly NONZERO, with
+		 * no shared positions needed. It vanishes in one of the NTT
 		 * slots. Found by meet-in-the-middle over subset sums of the powers of
 		 * one primitive 2N-th root modulo the first RNS prime, in seconds, the
 		 * same way as the short zero divisor above. Asserting the bug. */

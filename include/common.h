@@ -15,8 +15,15 @@ using namespace std;
 #ifndef COMMON_H
 #define COMMON_H
 
-/* Parameter v in the commitment  scheme (laximum l1-norm of challs). */
-#define NONZERO     36
+/* Weight of each of the two ternary vectors a challenge is the difference of.
+ * The paper takes 36, which is what its sigma_C is priced from. Nothing here
+ * needs it that large: SOUNDNESS.md section 7 shows the linear proof is worth
+ * 1 / p_min whatever the challenge set is, since the differences can be zero
+ * divisors, so the set only has to be too big to guess -- at 9 it still has
+ * about 2^88 elements against the 2^44 that would matter. What the weight does
+ * buy is the size of what the masking has to cover, ||beta r|| growing as its
+ * square root, and so SIGMA_C and every published response with it. */
+#define NONZERO     9
 /* Security level to attain. */
 #define LEVEL       128
 /* The \infty-norm bound of certain elements. */
@@ -47,8 +54,14 @@ using namespace std;
 #define PRIMEP      2
 /* Degree of the irreducible polynomial. */
 #define DEGREE      4096
-/* Sigma for the commitment gaussian distribution. */
-#define SIGMA_C     (1u << 12)
+/* Sigma for the commitment gaussian distribution. The rejection sampling of
+ * SOUNDNESS.md 8.1 takes its M from the norm it is masking, so no value here is
+ * invalid and this is a trade of proof size against restarts: ||beta r|| is
+ * about 380 at NONZERO = 9, the batch of 3 LIN_REPS times 3 openings is about
+ * 1150, and 2^11 leaves M near 1.2 and acceptance near 0.4, which is where 2^12
+ * left it at the old weight of 36. Each published coefficient costs
+ * log2(6 SIGMA_C) bits, so this is a bit a coefficient off every response. */
+#define SIGMA_C     (1u << 11)
 /* Parties that run the distributed decryption protocol. */
 #define PARTIES     4
 /* Security level for Distributed Decryption. */

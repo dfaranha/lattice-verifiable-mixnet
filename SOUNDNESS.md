@@ -756,7 +756,8 @@ challenge sets themselves, and it had not been looked at.
 
 `lin_hash` draws the challenge `beta` of the linear proof with
 `bdlop_sample_chal`, the difference of two ternary vectors of Hamming weight
-`NONZERO = 36`. Every argument about that proof wants such elements, and the
+`NONZERO`, which the paper takes as 36 and this branch as 9 — see the end of
+this section. Every argument about that proof wants such elements, and the
 differences of two of them, to be invertible, and the justification is [42,
 Corollary 1.2] once more — vacuous at `k = 2N`, exactly as section 2 says of the
 choice of `D`. Nobody had applied that observation to the challenges.
@@ -950,7 +951,7 @@ Dropping it pays for the extra repetitions and more:
 
 | per pass, `MSGS = 1000` | before | after |
 | --- | --- | --- |
-| responses `z, zp, _z` | 90 MB | 269 MB |
+| responses `z, zp, _z` | 90 MB | 251 MB |
 | first messages | 180 MB | 32 KB of hashes |
 | `D_i`, `s_i` | 135 MB | 135 MB |
 | **per pass** | **405 MB** | **404 MB** |
@@ -1000,6 +1001,26 @@ The obvious parameter mitigation does not work. The per-instance error is
 directly: 62-bit primes would give `2^-62` per instance and `2^64` of work. But
 `q` at 124 bits costs about 2.2 bits of lattice security per bit of `q`, which
 takes the encryption from `2^158` to roughly `2^78`. Not viable at `N = 4096`.
+
+**The weight of the challenge was buying nothing, and it was expensive.** What
+this section establishes is that `beta` is worth `1 / p_min` whatever set it is
+drawn from, since the differences can be zero divisors either way; 7.1 then
+carries the proof to `LEVEL` by repeating it. So `NONZERO` is not load-bearing
+for soundness — it only has to leave the set too large to guess, and at 9 it
+still holds about `2^88` elements against the `2^44` that would matter. What it
+does control is `||beta r||`, which grows as its square root, and so `sigma_C`,
+and so the width of every published response: `log2(6 sigma_C)` bits a
+coefficient.
+
+Taking `NONZERO` from 36 to 9 and `sigma_C` from `2^12` to `2^11` keeps the
+rejection sampling at the same working point — measured, the batched
+`||beta r||` is 1154 against a `sigma_C` of 2048, so `M = 1.17` and acceptance
+`0.43`, which is where the old pair sat — and takes a bit off every coefficient
+of every response: **1076 to 1002 KB a vote**, with the proof at 1715. The
+verifier's norm bound falls with it, `2^21` to `2^20`, which widens the margin
+5.4 turns on and the one the commitment's binding turns on in section 8. If the
+extraction argument this section says is missing were ever repaired, `NONZERO`
+would come back into play and would have to move with it.
 
 ## 8. The decryption phase: `B_DDec` and the size of `q`
 
@@ -1308,12 +1329,12 @@ what the transcript reveals rather than a simulator.
 
 | | per pass | once | per vote |
 | --- | --- | --- | --- |
-| responses of the `MSGS` linear proofs, `LIN_REPS` each | 269 MB | | 1076 KB |
+| responses of the `MSGS` linear proofs, `LIN_REPS` each | 251 MB | | 1002 KB |
 | `D_i` and `s_i` | 135 MB | | 540 KB |
 | `P_i`, the commitments to the `sigma_i` | | 90 MB | 90 KB |
 | `Pi_SMALL`, one AEx pass | | 76 MB | 76.0 KB |
 | `Pi_BND` | | 7.9 MB | 7.9 KB |
-| **total, four passes** | | | **1790 KB** |
+| **total, four passes** | | | **1715 KB** |
 
 The first messages of the linear proofs are not in the table because they are
 not sent: 8.1 replaced them with a hash the verifier checks by rebuilding them,
