@@ -758,15 +758,19 @@ One hash over every linear proof's first message, drawing an independent `beta`
 for each, forces the prover to land four forgeries at once: `2^-176`. Section
 7.1 objects that an abort anywhere would then re-roll everything, and the
 answer is the one 9.1 already used, a single rejection test over the whole
-concatenation — `12000` openings rather than 3, so `sigma_C` goes from `2^12`
-to about `2^17`. That lands only on the `z`, which is 90 of the 480 MB of a
-pass, so the proof grows by about **6%**, not the quarter I guessed before
-counting. What it costs instead is elsewhere: `8 sigma sqrt(N)` rises from
-`2^21` to `2^26`, and two openings that short differ by `2^27`, which is
-exactly the `lambda_1` of the binding lattice in Section 9. **The commitment
-stops being statistically binding and MSIS modulo `q` comes back as an
-assumption.** Batching per pass instead keeps `sigma_C` at `2^16` and a bit of
-margin, at four passes' worth of restarts, about eight times the prover.
+concatenation. Acceptance near a half wants `sigma` about three times the norm
+being masked, which the measurements of 9.1 confirm at three openings; over the
+`12000` openings of a whole proof that norm is `765 sqrt(12000)` and `sigma_C`
+goes from `2^12` to about `2^18`. That lands only on the `z`, which is 90 of
+the 480 MB of a pass, so the proof grows by about **6%**, not the quarter I
+guessed before counting. What it costs is elsewhere: `8 sigma sqrt(N)` rises
+from `2^21` to `2^27`, so two openings that short differ by `2^28`, past the
+`lambda_1` of the binding lattice in Section 9. **The commitment stops being
+statistically binding and MSIS modulo `q` comes back as an assumption.**
+Batching per pass instead of per proof only halves the excess — `sigma_C` at
+`2^17`, a difference of `2^27` exactly at `lambda_1` — and costs four passes'
+worth of restarts, about eight times the prover, so it does not buy the margin
+back either. At `MSGS = 100` the whole question goes away; at 1000 it does not.
 
 **Amortizing them is what one would want, and this relation will not take it.**
 A pass proves `MSGS` relations differing only in public coefficients, which
