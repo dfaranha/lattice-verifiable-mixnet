@@ -103,10 +103,10 @@ static_assert((unsigned long long) MSGS <
  * independent challenges and the verifier requires every pass.
  *
  * Those errors multiply only if a prover who fails a pass has to start over.
- * tau and mu are hashed from the P_i, which run() sends once for every pass, so
- * re-rolling them re-rolls every pass at once and these do multiply. The beta
- * below is hashed from one pass's D_i and still does not; see SOUNDNESS.md
- * section 7.1. */
+ * tau and mu are hashed from the P_i, which run() sends once for every pass,
+ * and beta from every pass's D_i at once, so re-rolling either re-rolls every
+ * pass and these do multiply. The challenges inside Pi_LIN do not; see
+ * SOUNDNESS.md section 7.1. */
 static constexpr int shuffle_ilog2(unsigned long long x) {
 	return x <= 1 ? 0 : 1 + shuffle_ilog2(x >> 1);
 }
@@ -132,7 +132,7 @@ static constexpr int SHUFFLE_REPS = (LEVEL + SHUFFLE_BITS - 1) / SHUFFLE_BITS;
  * randomness, and the responses and first messages of the third opening that
  * the linear proof now carries for them. */
 static commit_t *com, *d, *cs, *pcom;
-static vector < params::poly_q > *r, *pr;
+static vector < params::poly_q > *r, *pr, *_r;
 static params::poly_q *ms, *_ms, *s;
 static params::poly_q (*y)[WIDTH], (*w)[WIDTH], (*_y)[WIDTH];
 static params::poly_q *t, *tp, *_t, *u;
@@ -151,7 +151,12 @@ static pibnd_short_t *bnd;
 
 static void shuffle_alloc(void) {
 	com = new commit_t[MSGS];
-	d = new commit_t[MSGS];
+	/* d, _r and theta are the part of a pass that outlives it: every pass's
+	 * D_i has to exist before any beta is drawn, so they are dimensioned by
+	 * SHUFFLE_REPS as well and indexed d[rep * MSGS + i]. See SOUNDNESS.md
+	 * section 7.1. */
+	d = new commit_t[SHUFFLE_REPS * MSGS];
+	_r = new vector < params::poly_q >[SHUFFLE_REPS * MSGS];
 	cs = new commit_t[MSGS];
 	pcom = new commit_t[MSGS];
 	r = new vector < params::poly_q >[MSGS];
@@ -166,7 +171,7 @@ static void shuffle_alloc(void) {
 	tp = new params::poly_q[MSGS];
 	_t = new params::poly_q[MSGS];
 	u = new params::poly_q[MSGS];
-	theta = new params::poly_q[MSGS];
+	theta = new params::poly_q[SHUFFLE_REPS * MSGS];
 	inv = new params::poly_q[MSGS];
 	inv_tmp = new params::poly_q[MSGS];
 	sg = new params::poly_q[MSGS];
@@ -177,6 +182,7 @@ static void shuffle_alloc(void) {
 static void shuffle_free(void) {
 	delete[]com;
 	delete[]d;
+	delete[]_r;
 	delete[]cs;
 	delete[]pcom;
 	delete[]r;
@@ -713,47 +719,68 @@ static void shuffle_chal_hash(params::poly_q & tau, params::poly_q & mu,
 	nfl::fastrandombytes_reseed();
 }
 
-void shuffle_hash(params::poly_q & beta, commit_t c[MSGS], commit_t p[MSGS],
-		commit_t d[MSGS], params::poly_q _ms[MSGS], params::poly_q & tau,
-		params::poly_q & mu, params::poly_q rho[SIZE], int rep) {
+/* The challenge beta of every pass at once, from a hash of every pass's D_i.
+ * Drawing them separately, from one pass's messages each, is what let a prover
+ * settle the passes one at a time; see SOUNDNESS.md section 7.1. The statement
+ * is hashed uncompressed -- the input commitments and the output list rather
+ * than their rho-compressions -- since rho is hashed with them and the
+ * compression follows from the two. */
+static void shuffle_beta_hash(params::poly_q beta[SHUFFLE_REPS],
+		commit_t com[MSGS], vector < vector < params::poly_q >> &_m,
+		commit_t p[MSGS], commit_t d[], params::poly_q tau[SHUFFLE_REPS],
+		params::poly_q mu[SHUFFLE_REPS], params::poly_q rho[][SIZE]) {
 	uint8_t hash[BLAKE3_OUT_LEN];
-	uint8_t sep = (uint8_t) rep;
 	blake3_hasher hasher;
+
 	blake3_hasher_init(&hasher);
-	blake3_hasher_update(&hasher, &sep, 1);
 
 	for (int i = 0; i < MSGS; i++) {
-		blake3_hasher_update(&hasher, (const uint8_t *)_ms[i].data(),
-				16 * DEGREE);
-		blake3_hasher_update(&hasher, (const uint8_t *)c[i].c1.data(),
+		blake3_hasher_update(&hasher, (const uint8_t *)com[i].c1.data(),
 				16 * DEGREE);
 		blake3_hasher_update(&hasher, (const uint8_t *)p[i].c1.data(),
 				16 * DEGREE);
-		blake3_hasher_update(&hasher, (const uint8_t *)d[i].c1.data(),
-				16 * DEGREE);
-		for (size_t j = 0; j < c[i].c2.size(); j++) {
-			blake3_hasher_update(&hasher, (const uint8_t *)c[i].c2[j].data(),
-					16 * DEGREE);
-			blake3_hasher_update(&hasher, (const uint8_t *)d[i].c2[j].data(),
+		for (size_t j = 0; j < com[i].c2.size(); j++) {
+			blake3_hasher_update(&hasher, (const uint8_t *)com[i].c2[j].data(),
 					16 * DEGREE);
 		}
 		for (size_t j = 0; j < p[i].c2.size(); j++) {
 			blake3_hasher_update(&hasher, (const uint8_t *)p[i].c2[j].data(),
 					16 * DEGREE);
 		}
+		for (size_t j = 0; j < _m[i].size(); j++) {
+			blake3_hasher_update(&hasher, (const uint8_t *)_m[i][j].data(),
+					16 * DEGREE);
+		}
 	}
 
-	blake3_hasher_update(&hasher, (const uint8_t *)tau.data(), 16 * DEGREE);
-	blake3_hasher_update(&hasher, (const uint8_t *)mu.data(), 16 * DEGREE);
-	for (int i = 0; i < SIZE; i++) {
-		blake3_hasher_update(&hasher, (const uint8_t *)rho[i].data(),
+	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
+		for (int j = 0; j < SIZE; j++) {
+			blake3_hasher_update(&hasher, (const uint8_t *)rho[rep][j].data(),
+					16 * DEGREE);
+		}
+		blake3_hasher_update(&hasher, (const uint8_t *)tau[rep].data(),
 				16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)mu[rep].data(),
+				16 * DEGREE);
+		for (int i = 0; i < MSGS; i++) {
+			commit_t *di = &d[rep * MSGS + i];
+			blake3_hasher_update(&hasher, (const uint8_t *)di->c1.data(),
+					16 * DEGREE);
+			for (size_t j = 0; j < di->c2.size(); j++) {
+				blake3_hasher_update(&hasher, (const uint8_t *)di->c2[j].data(),
+						16 * DEGREE);
+			}
+		}
 	}
+
 	blake3_hasher_finalize(&hasher, hash, BLAKE3_OUT_LEN);
 
-	/* Sample challenge from RNG seeded with hash. */
+	/* One seed, one stream: the passes take their challenges from it in order,
+	 * so each of them depends on all of the D_i. */
 	nfl::fastrandombytes_seed(hash);
-	beta = nfl::uniform();
+	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
+		beta[rep] = nfl::uniform();
+	}
 	nfl::fastrandombytes_reseed();
 }
 
@@ -846,33 +873,38 @@ static void shuffle_commit_sigma(commit_t p[MSGS],
 	bnd = pibnd_short_prove(key, p, pr, sigma, MSGS);
 }
 
-static int shuffle_prover(params::poly_q y[MSGS][WIDTH],
-		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
-		params::poly_q t[MSGS], params::poly_q tp[MSGS],
-		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
-		commit_t p[MSGS], vector < params::poly_q > pr[MSGS],
-		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
-		params::poly_q _ms[MSGS], params::poly_q sigma[MSGS],
-		vector < params::poly_q > r[MSGS], params::poly_q rho[SIZE],
-		comkey_t & key, comkey_t & pkey, int rep) {
-	vector < params::poly_q > t0(1);
-	vector < params::poly_q > _r[MSGS];
-	params::poly_q coef[3], beta, tau, mu, gl;
-	int complete = 1;
+/* The factors of the product of Lemma 5:
+ *     a_i = m_i + g(i) * tau - mu,
+ *     b_i = _m_i + sigma_i * tau - mu.
+ * Tying the index to every message is what forces the permutations of the CRT
+ * components to coincide, and is what the published product lacked. Both halves
+ * of the prover need them and neither keeps them: they follow from the pass's
+ * compression and its tau and mu, and recomputing is cheaper than holding a
+ * copy per pass. */
+static void shuffle_factors(params::poly_q ms[MSGS], params::poly_q _ms[MSGS],
+		params::poly_q & tau, params::poly_q & mu) {
+	params::poly_q gl;
 
-	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
-
-	/* Build the factors of the product of Lemma 5:
-	 *     a_i = m_i + g(i) * tau - mu,
-	 *     b_i = _m_i + sigma_i * tau - mu.
-	 * Tying the index to every message is what forces the permutations of the
-	 * CRT components to coincide, and is what the published product lacked. */
 	for (size_t i = 0; i < MSGS; i++) {
 		index_scalar(gl, i);
 		gl.ntt_pow_phi();
 		fa[i] = ms[i] + gl * tau - mu;
 		fb[i] = _ms[i] + sg[i] * tau - mu;
 	}
+}
+
+/* The half of a pass the prover can send before beta: its tau and mu, and the
+ * commitments D_i under them. Every pass reaches this point before any beta is
+ * drawn, which is what binds them to each other. */
+static void shuffle_prover_commit(params::poly_q & tau, params::poly_q & mu,
+		commit_t d[MSGS], vector < params::poly_q > _r[MSGS],
+		params::poly_q theta[MSGS], commit_t p[MSGS], commit_t c[MSGS],
+		params::poly_q ms[MSGS], params::poly_q _ms[MSGS],
+		params::poly_q rho[SIZE], comkey_t & key, int rep) {
+	vector < params::poly_q > t0(1);
+
+	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
+	shuffle_factors(ms, _ms, tau, mu);
 
 	/* Prover samples theta_i and computes commitments D_i. */
 	for (size_t i = 0; i < MSGS - 1; i++) {
@@ -894,10 +926,24 @@ static int shuffle_prover(params::poly_q y[MSGS][WIDTH],
 	_r[MSGS - 1].resize(WIDTH);
 	bdlop_sample_rand(_r[MSGS - 1]);
 	bdlop_commit(d[MSGS - 1], t0, key, _r[MSGS - 1]);
+}
 
-	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho, rep);
+/* The other half, once beta is known for every pass: the published s_i and the
+ * MSGS linear proofs. */
+static int shuffle_prover_respond(params::poly_q y[MSGS][WIDTH],
+		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
+		params::poly_q t[MSGS], params::poly_q tp[MSGS],
+		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
+		commit_t p[MSGS], vector < params::poly_q > pr[MSGS],
+		vector < params::poly_q > _r[MSGS], params::poly_q theta[MSGS],
+		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
+		params::poly_q _ms[MSGS], vector < params::poly_q > r[MSGS],
+		params::poly_q & beta, params::poly_q & tau, params::poly_q & mu,
+		comkey_t & key, comkey_t & pkey) {
+	params::poly_q coef[3];
+	int complete = 1;
 
-	//Check relationship here
+	shuffle_factors(ms, _ms, tau, mu);
 	simul_inverse(inv, fb);
 	for (size_t i = 0; i < MSGS - 1; i++) {
 		if (i == 0) {
@@ -923,15 +969,16 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
 		params::poly_q t[MSGS], params::poly_q tp[MSGS],
 		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
 		commit_t p[MSGS], params::poly_q s[MSGS], commit_t c[MSGS],
-		params::poly_q _ms[MSGS], params::poly_q rho[SIZE], comkey_t & key,
-		comkey_t & pkey, int rep) {
-	params::poly_q coef[3], beta, tau, mu;
+		params::poly_q _ms[MSGS], params::poly_q rho[SIZE],
+		params::poly_q & beta, comkey_t & key, comkey_t & pkey, int rep) {
+	params::poly_q coef[3], tau, mu;
 	int result = 1;
 
 	/* The sub-proofs about the P_i are not checked here: the P_i are the first
-	 * message, sent once for every pass, and run() checks them once. */
+	 * message, sent once for every pass, and run() checks them once. beta is
+	 * not derived here either, being a function of every pass's D_i; run()
+	 * derives all of them from the transcript before this is called. */
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
-	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho, rep);
 	for (size_t l = 0; l < MSGS; l++) {
 		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
 		result &=
@@ -954,29 +1001,15 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
  * @param[in] key			- the commitment key.
  * @return 1 if the proof verifies, 0 otherwise.
  */
-static int run(vector < vector < params::poly_q >> m,
-		vector < vector < params::poly_q >> _m,
-		vector < params::poly_q > &sigma, comkey_t & key) {
-	vector < params::poly_q > t0(1);
-	params::poly_q one, t1, rho[SIZE];
-	comkey_t _key;
-	int result = 1;
-
-	/* The commitments to the sigma_i and the two sub-proofs that place them in D
-	 * are the prover's first message, and they are sent once. Every pass's
-	 * challenges are a hash of them, so re-rolling them re-rolls every pass at
-	 * once, which is what makes the errors of the passes multiply; a first
-	 * message per pass would let a prover settle the passes one at a time. They
-	 * can be shared because they are committed under the original key rather
-	 * than the rho-compressed one of the pass. See SOUNDNESS.md section 7.1. */
-	shuffle_commit_sigma(pcom, pr, sigma.data(), key);
-	result &= pismall_const_verify(cst, key, pcom, MSGS);
-	result &= pibnd_short_verify(bnd, key, pcom, MSGS);
-
-	/* The compression and the key it induces still depend on rho, which is
-	 * drawn afresh for each pass, so they stay inside it. */
-	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
-	shuffle_rho_hash(rho, com, _m, rep);
+/* The rho-compression of one pass: the messages, the commitments and the key it
+ * induces. Both halves of the pass need them and neither keeps them, since one
+ * copy per pass would be MSGS commitments and 2 MSGS ring elements each. */
+static void shuffle_compress(comkey_t & _key, commit_t cs[MSGS],
+		params::poly_q ms[MSGS], params::poly_q _ms[MSGS],
+		vector < vector < params::poly_q >> &m,
+		vector < vector < params::poly_q >> &_m, commit_t com[MSGS],
+		comkey_t & key, params::poly_q rho[SIZE]) {
+	params::poly_q t1;
 
 	for (size_t i = 0; i < MSGS; i++) {
 		ms[i] = m[i][0];
@@ -1012,11 +1045,52 @@ static int run(vector < vector < params::poly_q >> m,
 			_key.A2[0][j] = _key.A2[0][j] + rho[i] * key.A2[i][j];
 		}
 	}
+}
 
-	result &= shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms,
-			_ms, sigma.data(), r, rho, _key, key, rep);
-	result &= shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms,
-			rho, _key, key, rep);
+static int run(vector < vector < params::poly_q >> m,
+		vector < vector < params::poly_q >> _m,
+		vector < params::poly_q > &sigma, comkey_t & key) {
+	static params::poly_q rho[SHUFFLE_REPS][SIZE];
+	static params::poly_q tau[SHUFFLE_REPS], mu[SHUFFLE_REPS];
+	static params::poly_q beta[SHUFFLE_REPS], vbeta[SHUFFLE_REPS];
+	comkey_t _key;
+	int result = 1;
+
+	/* The commitments to the sigma_i and the two sub-proofs that place them in D
+	 * are the prover's first message, and they are sent once. Every pass's
+	 * challenges are a hash of them, so re-rolling them re-rolls every pass at
+	 * once, which is what makes the errors of the passes multiply; a first
+	 * message per pass would let a prover settle the passes one at a time. They
+	 * can be shared because they are committed under the original key rather
+	 * than the rho-compressed one of the pass. See SOUNDNESS.md section 7.1. */
+	shuffle_commit_sigma(pcom, pr, sigma.data(), key);
+	result &= pismall_const_verify(cst, key, pcom, MSGS);
+	result &= pibnd_short_verify(bnd, key, pcom, MSGS);
+
+	/* Every pass commits its D_i before any of them has a beta, for the same
+	 * reason: beta is a hash of all of them together. The compression and the
+	 * key it induces depend on rho and so stay inside the pass, recomputed in
+	 * the second half rather than held. */
+	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
+		shuffle_rho_hash(rho[rep], com, _m, rep);
+		shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
+		shuffle_prover_commit(tau[rep], mu[rep], &d[rep * MSGS],
+				&_r[rep * MSGS], &theta[rep * MSGS], pcom, cs, ms, _ms,
+				rho[rep], _key, rep);
+	}
+
+	/* Twice, because the verifier derives its challenges from the transcript
+	 * rather than taking the prover's word for them; the two must agree. */
+	shuffle_beta_hash(beta, com, _m, pcom, d, tau, mu, rho);
+	shuffle_beta_hash(vbeta, com, _m, pcom, d, tau, mu, rho);
+
+	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
+		shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
+		result &= shuffle_prover_respond(y, w, _y, t, tp, _t, u,
+				&d[rep * MSGS], pcom, pr, &_r[rep * MSGS], &theta[rep * MSGS],
+				s, cs, ms, _ms, r, beta[rep], tau[rep], mu[rep], _key, key);
+		result &= shuffle_verifier(y, w, _y, t, tp, _t, u, &d[rep * MSGS],
+				pcom, s, cs, _ms, rho[rep], vbeta[rep], _key, key, rep);
 	}
 
 	return result;

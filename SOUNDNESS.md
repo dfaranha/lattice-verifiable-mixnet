@@ -28,10 +28,12 @@ passes were not bound to each other under Fiat-Shamir, so their errors did not
 multiply: a prover ground them one at a time, and the protocol's soundness
 against the attack of Section 1 was one pass — about `2^34` hash queries — and
 not the `2^-136` every other number in this document assumes. The outermost
-layer of that is now repaired, by making the commitments to the `sigma_i` a
-first message shared by every pass, which also took 14% off the proof and a
-factor of 6.5 off the prover. Two layers below it are open, and until they are
-closed the numbers in sections 7, 8 and 10 remain what the protocol would be
+two outer layers of that are now repaired, by making the commitments to the
+`sigma_i` a first message shared by every pass — which also took 14% off the
+proof and a factor of 6.5 off the prover — and by drawing every pass's `beta`
+from one hash of every pass's `D_i`. The innermost layer is open: the linear
+proofs inside a pass still carry their own challenges, which holds the protocol
+at about `2^46` and leaves the numbers in sections 7, 8 and 10 what it would be
 worth rather than what it is.
 
 ## 1. The attack
@@ -598,22 +600,30 @@ rebuilt per pass: the proof goes from 2442 to **2094 KB a vote**, and the
 `shuffle-proof` benchmark at `MSGS = 4` from 154 to **23.8 Gcycles**, a factor
 of 6.5. Eleven of eleven tests pass.
 
-**Two layers are still open**, and they are the subject of the estimate above
-rather than of this repair:
+**The `D_i` round is bound too.** `beta` was a hash of one pass's `D_i`, so a
+prover could still re-roll one pass's `D_i` alone. `run()` is now in two halves:
+every pass reaches its `D_i` first, one hash over all of them yields every
+pass's `beta`, and only then does any pass compute its `s_i` and its linear
+proofs. `d`, the randomness that opens it and `theta` are dimensioned by
+`SHUFFLE_REPS` as well, since they are the part of a pass that has to outlive
+it; the compression and the factors `a_i`, `b_i` are recomputed in the second
+half rather than held, being cheaper to rebuild than to store. At `MSGS = 1000`
+that is about 1.3 GB more than holding one pass, and the measured cost in time
+is 0.6% of `run()` -- the extra hash is 8 to 16 Mcycles against the 18 to 350
+Gcycles the sub-proofs take.
 
-* the `D_i` round. `beta` is a hash of one pass's `D_i`, so a prover still
-  re-rolls a pass's `D_i` alone. Binding it means hashing every pass's `D_i`
-  together before any `beta` is drawn, which is cheap now that the `D_i` are
-  the only per-pass first message left: 128 MB a pass at `MSGS = 1000`.
-* the `MSGS * SHUFFLE_REPS` instances of `Pi_LIN`, each with its own `beta`
-  over its own first message, each worth `1 / p_min` by Section 8 and each
-  grindable on its own. Binding these is the wrong lever: one hash for all of
-  them means an abort anywhere re-rolls every challenge everywhere, and at the
-  0.49 acceptance of Section 9.1 all `MSGS * SHUFFLE_REPS` of them passing at
-  once never happens. Either the maskings are batched into one rejection test
-  across the whole proof, which costs about 4.3 bits per coefficient in
-  `sigma_C`, or -- better -- Section 8's challenge set is repaired so that
-  `1 / p_min` stops being the number to beat.
+**One layer is still open**, and it is the subject of the estimate above rather
+than of this repair: the `MSGS * SHUFFLE_REPS` instances of `Pi_LIN`, each with
+its own `beta` over its own first message, each worth `1 / p_min` by Section 8
+and each grindable on its own. A prover needs one forged linear proof per pass,
+so the protocol still sits at `SHUFFLE_REPS / p_min`, about `2^46`, and the two
+layers below it are now the ones that are not the weakest. Binding these is the
+wrong lever: one hash for all of them means an abort anywhere re-rolls every
+challenge everywhere, and at the 0.49 acceptance of Section 9.1 all
+`MSGS * SHUFFLE_REPS` of them passing at once never happens. Either the
+maskings are batched into one rejection test across the whole proof, which costs
+about 4.3 bits per coefficient in `sigma_C`, or -- better -- Section 8's
+challenge set is repaired so that `1 / p_min` stops being the number to beat.
 
 ## 8. The challenge sets of the Sigma-protocols
 
@@ -978,8 +988,8 @@ all go through `util::equal`. That fits the pattern of everything above — the
 splitting ring breaks *proofs*, not the encryption.
 
 **Reviewed and found wanting**, each with its own section: the binding of the
-repetitions to each other (7.1, the most serious of these, repaired one layer
-and open for two), the coefficient sets
+repetitions to each other (7.1, the most serious of these, repaired for the
+passes and open for the linear proofs inside them), the coefficient sets
 of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8, now
 repaired), the slack bound feeding `q` and the six bits it now carries for
 nothing (9), the rejection sampling of `Pi_LIN` (9.1), the compression by
@@ -1026,7 +1036,8 @@ reports 110 KB per user per server for shuffle *and* decryption together.
 | assumptions | MSIS and MLWE mod `q` | and MSIS mod each `p_j`, see 6.4 |
 | verifier equality | one slot in 8192 | all slots |
 | soundness error of the product argument | `~2^-29` | `~2^-132`, once the passes were bound to one first message, see 7.1 |
-| the passes under Fiat-Shamir | ground one at a time | bound through a shared `P_i`, see 7.1 |
+| the passes under Fiat-Shamir | ground one at a time | `tau, mu, beta` bound across passes, see 7.1 |
+| `Pi_LIN`'s own challenges | one per proof, ground one at a time | **unchanged, `~2^46` for the protocol, see 7.1** |
 | `Pi_SMALL` and `Pi_BND` | once per pass | once for all passes, `-14%` and `6.5x`, see 7.1 |
 | compression of the components by `rho` | free, `rho` not a challenge | `~2^-176`, see Section 10 |
 | `q` | 78 bits | 88 bits, see Section 9 |
