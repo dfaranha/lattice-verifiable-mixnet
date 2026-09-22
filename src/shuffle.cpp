@@ -389,9 +389,12 @@ static void simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
 	}
 
 	w = inv[MSGS - 1];
-	/* The product of the shuffled messages behaves like a uniform element of
-	 * R_q, so the only way this fails -- one of its 2N NTT residues being zero
-	 * -- has probability about 2N/p_min, which is around 2^-26. */
+	/* The b_i behave like uniform elements of R_q, so this fails when one of
+	 * the 2N NTT residues of their product is zero: about 2N MSGS / p_min,
+	 * which is 2^-21 a pass at MSGS = 1000 and 2^-19 a shuffle. The event
+	 * depends on the sigma_i, so stopping here tells an observer something
+	 * about the permutation; it should be a restart of the pass instead, which
+	 * moves tau and mu and so moves the event. See SOUNDNESS.md section 5.2. */
 	ok = poly_inverse(w, w);
 	assert(ok == 1);
 	(void) ok;

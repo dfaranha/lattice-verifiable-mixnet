@@ -262,6 +262,59 @@ advances whether or not the seed was fixed. Only fresh generators, as separate
 runs would have, distinguish the two cases. A test of this kind is worth nothing
 until it has been seen to fail.
 
+### 5.2 The simulator, and the three things a transcript does not hide
+
+Sections 5 and 5.1 fix particular leaks. This is the review of the whole
+transcript that they were found inside of, and it is a review rather than a
+proof: no simulator has been written down for this protocol.
+
+A pass publishes the commitments `P_i` and `D_i`, the values `s_i`, the
+responses of the `MSGS` linear proofs with the hash their challenges come from,
+and the two sub-proofs about the `P_i`. Every challenge is a hash of the rest,
+so nothing there is a secret. Of the others:
+
+* `P_i` and `D_i` are BDLOP commitments. Hiding is MLWE, and for these two it is
+  at rank 2 rather than the rank 1 of the input commitments that Section 9
+  estimates at `2^155.8`, since only one row of `A2` carries a message.
+* the `s_i` are uniform. `s_0 = theta_0 - beta a_0 / b_0`, and
+  `s_i = theta_i + (theta_{i-1} - s_{i-1}) a_i / b_i` after that, so with the
+  `theta_i` uniform and independent the `MSGS - 1` published values are jointly
+  uniform whatever the permutation is. That is what Section 5's change to
+  `theta` bought, and it is perfect rather than computational.
+* the responses of the linear proofs are `D_sigma` restricted to a halfspace, by
+  the rejection sampling of 9.1.
+* the sub-proofs have their own zero knowledge, which is 5.1.
+
+**One: the halfspace bits.** Each accepted opening leaks the sign of
+`<z, beta r>`, the one bit the `b = 1` variant of Figure 2 acknowledges. There
+are `LIN_REPS` of them per relation and the `P_i` are now shared by every pass,
+so the randomness of one `P_i` is masked `LIN_REPS * SHUFFLE_REPS = 12` times
+and leaks twelve signs, each of a different linear function of it. Against
+`WIDTH * N = 16384` ternary coefficients that is nothing, but it scales with
+both kinds of repetition, which is worth knowing now that there are two.
+
+**Two: an abort is not free, and this one aborts.** `simul_inverse` inverts the
+`b_i` by the batch trick, which needs their product to be invertible, and
+`assert`s that it is. The event is witness-dependent:
+`b_i = _m_i + sigma_i tau - mu`, so an observer who sees the prover stop knows
+`tau`, `mu` and the output list, can compute `b_i` for every candidate value of
+each `sigma_i`, and learns that at least one of them is singular. That is a
+constraint on the permutation and not a bit of it. The rate is
+`2N MSGS / p_min`, which is `2^-21` a pass and `2^-19` a shuffle at
+`MSGS = 1000` — the comment in the code said `2^-26`, which is the figure for
+the old 39-bit basis and drops the factor of `MSGS`. The treatment it should
+get is the one rejection sampling gets: restart. Re-rolling the randomness of
+the `P_i` moves `tau` and `mu` and so moves the event, and at `2^-19` the
+expected cost of that is nothing. Aborting is what it does instead, and under
+`NDEBUG` — which this Makefile does not set — it would carry on with a value
+that is not an inverse.
+
+**Three: the clock.** The number of restarts the prover makes depends on the
+norms it is masking, and now also on the singular case above. None of it is in
+the transcript, so it is a side channel and not a leak, but a prover that runs
+where its timing can be observed is telling an observer something about its
+witness.
+
 ## 6. The membership sub-proof
 
 Lemma 5 requires `sigma_i in D`. This branch proves it with two sub-proofs run
@@ -1160,11 +1213,14 @@ of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8, now
 repaired), the slack bound feeding `q` and the six bits it now carries for
 nothing (9), the rejection sampling of `Pi_LIN` (9.1), the compression by
 `rho` (10), the mask of the AEx proof and the two ways to publish an abandoned
-one (5.1).
+one (5.1), and the abort in `simul_inverse` (5.2, open).
 
 **Not reviewed.** The linear proof's own soundness beyond its challenge set and
-its masking; the proof of shuffle's simulator; and `vericrypt`/the
-ballot-submission side, which this repository does not implement.
+its masking; the internals of `pismall`'s AEx proof beyond the coefficient sets
+of 6.2, which is the largest body of code here that nothing above has looked
+at; and `vericrypt`/the ballot-submission side, which this repository does not
+implement. The proof of shuffle's simulator is now 5.2, which is a review of
+what the transcript reveals rather than a simulator.
 
 **Sizes, at `MSGS = 1000`, `q = 2^88`, four passes.**
 
