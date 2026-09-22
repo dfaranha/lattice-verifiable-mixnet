@@ -27,14 +27,15 @@ suite asserts the three defects of sections 6.2, 8 and 10, and the inequality
 passes were not bound to each other under Fiat-Shamir, so their errors did not
 multiply: a prover ground them one at a time, and the protocol's soundness
 against the attack of Section 1 was one pass — about `2^34` hash queries — and
-not the `2^-136` every other number in this document assumes. The outermost
-two outer layers of that are now repaired, by making the commitments to the
-`sigma_i` a first message shared by every pass — which also took 14% off the
-proof and a factor of 6.5 off the prover — and by drawing every pass's `beta`
-from one hash of every pass's `D_i`. The innermost layer is open: the linear
-proofs inside a pass still carry their own challenges, which holds the protocol
-at about `2^46` and leaves the numbers in sections 7, 8 and 10 what it would be
-worth rather than what it is.
+not the `2^-136` every other number in this document assumes. The two outer
+layers of it are now repaired, by making the commitments to the `sigma_i` a
+first message shared by every pass — which also took 14% off the proof and a
+factor of 6.5 off the prover — and by drawing every pass's `beta` from one hash
+of every pass's `D_i`. The innermost one is open: the `MSGS * SHUFFLE_REPS`
+instances of `Pi_LIN` still carry their own challenges, which holds the
+protocol at about `2^46`, so the numbers in sections 7, 8 and 10 are what it
+would be worth and not what it is. Section 8.1 prices the ways out and says
+what the `2^46` costs an attacker.
 
 ## 1. The attack
 
