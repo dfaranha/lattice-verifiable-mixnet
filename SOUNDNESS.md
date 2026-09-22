@@ -524,6 +524,58 @@ given the above:
    `2^77.5`, and NFLlib's `uint64` arithmetic caps a single modulus at 62 bits.
    The composite modulus is forced, and so is everything that follows from it.
 
+### 6.5 The AEx proof's parameters, and its two passes
+
+Nothing in this document had read `pismall.cpp`, which is the largest file here.
+This is what its numbers are, checked against Lemma 2 of the paper.
+
+**The parameters check out.** The Reed-Solomon code has length `l = 16384` and
+message `2N + ETA = 8517`, so its rate is 0.52 and its relative distance 0.48,
+which is what Section 7 quotes. Lemma 2's column-opening terms are
+`2 (g / (l - eta))^eta` and `2 (1 - 2 (g - g') / 3l)^eta` with `g' <= g <= l`,
+and the `g` that balances them is 13078, where both are `2^-95`. So `ETA = 325`
+buys `2^-95` and not the `2^-82` Section 7 quotes; the quote is a safe one.
+
+**The term that dominates is the algebraic one**, which is Lemma 2's
+`18 tau / (q - tau)`. Taken over `Z_q` that reads `2^-88`, but the ring is split and an adversary can
+work modulo one prime, which is exactly why this file draws its challenges from
+`GR(q,2)` instead: the per-slot space is `p_min^2` and the term is
+`18 TAU / p_min^2`, which is **`2^-73.8`** at `TAU = 1024` and the 44-bit basis.
+Section 7's `2^-66` a pass is the same quantity at the old 39-bit primes.
+
+**And the two passes are not bound to each other.** `AEX_REPS = 2` exists
+because one pass is not enough, and the comment on it says the passes are
+independent, which is exactly the trouble: `pismall_hash` takes that pass's
+Merkle root and that pass's commitment and nothing else, and `aex_sample_I`
+takes that pass's root and that pass's openings. So this is Section 7.1 again,
+one level down. A prover re-randomises the commitment of one pass — which is
+cheap, the messages staying put — until that pass's challenges suit it, keeps
+it, and moves to the other:
+
+```
+bound        (18 TAU / p_min^2)^2  = 2^-148
+as built     2 * p_min^2 / 18 TAU  = 2^75 queries
+```
+
+**It is a claim not met rather than a practical attack**, which is the
+difference between this and 8.1. A query here costs a BDLOP commitment and the
+derivation of `2 + 6 TAU` extension-field challenges, some tenths of a
+millisecond, so `2^75` of them is astronomical wall-clock; the `2^46` of 8.1 was
+days. But `LEVEL` is a count of queries, and by that count `Pi_SMALL` is the
+weakest thing in the protocol at `2^75`, below `Pi_BND`'s `2^-130`.
+
+The repair is 7.1's: one hash over both passes' first messages yielding both
+passes' challenges, and one over both passes' openings yielding both column
+sets, which is the two-phase shape `run()` now has. The paper's own footnote to
+Lemma 2 says the bound "only applies to the interactive version of the proof"
+and has to be raised for Fiat-Shamir, which is the same observation one level
+up.
+
+There is a second, cheaper-to-state instance of the same thing inside a pass:
+the columns are hashed from the openings, so a prover can re-roll the openings'
+masks to move the column set without disturbing the algebraic challenges. That
+one is worth `2^95`, so it is not the way in.
+
 ## 7. Soundness error of the product argument
 
 Lemma 2 of ePrint 2025/658 (Schwartz-Zippel over a ring) needs a challenge set
@@ -570,7 +622,9 @@ real. At `MSGS = 1000` the terms are `2^-132` for the product argument, about
 `2^-133` for `Pi_SMALL` — `2^-66` per pass from the
 `GR(q,2)` challenge, squared by its two repetitions, with the column-opening
 test at `2^-82` or better on 325 of 16384 columns at relative distance 0.48 —
-and `Pi_BND` at its own `NTI = 130`. That leaves one term below `LEVEL`, and it
+and `Pi_BND` at its own `NTI = 130` — but see 6.5, which reports that
+`Pi_SMALL`'s two passes are not bound to each other either, so what it is worth
+is `2^75` and not `2^-133`. That leaves one term below `LEVEL`, and it
 is not one of these: Section 10 reports that the compression of the message
 components by `rho` costs `2^-44` a pass, and that it is now drawn inside them,
 because `rho` is drawn once outside them. Setting that aside, the binding
@@ -1219,13 +1273,14 @@ of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8, now
 repaired), the slack bound feeding `q` and the six bits it now carries for
 nothing (9), the rejection sampling of `Pi_LIN` (9.1), the compression by
 `rho` (10), the mask of the AEx proof and the two ways to publish an abandoned
-one (5.1), and the abort in `simul_inverse` (5.2).
+one (5.1), the abort in `simul_inverse` (5.2), and the two passes of the AEx
+proof (6.5, open).
 
 **Not reviewed.** The linear proof's own soundness beyond its challenge set and
-its masking; the internals of `pismall`'s AEx proof beyond the coefficient sets
-of 6.2, which is the largest body of code here that nothing above has looked
-at; and `vericrypt`/the ballot-submission side, which this repository does not
-implement. The proof of shuffle's simulator is now 5.2, which is a review of
+its masking; the extraction argument of the AEx proof, 6.5 having checked its
+parameters and the composition of its passes but not the proof of Lemma 2
+itself; and `vericrypt`/the ballot-submission side, which this repository does
+not implement. The proof of shuffle's simulator is now 5.2, which is a review of
 what the transcript reveals rather than a simulator.
 
 **Sizes, at `MSGS = 1000`, `q = 2^88`, four passes.**
