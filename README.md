@@ -46,8 +46,11 @@ components, and drawn afresh in each pass.
 
 **The modulus has moved from 78 to 88 bits**, because the slack bound feeding
 the distributed-decryption budget drops a factor that the amortized proof's own
-correctness analysis requires. The lattice estimator puts the BGV instance at `2^158` there, against `2^180`
-at the paper's modulus, so the ring degree stays at 4096. See
+correctness analysis requires. The lattice estimator puts the BGV instance at `2^158` there and the
+commitment's hiding at `2^156`, against `2^180` for the former at the paper's
+modulus, so the ring degree stays at 4096. Binding turns out to need no
+assumption at all at these dimensions: no two openings that short can differ.
+See
 [SOUNDNESS.md](SOUNDNESS.md) section 9.
 
 **Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this.** Two things

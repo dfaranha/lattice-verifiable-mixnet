@@ -358,12 +358,13 @@ argument turns on, `2 B` below `p_min`, is checked rather than assumed: the test
 parameters in force, with a factor of 762 to spare at `MSGS = 1000`.
 
 **The cost is one assumption the mix-net did not make before:** MSIS modulo each
-prime of the basis. It is genuinely additional. A short kernel element modulo
-`q` reduces to one modulo `p_j` but not conversely, so the assumption is
-strictly stronger than MSIS modulo `q`, and it is not implied by the binding of
-the commitment either: breaking binding means finding a vector of `l_2` norm
-`2^20.5` modulo `q`, breaking this one a vector of norm `2^29.4` modulo `p_j`,
-and the second is the easier problem. Nothing already assumed gives it for free.
+prime of the basis. It is genuinely additional, and Section 9 says why in
+one line: modulo `q` the binding lattice has no short vector to find at all —
+`lambda_1` is about `2^27` against a bound of `2^21.5` — while reducing modulo
+`p_j` shrinks the determinant by half and brings `lambda_1` down to about
+`2^16`, comfortably below the `2^29.4` this argument needs. So there is nothing
+to assume modulo `q` and something real to assume modulo `p_j`. Nothing already
+relied on gives it for free.
 
 It is satisfied with a wide margin all the same. Taking the lattice of the `c1`
 row — dimension `N * WIDTH = 16384`, `N * HEIGHT = 4096` constraints modulo
@@ -579,11 +580,25 @@ the wider modulus spends twenty-two of them. `N = 4096` stands; the earlier
 worry that it would have to double came from anchoring a hand estimate on the
 claimed 128 rather than the actual margin.
 
-Two caveats. This is the encryption instance; the commitment's hiding is a
-separate MLWE and its binding a separate MSIS, neither run through the estimator
-here, though binding was estimated by hand at block size 14849 and is nowhere
-near binding. And the error `p e` with ternary `e` is modelled as a discrete
-Gaussian of the same standard deviation, which is a modelling choice.
+The commitment was run through it too:
+
+| instance | best attack |
+| --- | --- |
+| BGV encryption, rank-1 RLWE | `2^157.7` |
+| BDLOP hiding, MLWE of rank `WIDTH - HEIGHT - SIZE = 1` | `2^155.8` |
+| BDLOP binding, SIS at `beta = 2^21.5` | no solution exists |
+
+Binding comes back not as a hard problem but as a vacuous one: the lattice has
+dimension `N * WIDTH = 16384` and determinant `q^{N * HEIGHT}`, so its shortest
+non-zero vector is around `2^27`, and the bound the verifier enforces on a
+masked opening is `2^21.5`. Two openings that short cannot differ, whatever an
+adversary computes. That was already true at 78 bits, where `lambda_1` is
+`2^24.5`. **The commitment is statistically binding at these dimensions**, and
+MSIS modulo `q` is not among the assumptions it needs.
+
+One caveat on the numbers: the error `p e` with ternary `e` is modelled as a
+discrete Gaussian of the same standard deviation, which is a modelling choice
+the estimator has no exact form for.
 
 **One constraint the wider modulus brought to light.** BDLOP hides only while
 `WIDTH > HEIGHT + SIZE`. At `WIDTH = 4` and `HEIGHT = 1` the default `SIZE = 2`
@@ -657,5 +672,6 @@ key threaded through `lin_prover` and `lin_verifier`.
 | soundness error of the product argument | `~2^-29` | `~2^-132`, see Section 7 |
 | compression of the components by `rho` | free, `rho` not a challenge | `~2^-176`, see Section 10 |
 | `q` | 78 bits | 88 bits, see Section 9 |
-| lattice security | claimed 128 bits | `2^158` by the estimator, see 9 |
+| lattice security | claimed 128 bits | `2^158` encryption, `2^156` hiding, see 9 |
+| commitment binding | MSIS mod `q` | statistical, no assumption, see 9 |
 | mask on the published `s_i` | ternary | uniform, see Section 5 |
