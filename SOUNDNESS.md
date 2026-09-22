@@ -200,6 +200,46 @@ one-line change landed on `main`, where the defect is milder: there `b_0` is
 the public `_m_0`, so a short `theta_0` costs zero knowledge -- the `s_i` are
 distinguishable from uniform -- without handing over the permutation.
 
+### 5.1 The mask of the AEx proof, and two ways to publish one
+
+Two more zero-knowledge defects, found by going looking rather than by any test.
+
+**The AEx mask came from a fixed seed.** `pismall_prover` hides its witness
+behind `s_0`, drawn with `fmpz_mod_poly_randtest` from a `flint_rand_t`, and
+publishes `f = s_0 l_0(x) + sum_i l_i(x) s_i`. That generator was
+`flint_rand_init`'d and never seeded. FLINT seeds deterministically, which is
+checkable in a few lines: the first coefficient it yields is byte-identical
+across two runs of a program. So every run of the binary used the same mask and
+anyone with FLINT could recompute it, which is the whole of the proof's hiding.
+`aex_rand_init()` now seeds from the OS; the generator inside `pismall_hash()`
+is seeded from the transcript and must stay that way, that one being
+Fiat-Shamir.
+
+**Giving up on rejection sampling is not a proof.** Rejection sampling makes the
+masked opening independent of the witness; it is not what keeps the opening
+inside the bound the verifier checks. So a prover that abandons it and publishes
+anyway emits a transcript that *verifies* and *leaks*. `pibnd_prover()` had
+exactly that shape after a retry cap was added to stop it spinning on a witness
+that is not short, and `lin_prover()` had the opposite one, an unbounded loop
+that could not leak but could hang forever on the same input. Both now bound the
+retries and return whether they succeeded, and the callers refuse a proof that
+did not.
+
+**Neither was visible to the test suite**, and that is the general point. Every
+other test here asks whether the verifier accepts. A proof with a predictable
+mask verifies perfectly; so does one from a prover that gave up. The two tests
+added for these — `AEX proof does not repeat its mask`, and asserting the
+prover's return value in `BND proof is consistent` — are the only ones in the
+repository that would notice a transcript which is valid and revealing.
+
+Worth recording how they were written, because the first two attempts at the
+mask test passed against deliberately broken code. Comparing two components of
+one proof compares things that always differ; comparing two proofs drawn from
+one generator compares things that also always differ, because the stream
+advances whether or not the seed was fixed. Only fresh generators, as separate
+runs would have, distinguish the two cases. A test of this kind is worth nothing
+until it has been seen to fail.
+
 ## 6. The membership sub-proof
 
 Lemma 5 requires `sigma_i in D`. This branch proves it with two sub-proofs run
@@ -675,3 +715,5 @@ key threaded through `lin_prover` and `lin_verifier`.
 | lattice security | claimed 128 bits | `2^158` encryption, `2^156` hiding, see 9 |
 | commitment binding | MSIS mod `q` | statistical, no assumption, see 9 |
 | mask on the published `s_i` | ternary | uniform, see Section 5 |
+| mask of the AEx proof | fixed seed | seeded from the OS, see 5.1 |
+| a prover that abandons masking | publishes and verifies | refused, see 5.1 |

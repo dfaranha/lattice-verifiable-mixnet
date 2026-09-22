@@ -1801,6 +1801,24 @@ struct pismall_const {
 	pismall_pass pass[AEX_REPS];
 };
 
+/* Initialise a generator for the prover's masking witness. s_0, the witness
+ * that masks the real one in the published f, comes out of this, and
+ * flint_rand_init() seeds deterministically: left at that, every run of the
+ * binary produces the same mask and anyone can recompute it, so the proof stops
+ * being zero-knowledge. The generator inside pismall_hash() is a different
+ * matter and is seeded from the transcript on purpose, that being Fiat-Shamir.
+ */
+static void aex_rand_init(flint_rand_t r) {
+	ulong seed[2];
+
+	flint_rand_init(r);
+	if (getrandom(seed, sizeof(seed), 0) != (ssize_t) sizeof(seed)) {
+		fprintf(stderr, "ERROR: could not read entropy for the AEx mask\n");
+		abort();
+	}
+	flint_rand_set_seed(r, seed[0], seed[1]);
+}
+
 static int mono_ready;
 static flint_rand_t mono_rand;
 static fmpz_mod_ctx_t mono_ctx;
@@ -1814,7 +1832,7 @@ static void pismall_const_init(void) {
 		return;
 	}
 	pismall_alloc();
-	flint_rand_init(mono_rand);
+	aex_rand_init(mono_rand);
 	fmpz_init(mono_q);
 	fmpz_set_mpz(mono_q, params::poly_q::moduli_product());
 	fmpz_mod_ctx_init(mono_ctx, mono_q);
@@ -2249,6 +2267,32 @@ static void test(flint_rand_t rand) {
 		TEST_ASSERT(rejected == 1, end);
 	} TEST_END;
 
+	TEST_ONCE("AEX proof does not repeat its mask") {
+		/* Two proofs of the same statement must differ, because s_0 is drawn
+		 * afresh. They would be identical if the generator producing it were
+		 * left at flint_rand_init()'s fixed seed, which is exactly what makes
+		 * the published f stop hiding the witness. Nothing else in this suite
+		 * would notice: every other test asks only whether the verifier
+		 * accepts, and a proof with a predictable mask verifies perfectly. */
+		flint_rand_t r1, r2;
+		aex_open_t o1, o2;
+		int differ;
+
+		/* Fresh generators, as two runs of the binary would have. Drawing twice
+		 * from one generator proves nothing: the stream advances either way,
+		 * so the proofs differ even when the seed is fixed. */
+		aex_rand_init(r1);
+		pismall_prover(com, x, f, rf, h, rh, rd, key, lag, r1, ctx, o1);
+		aex_rand_init(r2);
+		pismall_prover(com, x, f, rf, h, rh, rd, key, lag, r2, ctx, o2);
+		differ = memcmp(o1.root, o2.root, BLAKE3_OUT_LEN) != 0;
+		flint_rand_clear(r1);
+		flint_rand_clear(r2);
+		aex_open_clear(o1);
+		aex_open_clear(o2);
+		TEST_ASSERT(differ == 1, end);
+	} TEST_END;
+
 	TEST_ONCE("AEX proof rejects a witness that is not a constant") {
 		/* Component V - 3 is declared AEX_SCALAR, so every coefficient above
 		 * the constant one must be zero. Unlike the sets of the KNOWN GAP
@@ -2405,7 +2449,8 @@ static void test(flint_rand_t rand) {
 
 int main() {
 	flint_rand_t rand;
-	flint_rand_init(rand);
+
+	aex_rand_init(rand);
 	pismall_alloc();
 
 	printf("\n** Tests for lattice-based AEX proof:\n\n");

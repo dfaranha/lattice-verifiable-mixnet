@@ -431,7 +431,20 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 	return result;
 }
 
-static void lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
+/* How many times the prover retries rejection sampling before giving up. Each
+ * of the three checks accepts with probability about 1/M for M = 1.75, so an
+ * honest prover needs a handful of attempts and giving up is a vanishing
+ * event; a prover whose witness is not short never succeeds, and without a
+ * bound it would spin here forever.
+ *
+ * Returning whether it succeeded matters as much as the bound. Rejection
+ * sampling is what makes the masked opening independent of the witness, not
+ * what keeps it inside the norm bound, so the opening left behind by a prover
+ * that gave up may well verify while leaking. It must not be published, which
+ * is why the status is threaded back to run(). */
+#define LIN_TRIES   64
+
+static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 		params::poly_q _y[WIDTH], params::poly_q & t, params::poly_q & tp,
 		params::poly_q & _t, params::poly_q & u, commit_t x, commit_t p,
 		commit_t _x, params::poly_q coef[3], comkey_t & key,
@@ -439,7 +452,7 @@ static void lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 		vector < params::poly_q > _r) {
 	params::poly_q beta, tmp[WIDTH], ptmp[WIDTH], _tmp[WIDTH];
 	array < mpz_t, params::poly_q::degree > coeffs;
-	int rej0, rej1, rej2;
+	int rej0, rej1, rej2, tries = 0;
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
@@ -501,11 +514,13 @@ static void lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 		rej0 = rej_sampling(y, tmp, SIGMA_C * SIGMA_C);
 		rej1 = rej_sampling(w, ptmp, SIGMA_C * SIGMA_C);
 		rej2 = rej_sampling(_y, _tmp, SIGMA_C * SIGMA_C);
-	} while (rej0 || rej1 || rej2);
+	} while ((rej0 || rej1 || rej2) && ++tries < LIN_TRIES);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
 	}
+
+	return !(rej0 || rej1 || rej2);
 }
 
 static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
@@ -804,7 +819,7 @@ static void shuffle_commit_sigma(commit_t p[MSGS],
 	bnd = pibnd_short_prove(key, p, pr, sigma, MSGS);
 }
 
-static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
+static int shuffle_prover(params::poly_q y[MSGS][WIDTH],
 		params::poly_q w[MSGS][WIDTH], params::poly_q _y[MSGS][WIDTH],
 		params::poly_q t[MSGS], params::poly_q tp[MSGS],
 		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
@@ -816,6 +831,7 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 	vector < params::poly_q > t0(1);
 	vector < params::poly_q > _r[MSGS];
 	params::poly_q coef[3], beta, tau, mu, gl;
+	int complete = 1;
 
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
 
@@ -868,9 +884,11 @@ static void shuffle_prover(params::poly_q y[MSGS][WIDTH],
 	/* Now run \Prod_LIN instances, one for each commitment. */
 	for (size_t l = 0; l < MSGS; l++) {
 		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
-		lin_prover(y[l], w[l], _y[l], t[l], tp[l], _t[l], u[l], c[l], p[l],
+		complete &= lin_prover(y[l], w[l], _y[l], t[l], tp[l], _t[l], u[l], c[l], p[l],
 				d[l], coef, key, r[l], pr[l], _r[l]);
 	}
+
+	return complete;
 }
 
 static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
@@ -964,8 +982,8 @@ static int run(vector < vector < params::poly_q >> m,
 
 	shuffle_commit_sigma(pcom, pr, sigma.data(), _key);
 
-	shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms, _ms,
-			sigma.data(), r, rho, _key, rep);
+	result &= shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms,
+			_ms, sigma.data(), r, rho, _key, rep);
 	result &= shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms,
 			rho, _key, rep);
 	}
