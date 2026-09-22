@@ -112,7 +112,7 @@ cost is the extra rejection sampling, which multiplies the expected number of
 restarts rather than adding to the work of one. That has since been recovered:
 the three tests are batched into one over the concatenated vectors, which takes
 a proof from 4.1 restarts on average to 1.0 and the `linear proof` benchmark
-from 277 to 95 Mcycles. See SOUNDNESS.md section 9.1, which is also where the
+from 277 to 95 Mcycles. See SOUNDNESS.md section 8.1, which is also where the
 rejection sampling itself was corrected.
 
 Note that `pismall` defaults to `TAU = 1024` rather than the paper's 1000: its interpolation nodes are the `TAU`-th roots of unity, so `TAU` must be a power of two. The extra 24 relations are padded with zero witnesses and cost nothing in soundness.

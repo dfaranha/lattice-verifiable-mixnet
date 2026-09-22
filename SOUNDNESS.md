@@ -5,26 +5,27 @@
 This is a **draft argument, not a reviewed result.** It records what the
 `fix-pkc` branch changes in `src/shuffle.cpp`, why those changes are believed
 to be necessary and sufficient against the published attack, and — just as
-importantly — **the assumptions it rests on.** Sections 6 and 8 are the parts to
-read before trusting anything here: section 6.2 reports a defect in `Pi_SMALL`
-itself, not only in the proof of shuffle, section 6.4 closes the argument at the
+importantly — **the assumptions it rests on.** Sections 5 and 7 are the parts to
+read before trusting anything here: section 5.2 reports a defect in `Pi_SMALL`
+itself, not only in the proof of shuffle, section 5.4 closes the argument at the
 cost of assuming MSIS modulo each prime of the RNS basis and not only modulo
-their product, and section 8 reports that the challenge set of the linear proof
+their product, and section 7 reports that the challenge set of the linear proof
 contains zero divisors, so that proof has no soundness argument of its own and
-is carried by the repetitions of section 7. Section 10 reports the one term the
+is carried by the repetitions of section 6. Section 9 reports the one term the
 repetitions do not reach, the compression of the message components by `rho`,
-which stood at `2^-39` until `rho` was made a per-pass challenge. Section 13
-records what the figures here were checked against, and what has not been run. Section 8 also
+which stood at `2^-39` until `rho` was made a per-pass challenge. Section 12
+records what the figures here were checked against, and what has not been run.
+Section 7 also
 reports, and repairs, a challenge set of `Pi_BND` that belonged to neither
-instantiation of the amortized proof; Section 9 reports that `sigma_Bnd` is
+instantiation of the amortized proof; Section 8 reports that `sigma_Bnd` is
 about six bits wider than it now needs to be as a result, and why only two of
-them can be spent on `q`; and Section 9.1 reports, and restores, a
+them can be spent on `q`; and Section 8.1 reports, and restores, a
 rejection-sampling step dropped from the linear proof in 2023, without which
 that proof was not the zero-knowledge one its parameters describe. The test
-suite asserts the three defects of sections 6.2, 8 and 10, and the inequality
-6.4 depends on, rather than hiding, any of them.
+suite asserts the three defects of sections 5.2, 7 and 9, and the inequality
+5.4 depends on, rather than hiding, any of them.
 
-**Section 7.1 is the one to read first.** It reports that the `SHUFFLE_REPS`
+**Section 6.1 is the one to read first.** It reports that the `SHUFFLE_REPS`
 passes were not bound to each other under Fiat-Shamir, so their errors did not
 multiply: a prover ground them one at a time, and the protocol's soundness
 against the attack of Section 1 was one pass — about `2^34` hash queries — and
@@ -34,10 +35,10 @@ first message shared by every pass — which also took 14% off the proof and a
 factor of 6.5 off the prover — and by drawing every pass's `beta` from one hash
 of every pass's `D_i`. The innermost one is open: the `MSGS * SHUFFLE_REPS`
 instances of `Pi_LIN` still carry their own challenges, which holds the
-protocol at about `2^46`. Section 8.1 prices the ways out of that and records
+protocol at about `2^46`. Section 7.1 prices the ways out of that and records
 the one taken, repeating each linear proof against challenges bound to each
 other, which closes the layer at `2^-134` and takes 13% off the proof into the
-bargain. With that the numbers in sections 7, 8 and 10 are what the protocol is
+bargain. With that the numbers in sections 6, 7 and 9 are what the protocol is
 worth rather than what it would be.
 
 ## 1. The attack
@@ -72,7 +73,7 @@ Two remarks specific to this implementation.
 | symbol | meaning | value |
 | --- | --- | --- |
 | `N` | ring degree (`DEGREE`) | 4096 |
-| `q` | modulus, `p_1 * p_2` | 88 bits, was 78; see Section 9 |
+| `q` | modulus, `p_1 * p_2` | 88 bits, was 78; see Section 8 |
 | `p_1, p_2` | RNS basis, of the form `2^44 - i * 2^21 + 1` | 17592167170049, 17592123129857 |
 | `k` | number of CRT factors of `x^N + 1` | **2N = 8192** |
 
@@ -114,7 +115,7 @@ than either prime of the basis, hence coprime to `q` and a unit. The test
 about `2^44`, rather than the ring degree — an earlier version of this branch
 used `D = {x^i}` with `g(i) = x^i`, which is also admissible but capped `MSGS`
 at `N = 4096` and, more importantly, had a far more awkward membership proof;
-Section 6 explains why the constants win.
+Section 5 explains why the constants win.
 
 The two sets used elsewhere are **not** available here:
 
@@ -157,43 +158,12 @@ vector `w`, one more first message `t_p`, and one more rejection-sampling test.
 5. The prover also runs `pismall_const_prove()` and `pibnd_short_prove()` on
    the `P_i`, one amortized proof each that every committed `sigma_i` is a ring
    constant and that the openings are short, and the verifier checks both
-   before anything else. Section 6 says why it takes two.
+   before anything else. Section 5 says why it takes two.
 6. Everything after the `P_i` is run `SHUFFLE_REPS` times with independent
    challenges, because one pass of the product argument is worth only
-   `MSGS / p_min`. Section 7.
+   `MSGS / p_min`. Section 6.
 
-## 4. The second bug: element-wise equality
-
-Independently of the above, the verifier's equality checks were not checking
-equality. NFLlib overloads `operator==` on polynomials **element-wise**, and
-`operator bool` on a polynomial is "some coefficient is non-zero". So
-
-```
-tmp == zero
-```
-
-is true as soon as *one* of the 8192 slots of `tmp` vanishes, and `a == b` as
-soon as `a` and `b` agree in one slot. A prover who satisfies a verification
-equation in a single slot and in no other passed.
-
-This is the same slot-by-slot cheating as the attack above, one level lower,
-and it is fatal to the fix if left in place: the CRT-mixed list is rejected
-because the last relation fails in the slots of `p_1`, but it still holds in
-the slots of `p_2`, so the old check would accept. `util::equal` and
-`util::is_zero` in `include/util.hpp` compare all residues and are used
-instead. Both fixes were verified to matter on their own: with the index
-binding in place but the element-wise comparison restored, the attack test
-goes back to passing.
-
-That fix is independent of the rest of this branch and landed on `main`
-separately, together with the same correction to the assertions in `bgv.cpp`;
-this branch inherits it by merge.
-
-Note that `operator!=` is *not* affected in the same way — "some slot differs"
-is the right semantics for an inequality — so `bdlop_open`, which uses `!=`,
-was always strict.
-
-## 5. Zero knowledge: the mask on the published s_i
+## 4. Zero knowledge: the mask on the published s_i
 
 The fix introduced a privacy problem, which this branch also fixes. The prover
 publishes the values `s_i` in the clear, and
@@ -223,7 +193,7 @@ one-line change landed on `main`, where the defect is milder: there `b_0` is
 the public `_m_0`, so a short `theta_0` costs zero knowledge -- the `s_i` are
 distinguishable from uniform -- without handing over the permutation.
 
-### 5.1 The mask of the AEx proof, and two ways to publish one
+### 4.1 The mask of the AEx proof, and two ways to publish one
 
 Two more zero-knowledge defects, found by going looking rather than by any test.
 
@@ -263,9 +233,9 @@ advances whether or not the seed was fixed. Only fresh generators, as separate
 runs would have, distinguish the two cases. A test of this kind is worth nothing
 until it has been seen to fail.
 
-### 5.2 The simulator, and the three things a transcript does not hide
+### 4.2 The simulator, and the three things a transcript does not hide
 
-Sections 5 and 5.1 fix particular leaks. This is the review of the whole
+Sections 4 and 4.1 fix particular leaks. This is the review of the whole
 transcript that they were found inside of, and it is a review rather than a
 proof: no simulator has been written down for this protocol.
 
@@ -275,16 +245,16 @@ and the two sub-proofs about the `P_i`. Every challenge is a hash of the rest,
 so nothing there is a secret. Of the others:
 
 * `P_i` and `D_i` are BDLOP commitments. Hiding is MLWE, and for these two it is
-  at rank 2 rather than the rank 1 of the input commitments that Section 9
+  at rank 2 rather than the rank 1 of the input commitments that Section 8
   estimates at `2^155.8`, since only one row of `A2` carries a message.
 * the `s_i` are uniform. `s_0 = theta_0 - beta a_0 / b_0`, and
   `s_i = theta_i + (theta_{i-1} - s_{i-1}) a_i / b_i` after that, so with the
   `theta_i` uniform and independent the `MSGS - 1` published values are jointly
-  uniform whatever the permutation is. That is what Section 5's change to
+  uniform whatever the permutation is. That is what Section 4's change to
   `theta` bought, and it is perfect rather than computational.
 * the responses of the linear proofs are `D_sigma` restricted to a halfspace, by
-  the rejection sampling of 9.1.
-* the sub-proofs have their own zero knowledge, which is 5.1.
+  the rejection sampling of 8.1.
+* the sub-proofs have their own zero knowledge, which is 4.1.
 
 **One: the halfspace bits.** Each accepted opening leaks the sign of
 `<z, beta r>`, the one bit the `b = 1` variant of Figure 2 acknowledges. There
@@ -322,18 +292,18 @@ the transcript, so it is a side channel and not a leak, but a prover that runs
 where its timing can be observed is telling an observer something about its
 witness.
 
-## 6. The membership sub-proof
+## 5. The membership sub-proof
 
 Lemma 5 requires `sigma_i in D`. This branch proves it with two sub-proofs run
 on the same commitments: `Pi_SMALL` for the algebraic half, which says exactly
 that `sigma_i` is a ring constant, and `Pi_BND` for the half no
 algebraic identity can give over a composite modulus, which says that its
 `Pi_BND` for the size half that no algebraic identity can give over a composite
-modulus. Section 6.4 is the argument that reads the two as statements about one
+modulus. Section 5.4 is the argument that reads the two as statements about one
 opening, which needs MSIS modulo each prime of the basis rather than only modulo
 `q`, and which concludes with the invertibility Lemma 5 asks for.
 
-### 6.1 What is proven
+### 5.1 What is proven
 
 `pismall_const_prove()` runs the amortized exact proof of `src/pismall.cpp`
 over all `MSGS` commitments `P_i` to the `sigma_i`, as one proof. The relation
@@ -361,7 +331,7 @@ afterwards. The tests `constant membership proof is consistent` and
 
 What it leaves open is the *value*: `sigma_i` is some constant `c_i in Z_q`,
 and the set of all constants is not admissible, since a difference divisible by
-`p_1` is a zero divisor. That is what Sections 6.3 and 6.4 supply between
+`p_1` is a zero divisor. That is what Sections 5.3 and 5.4 supply between
 them.
 
 The soundness error of one pass of the AEx proof is not negligible -- the
@@ -370,7 +340,7 @@ challenge lives in `GR(q,2)`, so a pass is worth about `3 tau / p_min^2`, around
 verifier requires every one of them, which is how the test of `pismall.cpp` runs
 it too.
 
-### 6.2 The sets are per CRT component, and here that is a feature
+### 5.2 The sets are per CRT component, and here that is a feature
 
 **Every other coefficient set in `pismall` is inexact, because `q` is
 composite.** What the proof checks for the binary set is `c (c - 1) = 0` at
@@ -400,9 +370,9 @@ With `g(i) = i` the membership proof does not use an inexact set at all. The
 defect remains true of `Pi_SMALL`, and it is still load-bearing here — but as a
 *tool* rather than an obstacle. What it says about the randomness `r` is that
 the exact opening is short in the ordinary sense **modulo each prime**, and
-that is precisely the hypothesis Section 6.4 needs.
+that is precisely the hypothesis Section 5.4 needs.
 
-### 6.3 The norm bound
+### 5.3 The norm bound
 
 `pibnd_short_prove()` bounds the openings of the same `P_i`. `Pi_BND` of
 `src/pibnd.cpp`, the amortized approximate norm proof already in this
@@ -429,13 +399,13 @@ The challenge matrix is never stored: both sides derive it from the transcript
 hash and consume it once, row by row, so `pibnd` keeps a single row. At
 `TAU = 1000` the matrix would be 8 GiB.
 
-### 6.4 Why the two sub-proofs speak about one opening, and what follows
+### 5.4 Why the two sub-proofs speak about one opening, and what follows
 
 `Pi_SMALL` is an *exact* proof of knowledge: its extractor outputs a witness
 satisfying the relation and the coefficient sets with no relaxation. `Pi_BND`,
 like every Fiat-Shamir Sigma protocol of its shape, extracts a *relaxed*
 opening: a short `s'` and a short non-zero `c` with `A s' = t c`, where `c` is a
-difference of challenges. With the `{0,1}` challenge set Section 8 settles on
+difference of challenges. With the `{0,1}` challenge set Section 7 settles on
 that `c` is `+/-1` and the opening is exact, which is the best case of what
 follows; the argument is left general so that it survives the switch to the
 monomial challenge set, where `c` is 2. Reading the `sigma_i` of the two as one
@@ -444,9 +414,9 @@ multiplying the exact relation by `c` and subtracting gives `A (c r - r') = 0`,
 and the binding of the commitment says nothing, since `r` is short only in each
 CRT component and `c r` need not be short over `Z_q` at all.
 
-The way through is to stop working over `Z_q`, and it is Section 6.2 that makes
+The way through is to stop working over `Z_q`, and it is Section 5.2 that makes
 it possible. Write the extracted randomness in CRT form, `r = e_1 r^(1) + e_2
-r^(2)`. What 6.2 calls a defect says exactly that each `r^(j)` is ternary **as
+r^(2)`. What 5.2 calls a defect says exactly that each `r^(j)` is ternary **as
 an integer polynomial**. So the exact extraction hands us, for each prime of the
 basis, an opening of `P_i` modulo that prime that is short in the ordinary
 sense, and the comparison that fails over `Z_q` succeeds modulo `p_j`.
@@ -481,11 +451,11 @@ all — there is no membership statement to get wrong. And the inequality the
 argument turns on, `2 B` below `p_min`, is checked rather than assumed: the test
 `the norm bound leaves room for the CRT argument` compares them at the
 parameters in force, with a factor of 24000 to spare at `MSGS = 1000`. The 762
-this said until the sweep of Section 13 is the same quantity at the 39-bit
-basis, which Section 9 replaced.
+this said until the sweep of Section 12 is the same quantity at the 39-bit
+basis, which Section 8 replaced.
 
 **The cost is one assumption the mix-net did not make before:** MSIS modulo each
-prime of the basis. It is genuinely additional, and Section 9 says why in
+prime of the basis. It is genuinely additional, and Section 8 says why in
 one line: modulo `q` the binding lattice has no short vector to find at all —
 `lambda_1` is about `2^27` against a bound of `2^21.5` — while reducing modulo
 `p_j` shrinks the determinant by half and brings `lambda_1` down to about
@@ -527,17 +497,17 @@ given the above:
    `2^77.5`, and NFLlib's `uint64` arithmetic caps a single modulus at 62 bits.
    The composite modulus is forced, and so is everything that follows from it.
 
-### 6.5 The AEx proof's parameters, and its two passes
+### 5.5 The AEx proof's parameters, and its two passes
 
 Nothing in this document had read `pismall.cpp`, which is the largest file here.
 This is what its numbers are, checked against Lemma 2 of the paper.
 
 **The parameters check out.** The Reed-Solomon code has length `l = 16384` and
 message `2N + ETA = 8517`, so its rate is 0.52 and its relative distance 0.48,
-which is what Section 7 quotes. Lemma 2's column-opening terms are
+which is what Section 6 quotes. Lemma 2's column-opening terms are
 `2 (g / (l - eta))^eta` and `2 (1 - 2 (g - g') / 3l)^eta` with `g' <= g <= l`,
 and the `g` that balances them is 13078, where both are `2^-95`. So `ETA = 325`
-buys `2^-95` and not the `2^-82` Section 7 quotes; the quote is a safe one.
+buys `2^-95` and not the `2^-82` Section 6 quotes; the quote is a safe one.
 
 **The term that dominates is the algebraic one**, which is Lemma 2's
 `18 tau / (q - tau)`. Taken over `Z_q` that reads `2^-88`, but the ring is
@@ -545,13 +515,13 @@ split and an adversary can work modulo one prime, which is exactly why this
 file draws its challenges from
 `GR(q,2)` instead: the per-slot space is `p_min^2` and the term is
 `18 TAU / p_min^2`, which is **`2^-73.8`** at `TAU = 1024` and the 44-bit basis.
-Section 7's `2^-66` a pass is the same quantity at the old 39-bit primes.
+Section 6's `2^-66` a pass is the same quantity at the old 39-bit primes.
 
 **And the two passes were not bound to each other.** `AEX_REPS = 2` exists
 because one pass is not enough, and the comment on it says the passes are
 independent, which is exactly the trouble: `pismall_hash` takes that pass's
 Merkle root and that pass's commitment and nothing else, and `aex_sample_I`
-takes that pass's root and that pass's openings. So this is Section 7.1 again,
+takes that pass's root and that pass's openings. So this is Section 6.1 again,
 one level down. A prover re-randomises the commitment of one pass — which is
 cheap, the messages staying put — until that pass's challenges suit it, keeps
 it, and moves to the other:
@@ -562,13 +532,13 @@ as built     2 * p_min^2 / 18 TAU  = 2^75 queries
 ```
 
 **It was a claim not met rather than a practical attack**, which is the
-difference between this and 8.1. A query here costs a BDLOP commitment and the
+difference between this and 7.1. A query here costs a BDLOP commitment and the
 derivation of `2 + 6 TAU` extension-field challenges, some tenths of a
-millisecond, so `2^75` of them is astronomical wall-clock; the `2^46` of 8.1 was
+millisecond, so `2^75` of them is astronomical wall-clock; the `2^46` of 7.1 was
 days. But `LEVEL` is a count of queries, and by that count `Pi_SMALL` was the
 weakest thing in the protocol at `2^75`, below `Pi_BND`'s `2^-130`.
 
-**The repair is 7.1's in principle and dearer in practice.** One hash over both
+**The repair is 6.1's in principle and dearer in practice.** One hash over both
 passes' first messages, yielding both passes' challenges, is the shape `run()`
 now has — but a pass's first message is a Merkle root over its codewords, and
 the codewords are `H[TAU][3][V]` at 256 KB each, **3.75 GB** at `TAU = 1024`.
@@ -615,7 +585,7 @@ the columns are hashed from the openings, so a prover can re-roll the openings'
 masks to move the column set without disturbing the algebraic challenges. That
 one is worth `2^95`, so it is not the way in.
 
-## 7. Soundness error of the product argument
+## 6. Soundness error of the product argument
 
 Lemma 2 of ePrint 2025/658 (Schwartz-Zippel over a ring) needs a challenge set
 whose pairwise differences are not zero divisors. The challenges here are
@@ -636,17 +606,17 @@ four passes at `MSGS = 2` for `2^-168`, four at `MSGS = 1000` for `2^-132`, five
 at `MSGS = 4096` for `2^-155`.
 
 This is the argument for an interactive verifier, and under Fiat-Shamir it has
-to be built into the hashing. **Section 7.1 reports that it was not**, and what
+to be built into the hashing. **Section 6.1 reports that it was not**, and what
 it took to repair the outermost layer of it. Everything below about `2^-132`
 and `2^-176` is what the exponents are once every layer is bound; two of them
 are not yet.
 
 The prover's first message -- the commitments `P_i` to the `sigma_i` and the
-two sub-proofs of section 6 that place them in `D` -- is sent once and shared
+two sub-proofs of section 5 that place them in `D` -- is sent once and shared
 by every pass. That was true when this section was written, stopped being true
 when `rho` became a per-pass challenge and the commitment key became the
 `rho`-compressed one, and is true again now that the `sigma_i` are committed
-under the original key instead. It is the mechanism of 7.1 in both directions.
+under the original key instead. It is the mechanism of 6.1 in both directions.
 
 The alternative remedy is the one `pismall` uses, drawing the challenges from
 the quadratic Galois extension `GR(q,2)` so that a single challenge is worth
@@ -656,30 +626,30 @@ two passes, while lifting `a_i`, `b_i`, the masks `theta_i`, the published
 argument: about four times the size against five for plain repetition, in
 exchange for a protocol that would have to be designed rather than repeated.
 
-**Where this leaves the protocol**, once 7.1 is repaired and the exponents are
+**Where this leaves the protocol**, once 6.1 is repaired and the exponents are
 real. At `MSGS = 1000` the terms are `2^-132` for the product argument, about
 `2^-133` for `Pi_SMALL` — `2^-66` per pass from the
 `GR(q,2)` challenge, squared by its two repetitions, with the column-opening
 test at `2^-82` or better on 325 of 16384 columns at relative distance 0.48 —
 and `Pi_BND` at its own `NTI = 130`. The `Pi_SMALL` figure is now `2^-128`
-rather than the `2^-133` first written here: 6.5 reports that its two passes
+rather than the `2^-133` first written here: 5.5 reports that its two passes
 were not bound to each other, worth `2^75` between them, and that the repair
 was to make one pass enough. That leaves one term below `LEVEL`, and it
-is not one of these: Section 10 reports that the compression of the message
+is not one of these: Section 9 reports that the compression of the message
 components by `rho` costs `2^-44` a pass, and that it is now drawn inside them,
 because `rho` is drawn once outside them. Setting that aside, the binding
 constraint is the hardness of the lattice problems the commitment and the
-encryption rest on — with the caveat that section 6.4 adds one of them, MSIS
+encryption rest on — with the caveat that section 5.4 adds one of them, MSIS
 modulo each prime of the basis.
 
 These repetitions turn out to carry more than the term they were sized against.
-Section 8 reports that the linear proof is worth about `2^-44` per pass for an
+Section 7 reports that the linear proof is worth about `2^-44` per pass for an
 unrelated reason, and it is the same repetitions that would compose it to
-`2^-176` — once they compose at all, which is 7.1.
+`2^-176` — once they compose at all, which is 6.1.
 Removing them because the product argument had been strengthened by some other
 means would reopen that.
 
-### 7.1 The repetitions are not bound to each other
+### 6.1 The repetitions are not bound to each other
 
 Everything above multiplies the per-pass error only if a prover who fails a
 pass has to start over. Against an interactive verifier that is automatic: the
@@ -712,7 +682,7 @@ hash over the part of the input that moved, about 0.25 ms, so the four passes
 come to roughly 200 core-days: not a thought experiment. **The protocol's
 soundness against the attack it was rebuilt to stop is one pass, not four.**
 
-The same applies one level down. Section 8 reports that `Pi_LIN`'s challenge
+The same applies one level down. Section 7 reports that `Pi_LIN`'s challenge
 `beta` is worth `1 / p_min` per pass and concludes that the repetitions carry it
 to `2^-176`; they do not, for exactly this reason, and re-rolling a pass's `D_i`
 moves that pass's `beta` alone.
@@ -721,7 +691,7 @@ moves that pass's `beta` alone.
 only the input commitments, the output list and the pass index, all of which a
 prover fixes before it starts. It cannot move one pass's `rho` at all without
 changing the output list, which moves every pass's `rho` at once. That layer
-composes by construction, and Section 10's reading of it stands.
+composes by construction, and Section 9's reading of it stands.
 
 **Chaining is not the fix.** Making pass `l` hash the transcripts of passes
 before it leaves the grinding order intact: the prover settles pass 0, then
@@ -735,13 +705,13 @@ error to a power.
 **It costs memory, and that is the whole of the cost.** The passes currently
 run one after another through the same buffers. Binding them means holding
 every pass's first message at once: at `MSGS = 1000` the `P_i` and the `D_i`
-are 128 MB apiece per pass, and the sub-proofs of section 6 about 116 MB more,
+are 128 MB apiece per pass, and the sub-proofs of section 5 about 116 MB more,
 so roughly 370 MB a pass against the 3.7 GB the shuffle already takes. Four
 passes of that is an extra 1.1 GB and no extra proof size, since the same
 elements are published either way.
 
 **Or the `P_i` could go back to being shared**, which is what this section
-assumed before `rho` became a per-pass challenge. Section 10 already names the
+assumed before `rho` became a per-pass challenge. Section 9 already names the
 way, and it is what this branch now does: the `sigma_i` are committed under the
 original commitment key rather than the `rho`-compressed one, so the `P_i` and
 both sub-proofs are `rho`-independent. `run()` produces them once, before the
@@ -770,18 +740,18 @@ Gcycles the sub-proofs take.
 
 **The third layer was the `MSGS * SHUFFLE_REPS` instances of `Pi_LIN`**, each
 with its own `beta` over its own first message, each worth `1 / p_min` by
-Section 8 and each grindable on its own; a prover needs one forged linear proof
+Section 7 and each grindable on its own; a prover needs one forged linear proof
 per pass, so the protocol sat at `SHUFFLE_REPS / p_min`, about `2^46`. Binding
 those to each other is the wrong lever, since an abort anywhere would re-roll
 every challenge everywhere and all `MSGS * SHUFFLE_REPS` of them never accept at
-once. **Section 8.1 prices that route and the others** and records the one
+once. **Section 7.1 prices that route and the others** and records the one
 taken: each proof is now run `LIN_REPS = 3` times against challenges drawn from
 one hash of all three first messages, so a forged relation has to survive all of
 them, `2^-132` a relation and `2^-134` for the protocol.
 
-## 8. The challenge sets of the Sigma-protocols
+## 7. The challenge sets of the Sigma-protocols
 
-The same disease reaches one level lower than sections 2 and 7, into the
+The same disease reaches one level lower than sections 2 and 6, into the
 challenge sets themselves, and it had not been looked at.
 
 `lin_hash` draws the challenge `beta` of the linear proof with
@@ -820,17 +790,17 @@ by Fiat-Shamir, so this is grindable rather than merely unlucky: re-committing
 `D_i` to the same message with fresh randomness moves `beta` without moving that
 message. So the honest reading is **44 bits per repetition, not 128**, and
 there is no soundness proof at all, since the extraction argument needs the
-invertibility the test denies. Section 8.1 is what makes that survivable: the
+invertibility the test denies. Section 7.1 is what makes that survivable: the
 proof is run `LIN_REPS` times against challenges bound to one another, so the
 44 bits multiply.
 
-**What was supposed to cover it.** Section 7 repeats everything after the first
+**What was supposed to cover it.** Section 6 repeats everything after the first
 message `SHUFFLE_REPS` times with independent challenges, and a prover whose
 output list is not a permutation has to defeat every pass, each with its own
 `beta`; at four or five passes that would compose to `2^-176` or better. This
 was not the reason the repetitions were introduced — they were sized against
 the `2^-34` of the product argument, which is the weaker term — but they were
-expected to cover this as well. **Section 7.1 reports that they do not compose
+expected to cover this as well. **Section 6.1 reports that they do not compose
 as built**: each pass's `beta` is a hash of that pass's messages alone, so a
 prover re-rolls one pass's `D_i` and leaves the rest standing. Until the passes
 are bound, this term is `2^-44` and grindable, not `2^-176`.
@@ -866,7 +836,7 @@ is 10 at `N = 4096` and the proof would be **13 times smaller**. It was
 implemented, measured and put aside, because the two instantiations do not
 differ only in size: Theorem 2's extractor multiplies by the `g` of Lemma 4,
 whose `l2` norm is up to `sqrt(d)`, so what it returns is `2 sqrt(d) B` rather
-than `2 B` — a factor of 64 here. That slack is exactly what Section 9's
+than `2 B` — a factor of 64 here. That slack is exactly what Section 8's
 `B_DDec` is made of. At the same `sigma` the decryption bound moves from
 `2^84.4` to `2^88.6`, past the `q/2 = 2^87` this branch's modulus offers, so
 taking the 13x means widening `q` by three or four bits and paying about eight
@@ -877,9 +847,9 @@ one place where this repository could still be made substantially smaller.
 with the factor fixed to one, so nothing there depends on a challenge being
 invertible.
 
-### 8.1 What it would take to make `Pi_LIN` worth `LEVEL`
+### 7.1 What it would take to make `Pi_LIN` worth `LEVEL`
 
-Section 7.1 left the protocol at about `2^46`: a prover needs one forged linear
+Section 6.1 left the protocol at about `2^46`: a prover needs one forged linear
 relation per pass, each instance was worth `1 / p_min`, and each was ground on
 its own. The lever this section pointed at was the challenge set, and it is not
 the one: the obvious repair is worse than what was there and the elegant one
@@ -903,7 +873,7 @@ The sizes below are of the published elements at `MSGS = 1000`: per pass the
 | amortize them | — | — | does not apply here, see below |
 | **repeat each one `LIN_REPS` times** | `2^-132` | `2^-134` | **`-13%`, and taken** |
 
-**Monomials are the trap.** They do fix what Section 8 says is broken: Lemma 4
+**Monomials are the trap.** They do fix what Section 7 says is broken: Lemma 4
 of [8] gives `2 (X^i - X^j)^-1` integer coefficients in `{-1,0,1}`, and `q` is
 odd, so a monomial difference really is invertible in `R_q` and the extractor
 really does work. But the challenge set has `2N + 1 = 2^13` elements, so a
@@ -913,16 +883,16 @@ protocol would get an extraction argument and lose 31 bits.
 **Binding is cheaper than it looks, and the reason is where the bits are.**
 One hash over every linear proof's first message, drawing an independent `beta`
 for each, forces the prover to land four forgeries at once: `2^-176`. Section
-7.1 objects that an abort anywhere would then re-roll everything, and the
-answer is the one 9.1 already used, a single rejection test over the whole
+6.1 objects that an abort anywhere would then re-roll everything, and the
+answer is the one 8.1 already used, a single rejection test over the whole
 concatenation. Acceptance near a half wants `sigma` about three times the norm
-being masked, which the measurements of 9.1 confirm at three openings; over the
+being masked, which the measurements of 8.1 confirm at three openings; over the
 `12000` openings of a whole proof that norm is `765 sqrt(12000)` and `sigma_C`
 goes from `2^12` to about `2^18`. That lands only on the `z`, which is 90 of
 the 480 MB of a pass, so the proof grows by about **6%**, not the quarter I
 guessed before counting. What it costs is elsewhere: `8 sigma sqrt(N)` rises
 from `2^21` to `2^27`, so two openings that short differ by `2^28`, past the
-`lambda_1` of the binding lattice in Section 9. **The commitment stops being
+`lambda_1` of the binding lattice in Section 8. **The commitment stops being
 statistically binding and MSIS modulo `q` comes back as an assumption.**
 Batching per pass instead of per proof only halves the excess — `sigma_C` at
 `2^17`, a difference of `2^27` exactly at `lambda_1` — and costs four passes'
@@ -938,7 +908,7 @@ shape combines statements with **small** coefficients, and that is what fails
 here: `shuffle_coeffs` gives each relation `coef[0] = beta` or `s[l-1]` and
 `coef[1] = raw tau`, all uniform elements of `R_q`. Any combination of the
 openings weighted by them has norm about `q`, a masked opening at that size is
-far above the `lambda_1` of Section 9's binding lattice, and binding says
+far above the `lambda_1` of Section 8's binding lattice, and binding says
 nothing about openings that are not short -- so the proof it would carry is
 vacuous.
 
@@ -952,7 +922,7 @@ commitments through `A1` as the first family is: the extractor then has short
 `A1` with `A2` image `-L_l`. Binding kills such a difference only when it is
 short, and this one is not, so `L_l` is free to be non-zero. Making the relation
 amortizable means making its coefficients small, which means a different product
-argument -- or the general-purpose route of Section 6.4's alternative 1, where
+argument -- or the general-purpose route of Section 5.4's alternative 1, where
 one proof system handles the whole membership and product statement and this
 question does not arise.
 
@@ -967,8 +937,8 @@ moves every one, so a forged relation has to survive all of them at once:
 It avoids everything that made binding across proofs unaffordable. The binding
 is local to one relation, so an abort re-rolls that relation's `3 LIN_REPS = 9`
 openings and not the four thousand proofs of a shuffle: the batched rejection
-test of 9.1 covers them, `M` is `1.17` and acceptance `0.43`, and `sigma_C`
-does not move at all. Section 9's binding margin is therefore untouched, and no
+test of 8.1 covers them, `M` is `1.17` and acceptance `0.43`, and `sigma_C`
+does not move at all. Section 8's binding margin is therefore untouched, and no
 assumption is added.
 
 **And the budget was already there.** Each proof was sending `t, tp, t'` and `u`
@@ -986,7 +956,7 @@ Dropping it pays for the extra repetitions and more:
 | **per pass** | **405 MB** | **404 MB** |
 
 with `P_i`, `Pi_SMALL` and `Pi_BND` a further 206 MB once for all passes. The
-proof is **1822 KB a vote against 2094**, which 6.5 then takes to 1790; the
+proof is **1822 KB a vote against 2094**, which 5.5 then takes to 1790; the
 prover's linear proofs cost 3.8 times what they did — 362 against 95 Mcycles —
 and the `shuffle-proof`
 benchmark at `MSGS = 4` goes from 14.3 to 31.9 Gcycles. Memory at `MSGS = 1000`
@@ -1020,9 +990,9 @@ minimum over the layers and the only one below the line, which is what makes it
 the thing to fix next and not a reason to distrust the rest.
 
 Against the claim, `LEVEL = 128` is not met by the implementation. In
-proportion: before the repetitions of Section 7 the product argument alone was
+proportion: before the repetitions of Section 6 the product argument alone was
 `2^-34` in a single pass, so this is `2^12` better than the state they were
-introduced to fix, and it is a documented gap of the same kind as 6.2 and 8
+introduced to fix, and it is a documented gap of the same kind as 5.2 and 8
 rather than a regression.
 
 The obvious parameter mitigation does not work. The per-instance error is
@@ -1031,7 +1001,7 @@ directly: 62-bit primes would give `2^-62` per instance and `2^64` of work. But
 `q` at 124 bits costs about 2.2 bits of lattice security per bit of `q`, which
 takes the encryption from `2^158` to roughly `2^78`. Not viable at `N = 4096`.
 
-## 9. The decryption phase: `B_DDec` and the size of `q`
+## 8. The decryption phase: `B_DDec` and the size of `q`
 
 This one is not about the proof of shuffle, and it is recorded here only
 because nowhere else in the repository is.
@@ -1066,7 +1036,7 @@ constant is for the two-sided rejection sampling of their Lemma 1, and this
 implementation runs the one-sided variant, whose constant is the 0.954 below.
 
 Measurement agrees, and pins the exponents rather than the form alone.
-Instrumenting `pibnd_rej_sampling`, with the `{0,1}` challenge set of Section 8:
+Instrumenting `pibnd_rej_sampling`, with the `{0,1}` challenge set of Section 7:
 
 | change | change in `||S'C'||` |
 | --- | --- |
@@ -1092,7 +1062,7 @@ zero-knowledge at any `sigma` above that, and the old ternary challenges, which
 left the ratio at 1.35, were fine on this count.
 
 `M` is no longer fixed: it is taken from the `||S'C'||^2` the function has
-already computed, as section 9.1 does for `Pi_LIN` and as the paper's own text
+already computed, as section 8.1 does for `Pi_LIN` and as the paper's own text
 specifies for `b = 1`. That makes no `sigma` invalid — a small one costs
 restarts and nothing else — and it removes the only thing the 0.954 was ever
 load-bearing for. At the 86 the file now runs at, `M` is `1.00007` and the
@@ -1120,7 +1090,7 @@ what an argued bound, rather than a fitted one, would have to settle. But
 give 28 bits a pass and **five passes where 44-bit primes give four**. Elements
 11% narrower, 25% more of them, is a proof 11% larger. Four passes survive only
 while `floor(log2 p_min) >= 42`: two 43-bit primes, `q = 86`, worth 2% of the
-sizes in section 11 and about four bits of lattice security rather than the
+sizes in section 10 and about four bits of lattice security rather than the
 twenty-two the widening spent.
 
 So the six bits are real but mostly unspendable here. They are worth having in
@@ -1135,7 +1105,7 @@ that is in the sources.
 the corrected bound needs `q > 2^84.4`, so the RNS basis moved from two 39-bit
 primes to two 44-bit ones and `q` from 78 to 88 bits. Two moduli still, so a
 ring element is the same 64 KiB, and `p_min` rising to `2^44` improves Sections
-7, 8 and 10 by five bits each into the bargain.
+6, 7 and 9 by five bits each into the bargain.
 
 **What it costs in security, measured.** The paper ties `N = 4096` to `q` being
 large, so raising `q` with `N` and the noise fixed makes every MLWE instance
@@ -1182,7 +1152,7 @@ needed `HEIGHT + 2` rows and so `SIZE >= 3` for `pismall`'s own commitment. With
 `g(i) = i` that relation is `HEIGHT + 1` rows, the requirement is gone, and the
 shuffle is built at the default again. It must stay there.
 
-### 9.1 The rejection sampling of the linear proof, which had lost a step
+### 8.1 The rejection sampling of the linear proof, which had lost a step
 
 `rej_sampling` in `src/shuffle.cpp` masks the three openings of every `Pi_LIN`
 instance, and it was the same procedure as `pibnd_rej_sampling` above with one
@@ -1246,7 +1216,7 @@ the old budget of 64 would have given up on one proof in 2400 and a shuffle at
 it is kept because a cap is only reached when the witness is long, and costs
 nothing when it is not.
 
-## 10. The compression by rho
+## 9. The compression by rho
 
 Each message is a tuple of `SIZE` ring elements, and the proof of shuffle does
 not work on tuples. `run()` folds them into one value first,
@@ -1277,14 +1247,14 @@ accepted an output list that was demonstrably not a permutation of the input.
   collision computed for one list is not a collision for the list that induces
   it. The test now builds the collision against the `rho` the honest list
   induces — the best a prover can do without grinding — and the proof rejects.
-* `rho` is drawn afresh in each pass, so the repetitions of Section 7 amplify
+* `rho` is drawn afresh in each pass, so the repetitions of Section 6 amplify
   the residual `1 / p_min` the way they cover the product argument. This one
   amplifies whatever 7.1 does, because `rho` is a hash of the input commitments
   and the output list alone: a prover cannot move one pass's `rho` without
   changing the list, and that moves all of them. What it did cost was the
-  structure 7.1 reports — the compression, the key it induces and everything
+  structure 6.1 reports — the compression, the key it induces and everything
   committed under that key moved inside the pass, which is what left each pass
-  free-standing. 7.1 puts the `sigma_i` and their sub-proofs back outside by
+  free-standing. 6.1 puts the `sigma_i` and their sub-proofs back outside by
   committing them under the original key; the compression itself stays in.
 
 The cost of the second is real: the membership sub-proofs are produced
@@ -1295,7 +1265,7 @@ worth making; the cheaper structure, if it is ever wanted, is to commit the
 makes them and their sub-proofs `rho`-independent again at the cost of a second
 key threaded through `lin_prover` and `lin_verifier`.
 
-## 11. Coverage: what has been looked at
+## 10. Coverage: what has been looked at
 
 A document about what is established should say where the looking stopped.
 
@@ -1308,17 +1278,27 @@ all go through `util::equal`. That fits the pattern of everything above — the
 splitting ring breaks *proofs*, not the encryption.
 
 **Reviewed and found wanting**, each with its own section: the binding of the
-repetitions to each other (7.1, the most serious of these, repaired for the
+repetitions to each other (6.1, the most serious of these, repaired for the
 passes and open for the linear proofs inside them), the coefficient sets
-of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8, now
+of `Pi_SMALL` (5.2), the challenge set of `Pi_LIN` (7) and of `Pi_BND` (7, now
 repaired), the slack bound feeding `q` and the six bits it now carries for
-nothing (9), the rejection sampling of `Pi_LIN` (9.1), the compression by
-`rho` (10), the mask of the AEx proof and the two ways to publish an abandoned
-one (5.1), the abort in `simul_inverse` (5.2), and the two passes of the AEx
-proof (6.5).
+nothing (8), the rejection sampling of `Pi_LIN` (8.1), the compression by
+`rho` (9), the mask of the AEx proof and the two ways to publish an abandoned
+one (4.1), the abort in `simul_inverse` (4.2), and the two passes of the AEx
+proof (5.5).
+
+**Fixed on `main`, and not this branch's work.** The verifier's equality checks
+compared a single CRT slot of 8192, NFLlib's `operator==` on polynomials being
+element-wise and its `operator bool` being "some coefficient is non-zero".
+`util::equal` and `util::is_zero` in `include/util.hpp` replaced them, and that
+fix landed on `main` separately along with the same correction to `bgv.cpp`'s
+assertions; this branch inherits it by merge. Lemma 5 does need it — a CRT-mixed
+list fails the last relation only in the slots of one prime, so the old check
+would have accepted what Section 3 rejects — but the detail belongs with the
+commit that made it, not here.
 
 **Not reviewed.** The linear proof's own soundness beyond its challenge set and
-its masking; the extraction argument of the AEx proof, 6.5 having checked its
+its masking; the extraction argument of the AEx proof, 5.5 having checked its
 parameters and the composition of its passes but not the proof of Lemma 2
 itself; and `vericrypt`/the ballot-submission side, which this repository does
 not implement. The proof of shuffle's simulator is now 5.2, which is a review of
@@ -1339,62 +1319,61 @@ The first messages of the linear proofs are not in the table because they are
 not sent: 8.1 replaced them with a hash the verifier checks by rebuilding them,
 which is what paid for the repetitions. `Pi_SMALL` is almost all opened
 columns, `ETA * V * 3 * ceil(q/8)` per relation and flat per vote, which is
-what 6.5's trade of `ETA` against `AEX_REPS` moves. The growth from the
-523 KB per vote this branch started at is almost all Section 7's repetitions,
+what 5.5's trade of `ETA` against `AEX_REPS` moves. The growth from the
+523 KB per vote this branch started at is almost all Section 6's repetitions,
 which multiply everything including the sub-proofs now that `rho` is drawn
 inside them; the wider `q` adds 13%. For scale, the mixnet of ePrint 2025/658
 reports 110 KB per user per server for shuffle *and* decryption together.
 
-## 12. Summary
+## 11. Summary
 
 | | before | on this branch |
 | --- | --- | --- |
 | product identity | `prod a_i = prod b_i` | Lemma 5, `g(i) = i` |
 | CRT-mixed messages | accepted | rejected |
-| membership `sigma_i in D` | not proven at all | `Pi_SMALL` and `Pi_BND`, see 6 |
-| algebraic half of membership | n/a | exact over `Z_q`, see 6.1 |
-| `sigma_i` not a ring constant | accepted | rejected, exactly, see 6.1 |
+| membership `sigma_i in D` | not proven at all | `Pi_SMALL` and `Pi_BND`, see 5 |
+| algebraic half of membership | n/a | exact over `Z_q`, see 5.1 |
+| `sigma_i` not a ring constant | accepted | rejected, exactly, see 5.1 |
 | CRT-mixed `sigma_i` | accepted | rejected, by the norm bound |
-| the *other* sets of `Pi_SMALL` | per CRT component | per CRT component, see 6.2 |
-| the two sub-proofs as one opening | n/a | argued modulo each `p_j`, see 6.4 |
-| challenge set of `Pi_BND` | ternary, in neither instantiation | `{0,1}`, the paper's own, see 8 |
-| `sigma_Bnd` against `\|S'C'\|` | 1.35, sized for ternary challenges | 86, where 0.954 suffices: six bits of slack, see 9 |
-| masking of `Pi_LIN` | one-time constants, two-sided test | halfspace test back, `M` from the paper, see 9.1 |
-| challenge differences of `Pi_LIN` | assumed invertible | **zero divisors, see Section 8** |
-| soundness error of `Pi_LIN` | `~2^-39`, unnoticed | `2^-44` an instance, `2^-132` by `LIN_REPS`, see 8.1 |
-| assumptions | MSIS and MLWE mod `q` | and MSIS mod each `p_j`, see 6.4 |
-| verifier equality | one slot in 8192 | all slots |
-| soundness error of the product argument | `~2^-29` | `~2^-132`, once the passes were bound to one first message, see 7.1 |
-| the passes under Fiat-Shamir | ground one at a time | `tau, mu, beta` bound across passes, see 7.1 |
-| `Pi_LIN`'s own challenges | one per proof, ground one at a time | `LIN_REPS` from one hash, `2^-134` for the protocol, see 8.1 |
-| first messages of `Pi_LIN` | sent, 180 MB a pass | rebuilt by the verifier, see 8.1 |
-| the AEx proof's two passes | ground one at a time, `2^75` | one pass over `GR(q,4)`, `2^-128`, see 6.5 |
-| a singular `b_i` | aborts, and says which permutation | restarts the pass, see 5.2 |
-| `Pi_SMALL` and `Pi_BND` | once per pass | once for all passes, `-14%` and `6.5x`, see 7.1 |
-| compression of the components by `rho` | free, `rho` not a challenge | `~2^-176`, see Section 10 |
-| `q` | 78 bits | 88 bits, see Section 9 |
-| lattice security | claimed 128 bits | `2^158` encryption, `2^156` hiding, see 9 |
-| commitment binding | MSIS mod `q` | statistical, no assumption, see 9 |
-| mask on the published `s_i` | ternary | uniform, see Section 5 |
-| mask of the AEx proof | fixed seed | seeded from the OS, see 5.1 |
-| a prover that abandons masking | publishes and verifies | refused, see 5.1 |
+| the *other* sets of `Pi_SMALL` | per CRT component | per CRT component, see 5.2 |
+| the two sub-proofs as one opening | n/a | argued modulo each `p_j`, see 5.4 |
+| challenge set of `Pi_BND` | ternary, in neither instantiation | `{0,1}`, the paper's own, see 7 |
+| `sigma_Bnd` against `\|S'C'\|` | 1.35, sized for ternary challenges | 86, where 0.954 suffices: six bits of slack, see 8 |
+| masking of `Pi_LIN` | one-time constants, two-sided test | halfspace test back, `M` from the paper, see 8.1 |
+| challenge differences of `Pi_LIN` | assumed invertible | **zero divisors, see Section 7** |
+| soundness error of `Pi_LIN` | `~2^-39`, unnoticed | `2^-44` an instance, `2^-132` by `LIN_REPS`, see 7.1 |
+| assumptions | MSIS and MLWE mod `q` | and MSIS mod each `p_j`, see 5.4 |
+| soundness error of the product argument | `~2^-29` | `~2^-132`, once the passes were bound to one first message, see 6.1 |
+| the passes under Fiat-Shamir | ground one at a time | `tau, mu, beta` bound across passes, see 6.1 |
+| `Pi_LIN`'s own challenges | one per proof, ground one at a time | `LIN_REPS` from one hash, `2^-134` for the protocol, see 7.1 |
+| first messages of `Pi_LIN` | sent, 180 MB a pass | rebuilt by the verifier, see 7.1 |
+| the AEx proof's two passes | ground one at a time, `2^75` | one pass over `GR(q,4)`, `2^-128`, see 5.5 |
+| a singular `b_i` | aborts, and says which permutation | restarts the pass, see 4.2 |
+| `Pi_SMALL` and `Pi_BND` | once per pass | once for all passes, `-14%` and `6.5x`, see 6.1 |
+| compression of the components by `rho` | free, `rho` not a challenge | `~2^-176`, see Section 9 |
+| `q` | 78 bits | 88 bits, see Section 8 |
+| lattice security | claimed 128 bits | `2^158` encryption, `2^156` hiding, see 8 |
+| commitment binding | MSIS mod `q` | statistical, no assumption, see 8 |
+| mask on the published `s_i` | ternary | uniform, see Section 4 |
+| mask of the AEx proof | fixed seed | seeded from the OS, see 4.1 |
+| a prover that abandons masking | publishes and verifies | refused, see 4.1 |
 
-## 13. What these numbers were checked against
+## 12. What these numbers were checked against
 
 A document like this accumulates figures that were right when they were written
 and stopped being right when a parameter moved underneath them. Five were found
 that way in the course of one day's work — `2^-29` for a pass of the product
 argument, `2^-26` for the singular case of `simul_inverse`, `2^-66` and `2^-82`
-for `Pi_SMALL`, and a factor of 762 in 6.4 — each correct at the 39-bit basis
-Section 9 replaced, and each believed until it was recomputed. So this section
+for `Pi_SMALL`, and a factor of 762 in 5.4 — each correct at the 39-bit basis
+Section 8 replaced, and each believed until it was recomputed. So this section
 records a sweep of the whole document against the sources as they stand, what it
 found, and what it could not check.
 
-**Corrected by the sweep.** 6.4's margin, `762`, which is 24000 at the current
-basis. Section 9's `q > 2^84.7`, which recomputes to `2^84.4`. Three rows of
-Section 12: `Pi_LIN`'s soundness error, which 8.1 moved from `2^-176`-by-the-
-repetitions to `2^-132` by `LIN_REPS`; `Pi_LIN`'s own challenges, which 8.1
-closed and the table still called open; and the rows missing for 5.2, 6.5 and
+**Corrected by the sweep.** 5.4's margin, `762`, which is 24000 at the current
+basis. Section 8's `q > 2^84.7`, which recomputes to `2^84.4`. Three rows of
+Section 11: `Pi_LIN`'s soundness error, which 8.1 moved from `2^-176`-by-the-
+repetitions to `2^-132` by `LIN_REPS`; `Pi_LIN`'s own challenges, which 7.1
+closed and the table still called open; and the rows missing for 4.2, 5.5 and
 8.1. And the memory figure in the README, which was an estimate rather than a
 measurement, and wrong by a factor of three.
 
@@ -1414,16 +1393,16 @@ code's constants, not a measurement: the machine this was written on has 15 GB
 and 13.8 of them are not available. The largest instances actually executed are
 `MSGS = 64` for the shuffle, `TAU = 32` for `Pi_BND` and `TAU = 16` for the AEx
 proof. The soundness arguments do not depend on the size, but the size and
-memory claims of Section 11 and the README do, and they remain extrapolations
+memory claims of Section 10 and the README do, and they remain extrapolations
 from a measured slope.
 
-**What could not be checked here.** The lattice-security figures of Section 9
+**What could not be checked here.** The lattice-security figures of Section 8
 are estimator runs from an earlier session and were not repeated. The proof
-sizes of Section 11 are arithmetic from the parameters rather than measurements
+sizes of Section 10 are arithmetic from the parameters rather than measurements
 of a serialised proof, because nothing in this repository serialises one.
 
-**What is most likely to rot next.** Anything keyed to `p_min`: 6.4's margin,
-Section 7's pass count, Section 8's `2^-44`, 8.1's `LIN_REPS` and 6.5's two
+**What is most likely to rot next.** Anything keyed to `p_min`: 5.4's margin,
+Section 6's pass count, Section 7's `2^-44`, 7.1's `LIN_REPS` and 5.5's two
 terms all move together if the RNS basis moves again. Then the sizes, if
 `LIN_REPS`, `ETA` or `AEX_REPS` change. The benchmarks are single runs on a
 loaded machine and should be read as ratios, not absolutes.

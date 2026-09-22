@@ -50,7 +50,7 @@ int pibnd_short_verify(pibnd_short_t * pi, comkey_t & key, commit_t * P,
 
 /**
  * The l2-norm bound the verifier enforces on each masked opening. The argument
- * of SOUNDNESS.md section 6.4 reads two congruences modulo the primes of the
+ * of SOUNDNESS.md section 5.4 reads two congruences modulo the primes of the
  * basis as equalities over the integers, which needs twice this bound, plus
  * the slack of a challenge difference, to stay below p_min / 2.
  */

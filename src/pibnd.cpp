@@ -79,7 +79,7 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
  * so no value of sigma is invalid: a small one only costs restarts, at
  * 1 / 2 exp(||S'C'||^2 / 2 sigma^2) each. The 0.954 above is what that trade
  * settles at for a fixed M of sqrt(3), and 86 times it is about six bits more
- * than the norm bound needs. See SOUNDNESS.md section 9 for where they can be
+ * than the norm bound needs. See SOUNDNESS.md section 8 for where they can be
  * spent: the decryption phase, whose q answers to this bound alone, rather
  * than the shuffle, whose q is pinned from below by the pass count of its
  * product argument.
@@ -224,7 +224,7 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	 * the sqrt(3) this used to divide by is what the constant would have to be
 	 * if sigma were the 0.954 ||S'C'|| the paper sizes for, and sigma is 86
 	 * times that, so the fixed constant was costing restarts and nothing else.
-	 * See SOUNDNESS.md section 9. */
+	 * See SOUNDNESS.md section 8. */
 	M = exp(mpz_get_d(norm) / (2.0 * s2));
 	result = mpz_get_d(dot) < 0;
 	r = -2.0 * mpz_get_d(dot) + mpz_get_d(norm);
@@ -294,7 +294,7 @@ void pibnd_sample_chall(params::poly_q & f) {
  * needs it: it subtracts two transcripts differing in one entry and divides by
  * the difference, which here is +-1. A ternary polynomial, which this used to
  * draw, need not be invertible in a ring splitting into 2N factors -- see
- * SOUNDNESS.md section 8 -- so the proof ran outside the argument it cites. */
+ * SOUNDNESS.md section 7 -- so the proof ran outside the argument it cites. */
 static void pibnd_sample_c(params::poly_q & c) {
 	uint8_t b;
 

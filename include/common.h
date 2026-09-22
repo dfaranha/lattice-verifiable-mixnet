@@ -63,7 +63,7 @@ namespace params {
     /* Two 44-bit RNS moduli, so q is 88 bits. The paper analyses 78, but its
      * bound on the slack of Pi_BND drops a factor that proof's own correctness
      * analysis requires, and with it restored 2^78 is about five bits short of
-     * B_Dec + B_DDec < q/2; see SOUNDNESS.md section 9. Two moduli still, so a
+     * B_Dec + B_DDec < q/2; see SOUNDNESS.md section 8. Two moduli still, so a
      * ring element is the same 64 KiB it was. */
     using poly_q = nfl::poly_from_modulus<uint64_t, DEGREE, 88>;
     using poly_big = nfl::poly_from_modulus<uint64_t, 4 * DEGREE, 88>;

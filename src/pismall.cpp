@@ -19,7 +19,7 @@
  * g' <= g <= l, with g' = 2N + ETA the message length and l = AEX_COLS the code
  * length. The two balance at g = 13000-odd, and 451 is where that crosses
  * 2^-LEVEL; 452 for a little room. It used to be 325, which is 2^-95 -- enough
- * when the proof was run twice, and this one runs once. See SOUNDNESS.md 6.5.
+ * when the proof was run twice, and this one runs once. See SOUNDNESS.md 5.5.
  */
 #define ETA         452
 /* Shape of the relation. The mix-net's own instance of this proof has
@@ -50,7 +50,7 @@
  * and gamble on the other alone. Drawing it from the quadratic Galois
  * extension restores deg/p_min^AEX_DEG, because AEX_NR is a non-residue modulo
  * both primes and so Y^AEX_DEG - AEX_NR stays irreducible in each CRT
- * component. See the tower below, and SOUNDNESS.md section 6.5 for why the
+ * component. See the tower below, and SOUNDNESS.md section 5.5 for why the
  * degree is 4 and not 2.
  *
  * 3 is the smallest usable constant, and the RNS basis is picked for it: the
@@ -465,7 +465,7 @@ static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
  * 18 TAU / p_min^AEX_DEG, since the ring is split and an adversary works modulo
  * one prime: at AEX_DEG = 2 that is 2^-74, so two passes were needed, and
  * Fiat-Shamir then had to bind them to each other, which it did not -- see
- * SOUNDNESS.md 6.5. At AEX_DEG = 4 it is 2^-162, one pass carries the proof,
+ * SOUNDNESS.md 5.5. At AEX_DEG = 4 it is 2^-162, one pass carries the proof,
  * and there is nothing left to bind. */
 #define AEX_REPS    1
 
@@ -2499,7 +2499,7 @@ static void test(flint_rand_t rand) {
 		 * binary and sign sets, and it is why the proof of shuffle declares its
 		 * sigma_i AEX_SCALAR rather than using any of them: the singleton {0}
 		 * behind that declaration is the one set here that is exact over Z_q.
-		 * See SOUNDNESS.md, sections 6.1 and 6.2. Asserting the bug, so that a
+		 * See SOUNDNESS.md, sections 5.1 and 5.2. Asserting the bug, so that a
 		 * Pi_SMALL that became exact throughout would turn this test red. */
 		aex_open_t o;
 		params::poly_q z;

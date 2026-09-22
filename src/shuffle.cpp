@@ -82,7 +82,7 @@
  * opening, so reading them as statements about a single opening takes an
  * argument. It is made modulo each prime of the basis, and costs one extra
  * assumption, MSIS modulo each p_j and not only modulo their product. See
- * SOUNDNESS.md, section 6.4.
+ * SOUNDNESS.md, section 5.4.
  */
 
 /* Differences of distinct g(i) are non-zero integers below MSGS, and they have
@@ -106,7 +106,7 @@ static_assert((unsigned long long) MSGS <
  * tau and mu are hashed from the P_i, which run() sends once for every pass,
  * and beta from every pass's D_i at once, so re-rolling either re-rolls every
  * pass and these do multiply. The challenges inside Pi_LIN do not; see
- * SOUNDNESS.md section 7.1. */
+ * SOUNDNESS.md section 6.1. */
 static constexpr int shuffle_ilog2(unsigned long long x) {
 	return x <= 1 ? 0 : 1 + shuffle_ilog2(x >> 1);
 }
@@ -128,7 +128,7 @@ static constexpr int SHUFFLE_REPS = (LEVEL + SHUFFLE_BITS - 1) / SHUFFLE_BITS;
  * R_q and its final check reduces to beta L = 0 for the residual L of the
  * relation, so a prover whose committed messages violate it passes exactly when
  * beta vanishes in a slot where L does not: 1 / p_min, and no more, because the
- * challenge set has zero divisors -- see SOUNDNESS.md section 8. The LIN_REPS
+ * challenge set has zero divisors -- see SOUNDNESS.md section 7. The LIN_REPS
  * challenges come from one hash of all LIN_REPS first messages, so re-rolling
  * any of them re-rolls all, and a forged relation has to survive every one of
  * them at once: (1 / p_min)^LIN_REPS, which is what makes the repetitions
@@ -173,7 +173,7 @@ static void shuffle_alloc(void) {
 	/* d, _r and theta are the part of a pass that outlives it: every pass's
 	 * D_i has to exist before any beta is drawn, so they are dimensioned by
 	 * SHUFFLE_REPS as well and indexed d[rep * MSGS + i]. See SOUNDNESS.md
-	 * section 7.1. */
+	 * section 6.1. */
 	d = new commit_t[SHUFFLE_REPS * MSGS];
 	_r = new vector < params::poly_q >[SHUFFLE_REPS * MSGS];
 	cs = new commit_t[MSGS];
@@ -267,7 +267,7 @@ static void index_scalar(params::poly_q & out, size_t i) {
  * The middle commitment of the relation, the one to sigma_l, lives under a key
  * of its own: it is committed once and shared by every pass, while x and _x are
  * under the rho-compressed key of this pass. The two share A1 and differ only in
- * the A2 row. See SOUNDNESS.md sections 7.1 and 8.1. */
+ * the A2 row. See SOUNDNESS.md sections 6.1 and 7.1. */
 static void lin_hash(uint8_t hash[BLAKE3_OUT_LEN], comkey_t & key,
 		comkey_t & pkey, commit_t x, commit_t p, commit_t y,
 		params::poly_q coef[3], params::poly_q u[LIN_REPS],
@@ -327,7 +327,7 @@ static void lin_hash(uint8_t hash[BLAKE3_OUT_LEN], comkey_t & key,
  * free of zero divisors in this ring -- the test "KNOWN GAP: a challenge
  * difference can be a zero divisor" exhibits one -- so one of them is worth
  * only about 1 / p_min, and it is the repetitions that carry the proof to
- * LEVEL. See SOUNDNESS.md, sections 8 and 8.1. */
+ * LEVEL. See SOUNDNESS.md, sections 7 and 7.1. */
 static void lin_chal(params::poly_q beta[LIN_REPS],
 		const uint8_t hash[BLAKE3_OUT_LEN]) {
 	nfl::fastrandombytes_seed(hash);
@@ -394,7 +394,7 @@ static int simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
 	 * which is 2^-21 a pass at MSGS = 1000 and 2^-19 a shuffle. The event
 	 * depends on the sigma_i, so stopping on it would tell an observer
 	 * something about the permutation. The caller restarts instead, which moves
-	 * tau and mu and so moves the event. See SOUNDNESS.md section 5.2. */
+	 * tau and mu and so moves the event. See SOUNDNESS.md section 4.2. */
 	ok = poly_inverse(w, w);
 	if (!ok) {
 		return 0;
@@ -412,7 +412,7 @@ static int simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
  * three of them and they are folded into one pair: the rejection sampling
  * below is then Figure 2 run on the concatenation, which is the standard
  * procedure, pays the halfspace test once instead of three times and leaks one
- * bit rather than three. See SOUNDNESS.md section 9.1. */
+ * bit rather than three. See SOUNDNESS.md section 8.1. */
 static void rej_accum(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 		mpz_t dot, mpz_t norm) {
 	array < mpz_t, params::poly_q::degree > coeffs0, coeffs1;
@@ -737,7 +737,7 @@ static void shuffle_chal_hash(params::poly_q & tau, params::poly_q & mu,
 
 /* The challenge beta of every pass at once, from a hash of every pass's D_i.
  * Drawing them separately, from one pass's messages each, is what let a prover
- * settle the passes one at a time; see SOUNDNESS.md section 7.1. The statement
+ * settle the passes one at a time; see SOUNDNESS.md section 6.1. The statement
  * is hashed uncompressed -- the input commitments and the output list rather
  * than their rho-compressions -- since rho is hashed with them and the
  * compression follows from the two. */
@@ -867,7 +867,7 @@ static void shuffle_coeffs(params::poly_q coef[3], size_t l,
  * the element opened by each P_i is binary and that multiplying it by the
  * public 2 - sum_j x^j leaves every coefficient in {-1, 1}, which pins the
  * Hamming weight to one; pibnd bounds the norm of the openings, which is what
- * makes those coefficient sets exact over Z_q. See SOUNDNESS.md, section 6.
+ * makes those coefficient sets exact over Z_q. See SOUNDNESS.md, section 5.
  */
 static void shuffle_commit_sigma(commit_t p[MSGS],
 		vector < params::poly_q > pr[MSGS], params::poly_q sigma[MSGS],
@@ -1088,7 +1088,7 @@ static int run(vector < vector < params::poly_q >> m,
 	 * once, which is what makes the errors of the passes multiply; a first
 	 * message per pass would let a prover settle the passes one at a time. They
 	 * can be shared because they are committed under the original key rather
-	 * than the rho-compressed one of the pass. See SOUNDNESS.md section 7.1. */
+	 * than the rho-compressed one of the pass. See SOUNDNESS.md section 6.1. */
 	/* Every pass commits its D_i before any of them has a beta, for the same
 	 * reason: beta is a hash of all of them together. The compression and the
 	 * key it induces depend on rho and so stay inside the pass, recomputed in
@@ -1100,7 +1100,7 @@ static int run(vector < vector < params::poly_q >> m,
 	 * What moves it is fresh randomness in the P_i, which moves every pass's
 	 * tau and mu, so the restart reaches back that far and takes the two
 	 * sub-proofs with it. It happens about once in 2^19 shuffles at
-	 * MSGS = 1000; SHUFFLE_TRIES of them leave 2^-152. See SOUNDNESS.md 5.2. */
+	 * MSGS = 1000; SHUFFLE_TRIES of them leave 2^-152. See SOUNDNESS.md 4.2. */
 	do {
 		ready = 1;
 		shuffle_commit_sigma(pcom, pr, sigma.data(), key);
