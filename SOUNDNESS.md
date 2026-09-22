@@ -13,7 +13,8 @@ their product, and section 8 reports that the challenge set of the linear proof
 contains zero divisors, so that proof has no soundness argument of its own and
 is carried by the repetitions of section 7. Section 10 reports the one term the
 repetitions do not reach, the compression of the message components by `rho`,
-which stood at `2^-39` until `rho` was made a per-pass challenge. Section 8 also
+which stood at `2^-39` until `rho` was made a per-pass challenge. Section 13
+records what the figures here were checked against, and what has not been run. Section 8 also
 reports, and repairs, a challenge set of `Pi_BND` that belonged to neither
 instantiation of the amortized proof; Section 9 reports that `sigma_Bnd` is
 about six bits wider than it now needs to be as a result, and why only two of
@@ -479,7 +480,9 @@ conclusion is the invertibility Lemma 5 asks for, obtained without naming `D` at
 all — there is no membership statement to get wrong. And the inequality the
 argument turns on, `2 B` below `p_min`, is checked rather than assumed: the test
 `the norm bound leaves room for the CRT argument` compares them at the
-parameters in force, with a factor of 762 to spare at `MSGS = 1000`.
+parameters in force, with a factor of 24000 to spare at `MSGS = 1000`. The 762
+this said until the sweep of Section 13 is the same quantity at the 39-bit
+basis, which Section 9 replaced.
 
 **The cost is one assumption the mix-net did not make before:** MSIS modulo each
 prime of the basis. It is genuinely additional, and Section 9 says why in
@@ -1129,7 +1132,7 @@ a new RNS basis, and a fresh estimator run. Every number below is at the `q`
 that is in the sources.
 
 **`q` has been raised accordingly.** At `N = 4096`, `NTI = 130`, `tau = 1000`
-the corrected bound needs `q > 2^84.7`, so the RNS basis moved from two 39-bit
+the corrected bound needs `q > 2^84.4`, so the RNS basis moved from two 39-bit
 primes to two 44-bit ones and `q` from 78 to 88 bits. Two moduli still, so a
 ring element is the same 64 KiB, and `p_min` rising to `2^44` improves Sections
 7, 8 and 10 by five bits each into the bargain.
@@ -1358,12 +1361,15 @@ reports 110 KB per user per server for shuffle *and* decryption together.
 | `sigma_Bnd` against `\|S'C'\|` | 1.35, sized for ternary challenges | 86, where 0.954 suffices: six bits of slack, see 9 |
 | masking of `Pi_LIN` | one-time constants, two-sided test | halfspace test back, `M` from the paper, see 9.1 |
 | challenge differences of `Pi_LIN` | assumed invertible | **zero divisors, see Section 8** |
-| soundness error of `Pi_LIN` | `~2^-39`, unnoticed | `~2^-176` by the repetitions |
+| soundness error of `Pi_LIN` | `~2^-39`, unnoticed | `2^-44` an instance, `2^-132` by `LIN_REPS`, see 8.1 |
 | assumptions | MSIS and MLWE mod `q` | and MSIS mod each `p_j`, see 6.4 |
 | verifier equality | one slot in 8192 | all slots |
 | soundness error of the product argument | `~2^-29` | `~2^-132`, once the passes were bound to one first message, see 7.1 |
 | the passes under Fiat-Shamir | ground one at a time | `tau, mu, beta` bound across passes, see 7.1 |
-| `Pi_LIN`'s own challenges | one per proof, ground one at a time | **unchanged, `~2^46` for the protocol, see 7.1** |
+| `Pi_LIN`'s own challenges | one per proof, ground one at a time | `LIN_REPS` from one hash, `2^-134` for the protocol, see 8.1 |
+| first messages of `Pi_LIN` | sent, 180 MB a pass | rebuilt by the verifier, see 8.1 |
+| the AEx proof's two passes | ground one at a time, `2^75` | one pass over `GR(q,4)`, `2^-128`, see 6.5 |
+| a singular `b_i` | aborts, and says which permutation | restarts the pass, see 5.2 |
 | `Pi_SMALL` and `Pi_BND` | once per pass | once for all passes, `-14%` and `6.5x`, see 7.1 |
 | compression of the components by `rho` | free, `rho` not a challenge | `~2^-176`, see Section 10 |
 | `q` | 78 bits | 88 bits, see Section 9 |
@@ -1372,3 +1378,52 @@ reports 110 KB per user per server for shuffle *and* decryption together.
 | mask on the published `s_i` | ternary | uniform, see Section 5 |
 | mask of the AEx proof | fixed seed | seeded from the OS, see 5.1 |
 | a prover that abandons masking | publishes and verifies | refused, see 5.1 |
+
+## 13. What these numbers were checked against
+
+A document like this accumulates figures that were right when they were written
+and stopped being right when a parameter moved underneath them. Five were found
+that way in the course of one day's work — `2^-29` for a pass of the product
+argument, `2^-26` for the singular case of `simul_inverse`, `2^-66` and `2^-82`
+for `Pi_SMALL`, and a factor of 762 in 6.4 — each correct at the 39-bit basis
+Section 9 replaced, and each believed until it was recomputed. So this section
+records a sweep of the whole document against the sources as they stand, what it
+found, and what it could not check.
+
+**Corrected by the sweep.** 6.4's margin, `762`, which is 24000 at the current
+basis. Section 9's `q > 2^84.7`, which recomputes to `2^84.4`. Three rows of
+Section 12: `Pi_LIN`'s soundness error, which 8.1 moved from `2^-176`-by-the-
+repetitions to `2^-132` by `LIN_REPS`; `Pi_LIN`'s own challenges, which 8.1
+closed and the table still called open; and the rows missing for 5.2, 6.5 and
+8.1. And the memory figure in the README, which was an estimate rather than a
+measurement, and wrong by a factor of three.
+
+**Measured rather than extrapolated.** Peak resident memory of `shuffle`,
+sampled while the buffers are allocated:
+
+| `MSGS` | 8 | 16 | 32 | 64 |
+| --- | --- | --- | --- | --- |
+| peak | 342 MiB | 453 MiB | 677 MiB | 1119 MiB |
+
+That is 13.9 MiB a message on a 231 MiB base, linear to within 1%, so
+`MSGS = 1000` is about **13.8 GiB**.
+
+**What has not been run.** Nothing here has been run at the paper's parameters.
+Every figure in this document that says `MSGS = 1000` is arithmetic from the
+code's constants, not a measurement: the machine this was written on has 15 GB
+and 13.8 of them are not available. The largest instances actually executed are
+`MSGS = 64` for the shuffle, `TAU = 32` for `Pi_BND` and `TAU = 16` for the AEx
+proof. The soundness arguments do not depend on the size, but the size and
+memory claims of Section 11 and the README do, and they remain extrapolations
+from a measured slope.
+
+**What could not be checked here.** The lattice-security figures of Section 9
+are estimator runs from an earlier session and were not repeated. The proof
+sizes of Section 11 are arithmetic from the parameters rather than measurements
+of a serialised proof, because nothing in this repository serialises one.
+
+**What is most likely to rot next.** Anything keyed to `p_min`: 6.4's margin,
+Section 7's pass count, Section 8's `2^-44`, 8.1's `LIN_REPS` and 6.5's two
+terms all move together if the RNS basis moves again. Then the sizes, if
+`LIN_REPS`, `ETA` or `AEX_REPS` change. The benchmarks are single runs on a
+loaded machine and should be read as ratios, not absolutes.
