@@ -13,9 +13,15 @@ their product, and section 8 reports that the challenge set of the linear proof
 contains zero divisors, so that proof has no soundness argument of its own and
 is carried by the repetitions of section 7. Section 10 reports the one term the
 repetitions do not reach, the compression of the message components by `rho`,
-which stood at `2^-39` until `rho` was made a per-pass challenge. The
-test suite asserts all three defects, and the inequality 6.4 depends on, rather
-than hiding any of them.
+which stood at `2^-39` until `rho` was made a per-pass challenge. Section 8 also
+reports, and repairs, a challenge set of `Pi_BND` that belonged to neither
+instantiation of the amortized proof; Section 9 reports that `sigma_Bnd` is
+about six bits wider than it now needs to be as a result, and why only two of
+them can be spent on `q`; and Section 9.1 reports, and restores, a
+rejection-sampling step dropped from the linear proof in 2023, without which
+that proof was not the zero-knowledge one its parameters describe. The test
+suite asserts the three defects of sections 6.2, 8 and 10, and the inequality
+6.4 depends on, rather than hiding, any of them.
 
 ## 1. The attack
 
@@ -731,6 +737,69 @@ needed `HEIGHT + 2` rows and so `SIZE >= 3` for `pismall`'s own commitment. With
 `g(i) = i` that relation is `HEIGHT + 1` rows, the requirement is gone, and the
 shuffle is built at the default again. It must stay there.
 
+### 9.1 The rejection sampling of the linear proof, which had lost a step
+
+`rej_sampling` in `src/shuffle.cpp` masks the three openings of every `Pi_LIN`
+instance, and it was the same procedure as `pibnd_rej_sampling` above with one
+line missing: it did **not** reject when `<z, beta r> < 0`. Its constants are
+the ones that line pays for. `M = 1.75` is the `sqrt(3)` of the `b = 1` variant,
+and `SIGMA_C = 2^12` is the paper's `sigma_C = 0.954 nu B_Com sqrt(kN)`, which
+its Table 5 labels the standard deviation *for one-time commitments* — the
+`b = 1` row. `git log -S` says the check was there when the function was
+written, in `7b90ddd` of 2023-09-05, and was deleted the same day in `19fb1d7`,
+"Polish"; the sibling in `pibnd.cpp` still has it.
+
+**What it cost.** Without the halfspace restriction the bound on
+`N_sigma(z) / N_{v,sigma}(z)` is the two-sided one, `exp((24 sigma ||v|| +
+||v||^2) / 2 sigma^2)`, which at the measured `||beta r|| = 765` and
+`sigma = 4096` is `9.6`, against the `1.75` the code divided by. So the
+acceptance probability `r` exceeded 1 whenever `<y, beta r>` fell below `-3.09`
+standard deviations, about one masked opening in a thousand, and those openings
+were published with probability 1 where the sampler should have thinned them.
+The published `z` was then not distributed as `D_sigma`, and the statistical
+HVZK of Theorem 8 did not hold. At `MSGS = 1000` and four passes a shuffle
+publishes `3 MSGS SHUFFLE_REPS = 12000` masked openings, so on the order of
+twelve of them are biased, each towards the `beta r` it was supposed to hide.
+
+It was a leak and not a hole: the verifier's checks are untouched, and a prover
+that masks badly does not gain anything by it. Soundness was unaffected.
+
+**The fix.** Three changes, in `rej_sampling` and its retry budget:
+
+* the halfspace test is back, which is a revert of two lines of `19fb1d7`;
+* `M` is no longer the fixed `1.75`. For `b = 1` the paper sets
+  `M = exp(||v||^2 / 2 sigma^2)`, which this function can compute because it
+  already has `||v||^2`, and which is the smallest value that dominates the
+  ratio once `<z, v> >= 0` — `1.018` at the measured norm. Restoring the
+  halfspace test without it would have cost far more than the leak was worth:
+  the two together are what the standard deviation was chosen for;
+* `LIN_TRIES` goes from 64 to 256.
+
+**What it cost, measured.** Instrumenting `lin_prover` to report the attempts
+each proof needs, over 238 proofs at `MSGS = 4` against 44 of the old code:
+
+| | acceptance per proof | mean restarts | longest run |
+| --- | --- | --- | --- |
+| before | 0.197 | 4.1 | 21 |
+| after | 0.114 | 7.7 | 56 |
+
+So the linear proofs restart about 1.9 times as often — the `linear proof`
+benchmark goes from 277 to 594 Mcycles — which is the price the parameters
+always implied and the code was not paying. The longest run observed is what
+makes `LIN_TRIES` the third change rather than an optional one: at 0.114 the
+old budget of 64 gives up on one proof in 2400, and a shuffle at `MSGS = 1000`
+runs 4000 of them, so four shuffles in five would have failed to produce a
+proof. At 256 it is one proof in `3 * 10^13`.
+
+**It also makes the batching the README suggests worth more than it was.**
+`lin_prover` runs three rejection tests, one per masked opening, where the
+standard procedure runs one over the concatenation. Batched, the halfspace test
+is paid once instead of three times and `M` is taken over a `||v||^2` three
+times larger, `1.054`: acceptance goes to about **0.47**, which is four times
+today's and more than twice what the code had before this fix. It is also
+tighter zero-knowledge, since the transcript then leaks one halfspace bit
+rather than three. Nothing here needs it, so it stays a note.
+
 ## 10. The compression by rho
 
 Each message is a tuple of `SIZE` ring elements, and the proof of shuffle does
@@ -789,13 +858,15 @@ all go through `util::equal`. That fits the pattern of everything above — the
 splitting ring breaks *proofs*, not the encryption.
 
 **Reviewed and found wanting**, each with its own section: the coefficient sets
-of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8), the
-slack bound feeding `q` (9), the compression by `rho` (10), the mask of the AEx
-proof and the two ways to publish an abandoned one (5.1).
+of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8, now
+repaired), the slack bound feeding `q` and the six bits it now carries for
+nothing (9), the rejection sampling of `Pi_LIN` (9.1), the compression by
+`rho` (10), the mask of the AEx proof and the two ways to publish an abandoned
+one (5.1).
 
-**Not reviewed.** The linear proof's own soundness beyond its challenge set; the
-proof of shuffle's simulator; and `vericrypt`/the ballot-submission side, which
-this repository does not implement.
+**Not reviewed.** The linear proof's own soundness beyond its challenge set and
+its masking; the proof of shuffle's simulator; and `vericrypt`/the
+ballot-submission side, which this repository does not implement.
 
 **Sizes, at `MSGS = 1000`, `q = 2^88`, four passes.**
 
@@ -825,6 +896,9 @@ reports 110 KB per user per server for shuffle *and* decryption together.
 | CRT-mixed `sigma_i` | accepted | rejected, by the norm bound |
 | the *other* sets of `Pi_SMALL` | per CRT component | per CRT component, see 6.2 |
 | the two sub-proofs as one opening | n/a | argued modulo each `p_j`, see 6.4 |
+| challenge set of `Pi_BND` | ternary, in neither instantiation | `{0,1}`, the paper's own, see 8 |
+| `sigma_Bnd` against `\|S'C'\|` | 1.35, sized for ternary challenges | 86, where 0.954 suffices: six bits of slack, see 9 |
+| masking of `Pi_LIN` | one-time constants, two-sided test | halfspace test back, `M` from the paper, see 9.1 |
 | challenge differences of `Pi_LIN` | assumed invertible | **zero divisors, see Section 8** |
 | soundness error of `Pi_LIN` | `~2^-39`, unnoticed | `~2^-176` by the repetitions |
 | assumptions | MSIS and MLWE mod `q` | and MSIS mod each `p_j`, see 6.4 |

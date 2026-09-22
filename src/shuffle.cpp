@@ -370,7 +370,7 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 	array < mpz_t, params::poly_q::degree > coeffs0, coeffs1;
 	params::poly_q t;
 	mpz_t dot, norm, qDivBy2, tmp;
-	double r, M = 1.75;
+	double r, M;
 	int64_t seed;
 	mpf_t u;
 	uint8_t buf[8];
@@ -416,10 +416,16 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 	gmp_randseed_ui(state, seed);
 	mpf_urandomb(u, state, mpf_get_default_prec());
 
+	/* Reject when <z, v> < 0, then accept with probability min(1, r) for
+	 * r = exp((-2<z, v> + ||v||^2) / 2 s2) / M. The first step is what SIGMA_C
+	 * is chosen for: inside the halfspace the ratio to dominate is at most
+	 * exp(||v||^2 / 2 s2), which is M. See SOUNDNESS.md section 9.1. */
+	M = exp(mpz_get_d(norm) / (2.0 * s2));
+	result = mpz_get_d(dot) < 0;
 	r = -2.0 * mpz_get_d(dot) + mpz_get_d(norm);
 	r = r / (2.0 * s2);
 	r = exp(r) / M;
-	result = mpf_get_d(u) > r;
+	result |= mpf_get_d(u) > r;
 
 	mpf_clear(u);
 	gmp_randclear(state);
@@ -431,18 +437,19 @@ static int rej_sampling(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
 	return result;
 }
 
-/* How many times the prover retries rejection sampling before giving up. Each
- * of the three checks accepts with probability about 1/M for M = 1.75, so an
- * honest prover needs a handful of attempts and giving up is a vanishing
- * event; a prover whose witness is not short never succeeds, and without a
- * bound it would spin here forever.
+/* How many times the prover retries rejection sampling before giving up. A
+ * proof needs all three checks to pass, which measurement puts at 0.114 of
+ * attempts, so about eight restarts; a prover whose witness is not short never
+ * succeeds, and without a bound it would spin here forever. At that rate 256
+ * tries leave one proof in 3 * 10^13 giving up, against one in 2400 at the 64
+ * this used to be, and a shuffle runs MSGS * SHUFFLE_REPS of them.
  *
  * Returning whether it succeeded matters as much as the bound. Rejection
  * sampling is what makes the masked opening independent of the witness, not
  * what keeps it inside the norm bound, so the opening left behind by a prover
  * that gave up may well verify while leaking. It must not be published, which
  * is why the status is threaded back to run(). */
-#define LIN_TRIES   64
+#define LIN_TRIES   256
 
 static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 		params::poly_q _y[WIDTH], params::poly_q & t, params::poly_q & tp,
@@ -1162,8 +1169,9 @@ static void test() {
 		 * constant in both CRT components by reading two congruences, one
 		 * modulo each prime of the basis, as equalities over the integers.
 		 * That step needs every quantity in them to stay below p_min / 2:
-		 * twice the norm bound, because extraction compares two transcripts,
-		 * plus the slack of a challenge difference times an index g(j). */
+		 * twice the norm bound, because extraction compares two transcripts
+		 * whose challenges differ by one, plus the slack of a challenge
+		 * difference times an index g(j). */
 		double slack = 2.0 * pibnd_short_bound() + 2.0 * DEGREE;
 		double pmin = nfl::params < uint64_t >::P[0]
 				< nfl::params < uint64_t >::P[1]
