@@ -714,7 +714,44 @@ worth making; the cheaper structure, if it is ever wanted, is to commit the
 makes them and their sub-proofs `rho`-independent again at the cost of a second
 key threaded through `lin_prover` and `lin_verifier`.
 
-## 11. Summary
+## 11. Coverage: what has been looked at
+
+A document about what is established should say where the looking stopped.
+
+**Reviewed and clean.** `bgv.cpp`, read with the question of Section 2 in mind,
+depends on nothing the splitting ring takes away: decryption computes
+`v - s u`, centres each coefficient modulo `q` and reduces modulo `p`, which is
+a statement about coefficient sizes and not about the ring's factors. There is
+no invertibility, no factorisation, no per-slot reasoning, and the comparisons
+all go through `util::equal`. That fits the pattern of everything above — the
+splitting ring breaks *proofs*, not the encryption.
+
+**Reviewed and found wanting**, each with its own section: the coefficient sets
+of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8), the
+slack bound feeding `q` (9), the compression by `rho` (10), the mask of the AEx
+proof and the two ways to publish an abandoned one (5.1).
+
+**Not reviewed.** The linear proof's own soundness beyond its challenge set; the
+proof of shuffle's simulator; and `vericrypt`/the ballot-submission side, which
+this repository does not implement.
+
+**Sizes, at `MSGS = 1000`, `q = 2^88`, four passes.**
+
+| | per pass | per vote |
+| --- | --- | --- |
+| shuffle core, `MSGS` linear proofs plus `D_i`, `s_i`, `P_i` | 480.5 MB | 492.0 KB |
+| `Pi_SMALL`, two AEx passes | 108.0 MB | 110.5 KB |
+| `Pi_BND` | 7.9 MB | 8.1 KB |
+| **total, four passes** | | **2442 KB** |
+
+`Pi_SMALL` is 105 of its 108 MB in opened columns, so its cost is
+`ETA * V * 3 * ceil(q/8)` per relation and flat per vote. The growth from the
+523 KB per vote this branch started at is almost all Section 7's repetitions,
+which multiply everything including the sub-proofs now that `rho` is drawn
+inside them; the wider `q` adds 13%. For scale, the mixnet of ePrint 2025/658
+reports 110 KB per user per server for shuffle *and* decryption together.
+
+## 12. Summary
 
 | | before | on this branch |
 | --- | --- | --- |
