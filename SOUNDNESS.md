@@ -620,10 +620,11 @@ so the protocol still sits at `SHUFFLE_REPS / p_min`, about `2^46`, and the two
 layers below it are now the ones that are not the weakest. Binding these is the
 wrong lever: one hash for all of them means an abort anywhere re-rolls every
 challenge everywhere, and at the 0.49 acceptance of Section 9.1 all
-`MSGS * SHUFFLE_REPS` of them passing at once never happens. Either the
-maskings are batched into one rejection test across the whole proof, which costs
-about 4.3 bits per coefficient in `sigma_C`, or -- better -- Section 8's
-challenge set is repaired so that `1 / p_min` stops being the number to beat.
+`MSGS * SHUFFLE_REPS` of them passing at once never happens, so the maskings
+have to be batched into one rejection test with it. **Section 8.1 prices that
+route and the three others**, including the challenge set this document pointed
+at first, which turns out to buy an extraction argument and lose 31 bits. The
+one worth wanting is an amortized linear proof, which is a redesign.
 
 ## 8. The challenge sets of the Sigma-protocols
 
@@ -720,6 +721,60 @@ one place where this repository could still be made substantially smaller.
 `bdlop_open` uses the same challenge set as `Pi_LIN`, but `pismall` calls it
 with the factor fixed to one, so nothing there depends on a challenge being
 invertible.
+
+### 8.1 What it would take to make `Pi_LIN` worth `LEVEL`
+
+Section 7.1 leaves the protocol at about `2^46`: a prover needs one forged
+linear relation per pass, each instance is worth `1 / p_min`, and each is
+ground on its own. The lever this section points at is the challenge set. It is
+worth writing down what each candidate is actually worth, because the obvious
+one is worse than what is there and the good one is a redesign.
+
+The sizes below are of the published elements at `MSGS = 1000`: per pass the
+`z`, `z_p`, `z'` of the `MSGS` linear proofs come to 90 MB at
+`log2(6 sigma_C)` bits a coefficient, their first messages `t, t_p, t', u` to
+180 MB at full width, and the rest of the core — `D_i`, `s_i`, `P_i` — to
+210 MB.
+
+| | per instance | protocol | cost |
+| --- | --- | --- | --- |
+| as built: ternary differences | `2^-44`, no extractor | `2^46` | — |
+| monomials `{0} u {+-X^j}` | `2^-13` | `2^15` | free, and **worse** |
+| challenges in `GR(q,2)` | `2^-88` | `2^90` | every element of the proof doubles, `+45%` |
+| challenges in `GR(q,3)` | `2^-132` | `2^134` | `+90%` |
+| bind them across the passes | `2^-44` | `2^-176` | `+6%`, but see below |
+| amortize them | by construction | `2^-176` | **smaller**, and a redesign |
+
+**Monomials are the trap.** They do fix what Section 8 says is broken: Lemma 4
+of [8] gives `2 (X^i - X^j)^-1` integer coefficients in `{-1,0,1}`, and `q` is
+odd, so a monomial difference really is invertible in `R_q` and the extractor
+really does work. But the challenge set has `2N + 1 = 2^13` elements, so a
+prover guesses one in `2^13` rather than landing in a slot at `2^-44`. The
+protocol would get an extraction argument and lose 31 bits.
+
+**Binding is cheaper than it looks, and the reason is where the bits are.**
+One hash over every linear proof's first message, drawing an independent `beta`
+for each, forces the prover to land four forgeries at once: `2^-176`. Section
+7.1 objects that an abort anywhere would then re-roll everything, and the
+answer is the one 9.1 already used, a single rejection test over the whole
+concatenation — `12000` openings rather than 3, so `sigma_C` goes from `2^12`
+to about `2^17`. That lands only on the `z`, which is 90 of the 480 MB of a
+pass, so the proof grows by about **6%**, not the quarter I guessed before
+counting. What it costs instead is elsewhere: `8 sigma sqrt(N)` rises from
+`2^21` to `2^26`, and two openings that short differ by `2^27`, which is
+exactly the `lambda_1` of the binding lattice in Section 9. **The commitment
+stops being statistically binding and MSIS modulo `q` comes back as an
+assumption.** Batching per pass instead keeps `sigma_C` at `2^16` and a bit of
+margin, at four passes' worth of restarts, about eight times the prover.
+
+**The redesign is the one worth wanting.** A pass proves `MSGS` linear
+relations that differ only in public coefficients, which is what an amortized
+proof is for: `Pi_BND`'s own shape, `LEVEL + 2` columns of masked openings for
+all `MSGS` statements rather than one opening each. The 270 MB of linear proof
+in a pass becomes a few megabytes, the soundness is `2^-LEVEL` per pass by
+construction rather than `1 / p_min`, and binding the passes then costs
+nothing. It is a protocol change and not a repair, and it is the only entry in
+the table that makes the proof smaller and sounder at the same time.
 
 ## 9. The decryption phase: `B_DDec` and the size of `q`
 
