@@ -658,9 +658,10 @@ real. At `MSGS = 1000` the terms are `2^-132` for the product argument, about
 `2^-133` for `Pi_SMALL` — `2^-66` per pass from the
 `GR(q,2)` challenge, squared by its two repetitions, with the column-opening
 test at `2^-82` or better on 325 of 16384 columns at relative distance 0.48 —
-and `Pi_BND` at its own `NTI = 130` — but see 6.5, which reports that
-`Pi_SMALL`'s two passes are not bound to each other either, so what it is worth
-is `2^75` and not `2^-133`. That leaves one term below `LEVEL`, and it
+and `Pi_BND` at its own `NTI = 130`. The `Pi_SMALL` figure is now `2^-128`
+rather than the `2^-133` first written here: 6.5 reports that its two passes
+were not bound to each other, worth `2^75` between them, and that the repair
+was to make one pass enough. That leaves one term below `LEVEL`, and it
 is not one of these: Section 10 reports that the compression of the message
 components by `rho` costs `2^-44` a pass, and that it is now drawn inside them,
 because `rho` is drawn once outside them. Setting that aside, the binding
@@ -982,8 +983,9 @@ Dropping it pays for the extra repetitions and more:
 | **per pass** | **405 MB** | **404 MB** |
 
 with `P_i`, `Pi_SMALL` and `Pi_BND` a further 206 MB once for all passes. The
-proof is **1822 KB a vote against 2094**, the prover's linear proofs cost 3.8
-times what they did — 362 against 95 Mcycles — and the `shuffle-proof`
+proof is **1822 KB a vote against 2094**, which 6.5 then takes to 1790; the
+prover's linear proofs cost 3.8 times what they did — 362 against 95 Mcycles —
+and the `shuffle-proof`
 benchmark at `MSGS = 4` goes from 14.3 to 31.9 Gcycles. Memory at `MSGS = 1000`
 rises by about 1.2 GB, the responses being three times as many and the first
 messages no longer held.
@@ -1310,7 +1312,7 @@ repaired), the slack bound feeding `q` and the six bits it now carries for
 nothing (9), the rejection sampling of `Pi_LIN` (9.1), the compression by
 `rho` (10), the mask of the AEx proof and the two ways to publish an abandoned
 one (5.1), the abort in `simul_inverse` (5.2), and the two passes of the AEx
-proof (6.5, open).
+proof (6.5).
 
 **Not reviewed.** The linear proof's own soundness beyond its challenge set and
 its masking; the extraction argument of the AEx proof, 6.5 having checked its
@@ -1326,15 +1328,15 @@ what the transcript reveals rather than a simulator.
 | responses of the `MSGS` linear proofs, `LIN_REPS` each | 269 MB | | 1076 KB |
 | `D_i` and `s_i` | 135 MB | | 540 KB |
 | `P_i`, the commitments to the `sigma_i` | | 90 MB | 90 KB |
-| `Pi_SMALL`, two AEx passes | | 108.0 MB | 108.0 KB |
+| `Pi_SMALL`, one AEx pass | | 76 MB | 76.0 KB |
 | `Pi_BND` | | 7.9 MB | 7.9 KB |
-| **total, four passes** | | | **1822 KB** |
+| **total, four passes** | | | **1790 KB** |
 
 The first messages of the linear proofs are not in the table because they are
 not sent: 8.1 replaced them with a hash the verifier checks by rebuilding them,
-which is what paid for the repetitions. `Pi_SMALL` is 105 of its 108 MB in
-opened columns, so its cost is
-`ETA * V * 3 * ceil(q/8)` per relation and flat per vote. The growth from the
+which is what paid for the repetitions. `Pi_SMALL` is almost all opened
+columns, `ETA * V * 3 * ceil(q/8)` per relation and flat per vote, which is
+what 6.5's trade of `ETA` against `AEX_REPS` moves. The growth from the
 523 KB per vote this branch started at is almost all Section 7's repetitions,
 which multiply everything including the sub-proofs now that `rho` is drawn
 inside them; the wider `q` adds 13%. For scale, the mixnet of ePrint 2025/658
