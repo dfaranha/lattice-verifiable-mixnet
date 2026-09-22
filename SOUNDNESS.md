@@ -334,11 +334,11 @@ and the set of all constants is not admissible, since a difference divisible by
 `p_1` is a zero divisor. That is what Sections 5.3 and 5.4 supply between
 them.
 
-The soundness error of one pass of the AEx proof is not negligible -- the
-challenge lives in `GR(q,2)`, so a pass is worth about `3 tau / p_min^2`, around
-`2^-66` at `tau = 1024` -- so a proof is `AEX_REPS` independent passes and the
-verifier requires every one of them, which is how the test of `pismall.cpp` runs
-it too.
+The soundness error of the AEx proof turns on where its challenge lives. In
+`GR(q,2)` a pass is worth about `18 tau / p_min^2`, `2^-74` at `tau = 1024`, and
+a proof needed two of them; 5.5 reports that the two were not bound to each
+other and that the repair was to move the challenge to `GR(q,4)`, where one pass
+is enough.
 
 ### 5.2 The sets are per CRT component, and here that is a feature
 
@@ -627,15 +627,14 @@ argument: about four times the size against five for plain repetition, in
 exchange for a protocol that would have to be designed rather than repeated.
 
 **Where this leaves the protocol**, once 6.1 is repaired and the exponents are
-real. At `MSGS = 1000` the terms are `2^-132` for the product argument, about
-`2^-133` for `Pi_SMALL` — `2^-66` per pass from the
-`GR(q,2)` challenge, squared by its two repetitions, with the column-opening
-test at `2^-82` or better on 325 of 16384 columns at relative distance 0.48 —
-and `Pi_BND` at its own `NTI = 130`. The `Pi_SMALL` figure is now `2^-128`
-rather than the `2^-133` first written here: 5.5 reports that its two passes
-were not bound to each other, worth `2^75` between them, and that the repair
-was to make one pass enough. That leaves one term below `LEVEL`, and it
-is not one of these: Section 9 reports that the compression of the message
+real. At `MSGS = 1000` the terms are `2^-132` for the product argument and
+`2^-128` for `Pi_SMALL` — one pass over `GR(q,4)`, whose algebraic term is
+`2^-162`, against a column-opening test at `2^-128.3` on 452 of 16384 columns at
+relative distance 0.48 — and `Pi_BND` at its own `NTI = 130`. The `Pi_SMALL`
+figure was `2^-133` when this was written, on two passes of a quadratic
+extension; 5.5 reports that the two were not bound to each other, worth `2^75`
+between them, and what replaced them. That leaves one term below `LEVEL`, and
+it is not one of these: Section 9 reports that the compression of the message
 components by `rho` costs `2^-44` a pass, and that it is now drawn inside them,
 because `rho` is drawn once outside them. Setting that aside, the binding
 constraint is the hardness of the lattice problems the commitment and the

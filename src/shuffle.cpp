@@ -487,8 +487,8 @@ static int rej_decide(mpz_t dot, mpz_t norm, uint64_t s2) {
 }
 
 /* How many times the prover retries rejection sampling before giving up. The
- * three openings are tested as one, which measurement puts at 0.49 of
- * attempts, so a proof usually passes first time; a prover whose witness is not
+ * openings of all LIN_REPS repetitions are tested as one, which measurement
+ * puts at 0.43 of attempts, so a proof usually passes in one or two; a prover whose witness is not
  * short never succeeds, and without a bound it would spin here forever. The
  * budget is far past what that rate needs, and costs nothing, since it is only
  * reached when the witness is long.
@@ -1192,7 +1192,6 @@ static void test() {
 	comkey_t key;
 	vector < vector < params::poly_q >> m(MSGS), _m(MSGS), am(MSGS), bm(MSGS);
 	vector < params::poly_q > sigma(MSGS), asigma(MSGS);
-	params::poly_q rho[SIZE];
 	size_t pi;
 
 	/* Generate commitment key. */

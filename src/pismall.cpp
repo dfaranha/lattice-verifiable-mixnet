@@ -44,7 +44,7 @@
 #define TAU         1024
 #endif
 
-/* --- GR(q,2), the challenge domain ---------------------------------------
+/* --- GR(q, AEX_DEG), the challenge domain ---------------------------------
  * q is a product of two 44-bit primes, so a challenge drawn from Z_q is only
  * worth deg/p_min: an adversary can make the identity vanish modulo one prime
  * and gamble on the other alone. Drawing it from the quadratic Galois
@@ -1930,10 +1930,10 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 
 /* Setup shared by every membership proof: the interpolation nodes and the
  * Lagrange basis depend on TAU alone, so they are built once. */
-/* One pass of the proof. The soundness error of a single pass is not
- * negligible -- the challenge lives in GR(q,2), so one pass is worth about
- * deg/p_min^2 -- so a proof is AEX_REPS independent passes and the verifier
- * requires every one of them, exactly as the test of this file runs it. */
+/* One pass of the proof. With the challenge in GR(q, AEX_DEG) the algebraic
+ * term is 18 TAU / p_min^AEX_DEG, which at degree 4 is 2^-162, so AEX_REPS is 1
+ * and what the proof answers to is the column test alone. The verifier requires
+ * every pass, as the test of this file runs it. */
 struct pismall_pass {
 	commit_t com;
 	vector < params::poly_q > rd;

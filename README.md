@@ -104,16 +104,20 @@ Peak resident memory at the parameters currently in the sources. Every buffer he
 | `pibnd`   | ~700 MiB at `TAU = 1000`, `NTI = 130` | 64 KiB x (2 TAU V + 2 V NTI + R NTI + NTI), dominated by the witness and statement matrices; it was 8.5 GiB before the challenge matrix was streamed a row at a time |
 
 The shuffle grew by about 40% in memory and 90% in prover time when the proof
-of shuffle was fixed: the linear proof now relates three commitments instead of
-two, so it carries a third masked opening, a third first message and a third
-rejection-sampling test. Measured at `MSGS = 4`, the prover went from 578 to
-1102 Mcycles and the verifier from 16.7 to 23.2 Mcycles. Most of the prover
-cost is the extra rejection sampling, which multiplies the expected number of
-restarts rather than adding to the work of one. That has since been recovered:
-the three tests are batched into one over the concatenated vectors, which takes
-a proof from 4.1 restarts on average to 1.0 and the `linear proof` benchmark
-from 277 to 95 Mcycles. See SOUNDNESS.md section 8.1, which is also where the
-rejection sampling itself was corrected.
+of shuffle was fixed: the linear proof relates three commitments instead of two,
+so it carries a third masked opening. Measured at `MSGS = 4`, the prover went
+from 578 to 1102 Mcycles and the verifier from 16.7 to 23.2 Mcycles at that
+point.
+
+Most of the prover's cost there is rejection sampling, which multiplies the
+expected number of restarts rather than adding to the work of one, and the
+structure around it has changed twice since. All of a proof's openings are now
+masked and tested as one batch rather than three, and its first messages are not
+sent at all -- the verifier rebuilds them -- which is what paid for running each
+linear proof `LIN_REPS` times against challenges bound to one another. A proof
+now takes about 1.7 restarts, and the benchmarks at `MSGS = 4` read 348 Mcycles
+for `linear proof`, 70 for `linear verifier` and 20.9 Gcycles for
+`shuffle-proof`. See SOUNDNESS.md sections 7.1 and 8.1.
 
 Note that `pismall` defaults to `TAU = 1024` rather than the paper's 1000: its interpolation nodes are the `TAU`-th roots of unity, so `TAU` must be a power of two. The extra 24 relations are padded with zero witnesses and cost nothing in soundness.
 
