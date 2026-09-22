@@ -117,14 +117,14 @@ static params::poly_q (*Z)[NTI], (*W)[NTI], (*SC)[NTI];
 /* One row of the challenge matrix. Both sides derive C from the transcript
  * hash and each consumes it once, row by row, so a row at a time is enough and
  * the matrix itself is never stored: at TAU = 1000 it would be 8 GiB. */
-static params::poly_q *Crow;
+static uint8_t *Crow;
 
 static void pibnd_alloc(void) {
 	s = new params::poly_q[TAU][V];
 	t = new params::poly_q[TAU][V];
 	Z = new params::poly_q[V][NTI];
 	W = new params::poly_q[R][NTI];
-	Crow = new params::poly_q[NTI];
+	Crow = new uint8_t[NTI];
 	SC = new params::poly_q[V][NTI];
 }
 
@@ -218,19 +218,26 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	gmp_randseed_ui(state, seed);
 	mpf_urandomb(u, state, mpf_get_default_prec());
 
-	/* Reject when <z, sc> < 0, then accept with probability min(1, r) for
-	 * r = exp((-2<z, sc> + ||sc||^2) / 2s2) / M. Inside that halfspace the
-	 * ratio to dominate is at most exp(||sc||^2 / 2s2), which is what M is:
-	 * the sqrt(3) this used to divide by is what the constant would have to be
-	 * if sigma were the 0.954 ||S'C'|| the paper sizes for, and sigma is 86
-	 * times that, so the fixed constant was costing restarts and nothing else.
-	 * See SOUNDNESS.md section 8. */
-	M = exp(mpz_get_d(norm) / (2.0 * s2));
-	result = mpz_get_d(dot) < 0;
+	/* Accept with probability min(1, r) for
+	 * r = exp((-2<z, sc> + ||sc||^2) / 2 s2) / M, with M the bound of Lemma 1
+	 * taken over all of z rather than over a halfspace:
+	 * exp((24 sigma ||sc|| + ||sc||^2) / 2 s2), from |<z, sc>| < 12 sigma
+	 * ||sc|| except with probability 2^-100.
+	 *
+	 * Which variant is cheaper depends on how loose sigma is. Rejecting on
+	 * <z, sc> < 0 first removes the 24 sigma ||sc|| term but throws away half
+	 * of every draw; here sigma is 86 times ||sc||, so that term is 0.28 and
+	 * the factor of two is not worth paying -- acceptance is 0.76 a check
+	 * against 0.50. Pi_LIN is the other way round, its sigma being 5.35 times
+	 * what it masks, and SOUNDNESS.md 8.1 keeps the halfspace test there. If
+	 * section 8's six bits are ever reclaimed this flips back. Dropping it also
+	 * stops the transcript leaking which halfspace the opening fell in, which
+	 * is one of the three things 4.2 lists. */
+	M = exp((24.0 * sqrt(s2 * mpz_get_d(norm)) + mpz_get_d(norm)) / (2.0 * s2));
 	r = -2.0 * mpz_get_d(dot) + mpz_get_d(norm);
 	r = r / (2.0 * s2);
 	r = exp(r) / M;
-	result |= mpf_get_d(u) > r;
+	result = mpf_get_d(u) > r;
 
 	mpf_clear(u);
 	gmp_randclear(state);
@@ -289,18 +296,22 @@ void pibnd_sample_chall(params::poly_q & f) {
 	f.ntt_pow_phi();
 }
 
-/* One entry of the challenge matrix: a uniform bit, as a ring constant. That is
- * the challenge set C_Bnd = {0,1} of the amortized proof, and the extractor
- * needs it: it subtracts two transcripts differing in one entry and divides by
- * the difference, which here is +-1. A ternary polynomial, which this used to
- * draw, need not be invertible in a ring splitting into 2N factors -- see
- * SOUNDNESS.md section 7 -- so the proof ran outside the argument it cites. */
-static void pibnd_sample_c(params::poly_q & c) {
+/* One entry of the challenge matrix: a uniform bit. That is the challenge set
+ * C_Bnd = {0,1} of the amortized proof, and the extractor needs it: it
+ * subtracts two transcripts differing in one entry and divides by the
+ * difference, which here is +-1. A ternary polynomial, which this used to draw,
+ * need not be invertible in a ring splitting into 2N factors -- see
+ * SOUNDNESS.md section 7 -- so the proof ran outside the argument it cites.
+ *
+ * It is returned as a bit and not as a ring element on purpose: as an element
+ * it is 0 or 1, so the accumulations below add a row or skip it rather than
+ * multiplying by it, which is the whole of TAU * V * NTI polynomial products
+ * saved per attempt. */
+static int pibnd_sample_c(void) {
 	uint8_t b;
 
 	nfl::fastrandombytes(&b, sizeof(b));
-	c = (uint64_t) (b & 1);
-	c.ntt_pow_phi();
+	return b & 1;
 }
 
 static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
@@ -362,11 +373,13 @@ static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		}
 		for (int k = 0; k < TAU; k++) {
 			for (int j = 0; j < NTI; j++) {
-				pibnd_sample_c(Crow[j]);
+				Crow[j] = pibnd_sample_c();
 			}
 			for (int i = 0; i < V; i++) {
 				for (int j = 0; j < NTI; j++) {
-					SC[i][j] = SC[i][j] + s[k][i] * Crow[j];
+					if (Crow[j]) {
+						SC[i][j] = SC[i][j] + s[k][i];
+					}
 				}
 			}
 		}
@@ -416,11 +429,13 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 	nfl::fastrandombytes_seed(h1);
 	for (int k = 0; k < TAU; k++) {
 		for (int j = 0; j < NTI; j++) {
-			pibnd_sample_c(Crow[j]);
+			Crow[j] = pibnd_sample_c();
 		}
 		for (int i = 0; i < R; i++) {
 			for (int j = 0; j < NTI; j++) {
-				W[i][j] = W[i][j] - t[k][i] * Crow[j];
+				if (Crow[j]) {
+					W[i][j] = W[i][j] - t[k][i];
+				}
 			}
 		}
 	}

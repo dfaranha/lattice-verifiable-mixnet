@@ -256,13 +256,16 @@ so nothing there is a secret. Of the others:
   the rejection sampling of 8.1.
 * the sub-proofs have their own zero knowledge, which is 4.1.
 
-**One: the halfspace bits.** Each accepted opening leaks the sign of
+**One: the halfspace bits.** Each accepted opening of `Pi_LIN` leaks the sign of
 `<z, beta r>`, the one bit the `b = 1` variant of Figure 2 acknowledges. There
 are `LIN_REPS` of them per relation and the `P_i` are now shared by every pass,
 so the randomness of one `P_i` is masked `LIN_REPS * SHUFFLE_REPS = 12` times
 and leaks twelve signs, each of a different linear function of it. Against
 `WIDTH * N = 16384` ternary coefficients that is nothing, but it scales with
 both kinds of repetition, which is worth knowing now that there are two.
+`Pi_BND` no longer leaks any: section 8 reports that its `sigma` is loose enough
+for the two-sided variant to be both cheaper and tighter, so it has no halfspace
+to tell about.
 
 **Two: an abort is not free, and this one used to abort.** `simul_inverse`
 inverts the `b_i` by the batch trick, which needs their product to be
@@ -1091,15 +1094,36 @@ worst-case `||S'C'||` of `sqrt(k) N B_Com`. So the protocol is sound and
 zero-knowledge at any `sigma` above that, and the old ternary challenges, which
 left the ratio at 1.35, were fine on this count.
 
-`M` is no longer fixed: it is taken from the `||S'C'||^2` the function has
-already computed, as section 8.1 does for `Pi_LIN` and as the paper's own text
-specifies for `b = 1`. That makes no `sigma` invalid — a small one costs
-restarts and nothing else — and it removes the only thing the 0.954 was ever
-load-bearing for. At the 86 the file now runs at, `M` is `1.00007` and the
-honest prover restarts **2.08 times a proof against 7.85** before the change,
-measured over a `MSGS = 4` run; `pibnd` is 94% of the sub-proof cost and the
-sub-proofs are nearly all of the prover, so the `shuffle-proof` benchmark falls
-from 37.4 to **14.3 Gcycles**.
+`M` is no longer fixed: it is taken from the norm the function has already
+computed, and it removes the only thing the 0.954 was ever load-bearing for,
+since no `sigma` is then invalid — a small one costs restarts and nothing else.
+
+**And with `sigma` this loose the halfspace test is a bad trade.** Rejecting on
+`<Z, S'C'> < 0` removes the `24 sigma ||S'C'||` term from `M` at the price of
+half of every draw. At `sigma = 0.954 ||S'C'||`, which is what the paper sizes
+for, that is worth paying. At 86 times it is not: the term it removes is
+`12 ||S'C'|| / sigma = 0.14`, so the two-sided `M` is `1.15` and acceptance
+`0.87` a check, against the `0.50` a halfspace test leaves. `pibnd` therefore
+runs the two-sided variant and `Pi_LIN`, whose `sigma` is 5.35 times what it
+masks, keeps the halfspace test — the rule being which of `12 ||v|| / sigma` and
+`ln 2` is larger. It also stops the transcript leaking which halfspace the
+opening fell in, which is one of the three things 4.2 lists.
+
+Measured over a `MSGS = 4` run, restarts a proof and the standalone prover at
+`TAU = 32`:
+
+| | restarts | `BND prover` |
+| --- | --- | --- |
+| fixed `M = sqrt(3)`, halfspace test | 7.85 | 39.2 Gcycles |
+| `M` from the norm, halfspace test | 2.08 | 17.2 Gcycles |
+| `M` two-sided, no halfspace test | **0.09** | 6.5 Gcycles |
+| and the challenge multiplications dropped | 0.09 | **2.64 Gcycles** |
+
+The last row is not about sampling at all. The challenge entries are bits, so
+`s[k][i] * Crow[j]` is a multiplication by zero or one: the accumulation adds
+the row or skips it, and `TAU * V * NTI` polynomial products an attempt —
+520,000 of them at `MSGS = 1000` — become additions. The verifier's identical
+loop goes with it.
 
 **But it is now 90 times more than that, and `q` is sized for it.** The
 `{0,1}` challenges are `2^5.5` shorter than ternary ones against the same
