@@ -23,6 +23,13 @@ that proof was not the zero-knowledge one its parameters describe. The test
 suite asserts the three defects of sections 6.2, 8 and 10, and the inequality
 6.4 depends on, rather than hiding, any of them.
 
+**Section 7.1 is the one to read first.** It reports that the `SHUFFLE_REPS`
+passes are not bound to each other under Fiat-Shamir, so their errors do not
+multiply: a prover grinds them one at a time, and the protocol's soundness
+against the attack of Section 1 is one pass — about `2^34` hash queries — and
+not the `2^-136` every other number in this document assumes. Nothing else here
+is wrong because of it, but a good deal of it is contingent on it.
+
 ## 1. The attack
 
 Bootle, Lyubashevsky and Merino-Gallardo, *Efficient Verifiable Mixnets from
@@ -469,11 +476,20 @@ time from the basis, as `ceil(LEVEL / (floor(log2 p_min) - ceil(log2 MSGS)))`:
 four passes at `MSGS = 2` for `2^-168`, four at `MSGS = 1000` for `2^-132`, five
 at `MSGS = 4096` for `2^-155`.
 
-Only the product argument repeats. The prover's first message -- the
-commitments `P_i` to the `sigma_i` and the two sub-proofs of section 6 that
-place them in `D` -- is sent once and shared by every pass, which is also
-forced: the `sigma_i` have to be fixed before any challenge, so a pass cannot
-re-commit to them.
+This is the argument for an interactive verifier, and it is the argument this
+branch was built on. **Section 7.1 reports that the implementation does not
+earn it**, because each pass derives its challenges from its own messages
+alone, and a Fiat-Shamir prover can therefore re-roll one pass without
+disturbing the others. Everything below about `2^-132` and `2^-176` is what the
+exponent would be once the passes are bound together; what the code offers
+today is one pass.
+
+The prover's first message -- the commitments `P_i` to the `sigma_i` and the
+two sub-proofs of section 6 that place them in `D` -- was sent once and shared
+by every pass when this section was written. It is not any more: `rho` became a
+per-pass challenge (section 10), the commitment key is the `rho`-compressed
+one, and so the `P_i` and both sub-proofs are rebuilt inside each pass. That is
+what leaves each pass free-standing, and it is the mechanism of 7.1.
 
 The alternative remedy is the one `pismall` uses, drawing the challenges from
 the quadratic Galois extension `GR(q,2)` so that a single challenge is worth
@@ -483,8 +499,9 @@ two passes, while lifting `a_i`, `b_i`, the masks `theta_i`, the published
 argument: about four times the size against five for plain repetition, in
 exchange for a protocol that would have to be designed rather than repeated.
 
-**Where this leaves the protocol.** At `MSGS = 1000` the terms are `2^-132` for
-the product argument, about `2^-133` for `Pi_SMALL` — `2^-66` per pass from the
+**Where this leaves the protocol**, once 7.1 is repaired and the exponents are
+real. At `MSGS = 1000` the terms are `2^-132` for the product argument, about
+`2^-133` for `Pi_SMALL` — `2^-66` per pass from the
 `GR(q,2)` challenge, squared by its two repetitions, with the column-opening
 test at `2^-82` or better on 325 of 16384 columns at relative distance 0.48 —
 and `Pi_BND` at its own `NTI = 130`. That leaves one term below `LEVEL`, and it
@@ -497,9 +514,74 @@ modulo each prime of the basis.
 
 These repetitions turn out to carry more than the term they were sized against.
 Section 8 reports that the linear proof is worth about `2^-44` per pass for an
-unrelated reason, and it is the same repetitions that compose it to `2^-176`.
+unrelated reason, and it is the same repetitions that would compose it to
+`2^-176` — once they compose at all, which is 7.1.
 Removing them because the product argument had been strengthened by some other
 means would reopen that.
+
+### 7.1 The repetitions are not bound to each other
+
+Everything above multiplies the per-pass error only if a prover who fails a
+pass has to start over. Against an interactive verifier that is automatic: the
+verifier draws every challenge, and a prover who wants another `tau` gets a
+fresh one everywhere. Under Fiat-Shamir it has to be built, and here it is not.
+
+`shuffle_rho_hash`, `shuffle_chal_hash` and `shuffle_hash` each hash the pass
+index as a domain separator and otherwise **only that pass's own data**: the
+input commitments, the output list, and this pass's `P_i`, `D_i`, `tau`, `mu`,
+`rho`. The comment in `shuffle_chal_hash` states it outright — "the passes
+differ only in this byte". No message of pass `l` reaches any challenge of pass
+`l'`, and the verifier checks each pass on its own.
+
+**So the passes are ground one at a time.** A prover whose output list is not a
+permutation of the input takes the attack of Section 1: it mixes the list in a
+single CRT slot, so the product identity fails in that slot alone. Then, for
+each pass in turn, it re-randomizes the commitment `P_{MSGS-1}` — which moves
+that pass's `tau` and `mu` and nothing else — and tests whether the new
+challenge is a root of the failing slot, which costs `2 MSGS` multiplications
+modulo `p_min`. When it is, that pass is settled and it moves to the next.
+Nothing it does to pass `l` disturbs a pass it has already settled.
+
+```
+bound        eps^SHUFFLE_REPS          = 2^-136 at MSGS = 1000
+as built     SHUFFLE_REPS * eps^-1     = 2^36 hash queries
+```
+
+with `eps = MSGS / p_min = 2^-34`. Each query costs one BDLOP commitment and a
+hash over the part of the input that moved, about 0.25 ms, so the four passes
+come to roughly 200 core-days: not a thought experiment. **The protocol's
+soundness against the attack it was rebuilt to stop is one pass, not four.**
+
+The same applies one level down. Section 8 reports that `Pi_LIN`'s challenge
+`beta` is worth `1 / p_min` per pass and concludes that the repetitions carry it
+to `2^-176`; they do not, for exactly this reason, and re-rolling a pass's `D_i`
+moves that pass's `beta` alone. Section 10's `rho` is the same story again.
+
+**Chaining is not the fix.** Making pass `l` hash the transcripts of passes
+before it leaves the grinding order intact: the prover settles pass 0, then
+pass 1, and each grind only invalidates passes it has not built yet. What is
+needed is that every challenge depend on *all* the first messages: the prover
+sends `P_i^(l)` for every `l`, one hash yields every `(tau_l, mu_l)`, the
+prover sends `D_i^(l)` for every `l`, and a second hash yields every `beta_l`.
+Then re-rolling anything re-rolls every pass at once, which is what raises the
+error to a power.
+
+**It costs memory, and that is the whole of the cost.** The passes currently
+run one after another through the same buffers. Binding them means holding
+every pass's first message at once: at `MSGS = 1000` the `P_i` and the `D_i`
+are 128 MB apiece per pass, and the sub-proofs of section 6 about 116 MB more,
+so roughly 370 MB a pass against the 3.7 GB the shuffle already takes. Four
+passes of that is an extra 1.1 GB and no extra proof size, since the same
+elements are published either way.
+
+**Or the `P_i` could go back to being shared**, which is what this section
+assumed before `rho` became a per-pass challenge. Section 10 already names the
+way: commit the `sigma_i` under the original commitment key rather than the
+`rho`-compressed one, thread the second key through `lin_prover` and
+`lin_verifier`, and the `P_i` and both sub-proofs become `rho`-independent
+again — produced once, shared by every pass, and the thing every pass's
+challenges hang from. That is the cheaper structure in memory, in prover time
+and in proof size, and it is the one worth doing.
 
 ## 8. The challenge sets of the Sigma-protocols
 
@@ -544,15 +626,16 @@ message. So the honest reading is **39 bits per pass, not 128**, and there is no
 soundness proof at all, since the extraction argument needs the invertibility
 the test denies.
 
-**Why the protocol survives.** Section 7 repeats everything after the first
+**What was supposed to cover it.** Section 7 repeats everything after the first
 message `SHUFFLE_REPS` times with independent challenges, and a prover whose
 output list is not a permutation has to defeat every pass, each with its own
-`beta`. At four or five passes that composes to `2^-176` or better. This was not
-the reason the repetitions were introduced — they were sized against the `2^-34`
-of the product argument, which is the weaker term — but they cover this as well.
-The practical conclusion is that the repetitions carry more weight than their
-stated purpose, and removing them on the grounds that the product argument had
-been improved by other means would reopen this.
+`beta`; at four or five passes that would compose to `2^-176` or better. This
+was not the reason the repetitions were introduced — they were sized against
+the `2^-34` of the product argument, which is the weaker term — but they were
+expected to cover this as well. **Section 7.1 reports that they do not compose
+as built**: each pass's `beta` is a hash of that pass's messages alone, so a
+prover re-rolls one pass's `D_i` and leaves the rest standing. Until the passes
+are bound, this term is `2^-44` and grindable, not `2^-176`.
 
 **The same question, asked of `Pi_BND`, had a sharper answer, and this branch
 fixes it.** Its challenge matrix was drawn from `nfl::ZO_dist()`, full-weight
@@ -832,11 +915,14 @@ accepted an output list that was demonstrably not a permutation of the input.
   collision computed for one list is not a collision for the list that induces
   it. The test now builds the collision against the `rho` the honest list
   induces — the best a prover can do without grinding — and the proof rejects.
-* `rho` is drawn afresh in each pass, so the repetitions of Section 7 amplify
-  the residual `1 / p_min` the way they cover the product argument. That is why
-  the whole body of `run()` is now the pass: the compression, the key it
-  induces, the commitments to the `sigma_i` under that key, and the sub-proofs
-  about them all depend on `rho` and all move inside.
+* `rho` is drawn afresh in each pass, so the repetitions of Section 7 are meant
+  to amplify the residual `1 / p_min` the way they cover the product argument —
+  which needs Section 7.1 first, since as built each pass's `rho` follows from
+  that pass's data alone. That is why the whole body of `run()` is now the pass:
+  the compression, the key it induces, the commitments to the `sigma_i` under
+  that key, and the sub-proofs about them all depend on `rho` and all move
+  inside. Moving them inside is also what made the passes free-standing, so the
+  second bullet is the cause of 7.1 as well as a beneficiary of it.
 
 The cost of the second is real: the membership sub-proofs are produced
 `SHUFFLE_REPS` times rather than once. Sharing one `rho` across the passes would
@@ -858,7 +944,9 @@ no invertibility, no factorisation, no per-slot reasoning, and the comparisons
 all go through `util::equal`. That fits the pattern of everything above — the
 splitting ring breaks *proofs*, not the encryption.
 
-**Reviewed and found wanting**, each with its own section: the coefficient sets
+**Reviewed and found wanting**, each with its own section: the binding of the
+repetitions to each other (7.1, open, and the most serious of these), the
+coefficient sets
 of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8, now
 repaired), the slack bound feeding `q` and the six bits it now carries for
 nothing (9), the rejection sampling of `Pi_LIN` (9.1), the compression by
@@ -904,7 +992,7 @@ reports 110 KB per user per server for shuffle *and* decryption together.
 | soundness error of `Pi_LIN` | `~2^-39`, unnoticed | `~2^-176` by the repetitions |
 | assumptions | MSIS and MLWE mod `q` | and MSIS mod each `p_j`, see 6.4 |
 | verifier equality | one slot in 8192 | all slots |
-| soundness error of the product argument | `~2^-29` | `~2^-132`, see Section 7 |
+| soundness error of the product argument | `~2^-29` | `~2^-132` per Section 7, **but `~2^-34` as built, see 7.1** |
 | compression of the components by `rho` | free, `rho` not a challenge | `~2^-176`, see Section 10 |
 | `q` | 78 bits | 88 bits, see Section 9 |
 | lattice security | claimed 128 bits | `2^158` encryption, `2^156` hiding, see 9 |

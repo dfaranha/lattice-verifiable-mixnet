@@ -98,14 +98,15 @@ static_assert((unsigned long long) MSGS <
  * The challenges are uniform over R_q, which in a ring this split has to be
  * analysed slot by slot: if the identity fails in some slot, the check passes
  * only if the challenge hits a root of a degree-MSGS polynomial in that slot.
- * That is about 2^-29 at MSGS = 1000, far short of the LEVEL bits the
+ * That is about 2^-34 at MSGS = 1000, far short of the LEVEL bits the
  * parameters are otherwise chosen for, so the argument is repeated with
- * independent challenges and the verifier requires every pass. Repetition is
- * sound here because the slot in which the identity fails is fixed by the
- * commitments before any challenge is drawn, so the passes are independent.
+ * independent challenges and the verifier requires every pass.
  *
- * Nothing else is repeated: the commitments, the linear proofs and the two
- * sub-proofs that establish sigma_i in D are already at or beyond LEVEL. */
+ * Those errors multiply only if a prover who fails a pass has to start over,
+ * and as built they do not: every challenge of a pass is a hash of that pass's
+ * own messages, so a prover grinds the passes one at a time and the protocol
+ * is worth one of them. See SOUNDNESS.md section 7.1, which is also where the
+ * repair is. */
 static constexpr int shuffle_ilog2(unsigned long long x) {
 	return x <= 1 ? 0 : 1 + shuffle_ilog2(x >> 1);
 }
