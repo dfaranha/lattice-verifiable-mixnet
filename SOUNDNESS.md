@@ -667,9 +667,9 @@ by Fiat-Shamir, so this is grindable rather than merely unlucky: re-committing
 `D_i` to the same message with fresh randomness moves `beta` without moving that
 message. So the honest reading is **44 bits per repetition, not 128**, and
 there is no soundness proof at all, since the extraction argument needs the
-invertibility the test denies. Section 8.1 is what makes that survivable: the proof is run
-`LIN_REPS` times against challenges bound to one another, so the 44 bits
-multiply.
+invertibility the test denies. Section 8.1 is what makes that survivable: the
+proof is run `LIN_REPS` times against challenges bound to one another, so the
+44 bits multiply.
 
 **What was supposed to cover it.** Section 7 repeats everything after the first
 message `SHUFFLE_REPS` times with independent challenges, and a prover whose
