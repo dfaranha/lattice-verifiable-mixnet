@@ -799,6 +799,43 @@ argument -- or the general-purpose route of Section 6.4's alternative 1, where
 one proof system handles the whole membership and product statement and this
 question does not arise.
 
+**What leaving it at `2^46` means.** It is a statement about the Fiat-Shamir
+compilation and not about the protocol: as a Sigma-protocol this is `2^-176`,
+because a cheating prover would have to land four forgeries against four
+challenges it cannot influence. The whole of the gap is that the implementation
+lets it grind them one at a time, offline.
+
+A cheater publishes an output list that is not a permutation, and then, per
+pass, forges one linear relation: it needs that pass's `beta` to vanish in the
+CRT slot where its relation is false, which is `1 / p_min` a try. A try is
+cheap. Varying one coefficient of `_y[0]` moves `_t` and nothing else -- `u` is
+unchanged because `_key.A2[0][0]` is zero -- and `_t` is the last thing
+`lin_hash` absorbs, so a try is one BLAKE3 chunk and a path, a re-derived
+`beta`, and a test of one slot. At about 10 microseconds, `4 * 2^44` tries is
+some 22 core-years: single-digit days on a thousand cores, and embarrassingly
+parallel.
+
+What that buys is exactly the property this branch exists to defend: a mix
+server can substitute, drop or alter ballots and still produce a proof every
+verifier accepts. Nothing else moves. Privacy and zero knowledge are unaffected,
+the binding of the commitment and the MLWE and MSIS instances are untouched, and
+every other layer composes above `LEVEL` -- `tau, mu` at `2^-136`, `rho` by
+construction, `Pi_SMALL` at `2^-133`, `Pi_BND` at `2^-130`. The `2^46` is the
+minimum over the layers and the only one below the line, which is what makes it
+the thing to fix next and not a reason to distrust the rest.
+
+Against the claim, `LEVEL = 128` is not met by the implementation. In
+proportion: before the repetitions of Section 7 the product argument alone was
+`2^-34` in a single pass, so this is `2^12` better than the state they were
+introduced to fix, and it is a documented gap of the same kind as 6.2 and 8
+rather than a regression.
+
+The obvious parameter mitigation does not work. The per-instance error is
+`1 / p_min` and does not depend on `MSGS`, so wider RNS primes raise it
+directly: 62-bit primes would give `2^-62` per instance and `2^64` of work. But
+`q` at 124 bits costs about 2.2 bits of lattice security per bit of `q`, which
+takes the encryption from `2^158` to roughly `2^78`. Not viable at `N = 4096`.
+
 ## 9. The decryption phase: `B_DDec` and the size of `q`
 
 This one is not about the proof of shuffle, and it is recorded here only
