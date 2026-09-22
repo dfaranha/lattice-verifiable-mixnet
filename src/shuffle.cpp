@@ -102,11 +102,11 @@ static_assert((unsigned long long) MSGS <
  * parameters are otherwise chosen for, so the argument is repeated with
  * independent challenges and the verifier requires every pass.
  *
- * Those errors multiply only if a prover who fails a pass has to start over,
- * and as built they do not: every challenge of a pass is a hash of that pass's
- * own messages, so a prover grinds the passes one at a time and the protocol
- * is worth one of them. See SOUNDNESS.md section 7.1, which is also where the
- * repair is. */
+ * Those errors multiply only if a prover who fails a pass has to start over.
+ * tau and mu are hashed from the P_i, which run() sends once for every pass, so
+ * re-rolling them re-rolls every pass at once and these do multiply. The beta
+ * below is hashed from one pass's D_i and still does not; see SOUNDNESS.md
+ * section 7.1. */
 static constexpr int shuffle_ilog2(unsigned long long x) {
 	return x <= 1 ? 0 : 1 + shuffle_ilog2(x >> 1);
 }
@@ -241,9 +241,14 @@ static void index_scalar(params::poly_q & out, size_t i) {
  * into the public part (_m_i - mu), folded into coef[2], and the committed part
  * sigma_i scaled by the public tau, folded into coef[1].
  */
-static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
-		commit_t p, commit_t y, params::poly_q coef[3], params::poly_q & u,
-		params::poly_q t, params::poly_q tp, params::poly_q _t) {
+/* The middle commitment of the relation, the one to sigma_l, lives under a key
+ * of its own: it is committed once and shared by every pass, while x and _x are
+ * under the rho-compressed key of this pass. The two share A1 and differ only in
+ * the A2 row. See SOUNDNESS.md section 7.1. */
+static void lin_hash(params::poly_q & beta, comkey_t & key, comkey_t & pkey,
+		commit_t x, commit_t p, commit_t y, params::poly_q coef[3],
+		params::poly_q & u, params::poly_q t, params::poly_q tp,
+		params::poly_q _t) {
 	uint8_t hash[BLAKE3_OUT_LEN];
 	blake3_hasher hasher;
 
@@ -258,6 +263,8 @@ static void lin_hash(params::poly_q & beta, comkey_t & key, commit_t x,
 	}
 	for (size_t j = 0; j < WIDTH; j++) {
 		blake3_hasher_update(&hasher, (const uint8_t *)key.A2[0][j].data(),
+				16 * DEGREE);
+		blake3_hasher_update(&hasher, (const uint8_t *)pkey.A2[0][j].data(),
 				16 * DEGREE);
 	}
 
@@ -461,7 +468,7 @@ static int rej_decide(mpz_t dot, mpz_t norm, uint64_t s2) {
 static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 		params::poly_q _y[WIDTH], params::poly_q & t, params::poly_q & tp,
 		params::poly_q & _t, params::poly_q & u, commit_t x, commit_t p,
-		commit_t _x, params::poly_q coef[3], comkey_t & key,
+		commit_t _x, params::poly_q coef[3], comkey_t & key, comkey_t & pkey,
 		vector < params::poly_q > r, vector < params::poly_q > pr,
 		vector < params::poly_q > _r) {
 	params::poly_q beta, tmp[WIDTH], ptmp[WIDTH], _tmp[WIDTH];
@@ -503,7 +510,7 @@ static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 		for (int i = 0; i < HEIGHT; i++) {
 			for (int j = 0; j < WIDTH - HEIGHT; j++) {
 				t = t + key.A1[i][j] * y[j + HEIGHT];
-				tp = tp + key.A1[i][j] * w[j + HEIGHT];
+				tp = tp + pkey.A1[i][j] * w[j + HEIGHT];
 				_t = _t + key.A1[i][j] * _y[j + HEIGHT];
 			}
 		}
@@ -511,12 +518,12 @@ static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 		u = 0;
 		for (int i = 0; i < WIDTH; i++) {
 			u = u + coef[0] * (key.A2[0][i] * y[i]);
-			u = u + coef[1] * (key.A2[0][i] * w[i]);
+			u = u + coef[1] * (pkey.A2[0][i] * w[i]);
 			u = u - (key.A2[0][i] * _y[i]);
 		}
 
 		/* Sample challenge. */
-		lin_hash(beta, key, x, p, _x, coef, u, t, tp, _t);
+		lin_hash(beta, key, pkey, x, p, _x, coef, u, t, tp, _t);
 
 		/* Prover */
 		for (int i = 0; i < WIDTH; i++) {
@@ -546,12 +553,12 @@ static int lin_prover(params::poly_q y[WIDTH], params::poly_q w[WIDTH],
 static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
 		params::poly_q _z[WIDTH], params::poly_q t, params::poly_q tp,
 		params::poly_q _t, params::poly_q u, commit_t x, commit_t p,
-		commit_t _x, params::poly_q coef[3], comkey_t & key) {
+		commit_t _x, params::poly_q coef[3], comkey_t & key, comkey_t & pkey) {
 	params::poly_q beta, v, pv, _v, tmp;
 	int result = 1;
 
 	/* Sample challenge. */
-	lin_hash(beta, key, x, p, _x, coef, u, t, tp, _t);
+	lin_hash(beta, key, pkey, x, p, _x, coef, u, t, tp, _t);
 
 	/* Verifier checks norm, reconstruct from NTT representation. */
 	for (int i = 0; i < WIDTH; i++) {
@@ -573,7 +580,7 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
 	for (int i = 0; i < HEIGHT; i++) {
 		for (int j = 0; j < WIDTH - HEIGHT; j++) {
 			v = v + key.A1[i][j] * z[j + HEIGHT];
-			pv = pv + key.A1[i][j] * zp[j + HEIGHT];
+			pv = pv + pkey.A1[i][j] * zp[j + HEIGHT];
 			_v = _v + key.A1[i][j] * _z[j + HEIGHT];
 		}
 	}
@@ -590,7 +597,7 @@ static int lin_verifier(params::poly_q z[WIDTH], params::poly_q zp[WIDTH],
 	v = 0;
 	for (int i = 0; i < WIDTH; i++) {
 		v = v + coef[0] * (key.A2[0][i] * z[i]);
-		v = v + coef[1] * (key.A2[0][i] * zp[i]);
+		v = v + coef[1] * (pkey.A2[0][i] * zp[i]);
 		v = v - (key.A2[0][i] * _z[i]);
 	}
 	t = coef[0] * x.c2[0] + coef[1] * p.c2[0] + coef[2] - _x.c2[0];
@@ -847,7 +854,7 @@ static int shuffle_prover(params::poly_q y[MSGS][WIDTH],
 		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
 		params::poly_q _ms[MSGS], params::poly_q sigma[MSGS],
 		vector < params::poly_q > r[MSGS], params::poly_q rho[SIZE],
-		comkey_t & key, int rep) {
+		comkey_t & key, comkey_t & pkey, int rep) {
 	vector < params::poly_q > t0(1);
 	vector < params::poly_q > _r[MSGS];
 	params::poly_q coef[3], beta, tau, mu, gl;
@@ -905,7 +912,7 @@ static int shuffle_prover(params::poly_q y[MSGS][WIDTH],
 	for (size_t l = 0; l < MSGS; l++) {
 		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
 		complete &= lin_prover(y[l], w[l], _y[l], t[l], tp[l], _t[l], u[l], c[l], p[l],
-				d[l], coef, key, r[l], pr[l], _r[l]);
+				d[l], coef, key, pkey, r[l], pr[l], _r[l]);
 	}
 
 	return complete;
@@ -917,20 +924,19 @@ static int shuffle_verifier(params::poly_q y[MSGS][WIDTH],
 		params::poly_q _t[MSGS], params::poly_q u[MSGS], commit_t d[MSGS],
 		commit_t p[MSGS], params::poly_q s[MSGS], commit_t c[MSGS],
 		params::poly_q _ms[MSGS], params::poly_q rho[SIZE], comkey_t & key,
-		int rep) {
+		comkey_t & pkey, int rep) {
 	params::poly_q coef[3], beta, tau, mu;
 	int result = 1;
 
-	result &= pismall_const_verify(cst, key, p, MSGS);
-	result &= pibnd_short_verify(bnd, key, p, MSGS);
-
+	/* The sub-proofs about the P_i are not checked here: the P_i are the first
+	 * message, sent once for every pass, and run() checks them once. */
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
 	shuffle_hash(beta, c, p, d, _ms, tau, mu, rho, rep);
 	for (size_t l = 0; l < MSGS; l++) {
 		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
 		result &=
 				lin_verifier(y[l], w[l], _y[l], t[l], tp[l], _t[l], u[l], c[l],
-				p[l], d[l], coef, key);
+				p[l], d[l], coef, key, pkey);
 	}
 
 	return result;
@@ -956,12 +962,19 @@ static int run(vector < vector < params::poly_q >> m,
 	comkey_t _key;
 	int result = 1;
 
-	/* Everything below depends on rho, which is drawn afresh for each pass, so
-	 * the whole body is the pass: the compression, the key it induces, the
-	 * commitments to the sigma_i under that key, and the sub-proofs about them.
-	 * That is what makes the repetitions amplify the compression as well as the
-	 * product argument; sharing one rho across the passes would leave a single
-	 * collision good for all of them. */
+	/* The commitments to the sigma_i and the two sub-proofs that place them in D
+	 * are the prover's first message, and they are sent once. Every pass's
+	 * challenges are a hash of them, so re-rolling them re-rolls every pass at
+	 * once, which is what makes the errors of the passes multiply; a first
+	 * message per pass would let a prover settle the passes one at a time. They
+	 * can be shared because they are committed under the original key rather
+	 * than the rho-compressed one of the pass. See SOUNDNESS.md section 7.1. */
+	shuffle_commit_sigma(pcom, pr, sigma.data(), key);
+	result &= pismall_const_verify(cst, key, pcom, MSGS);
+	result &= pibnd_short_verify(bnd, key, pcom, MSGS);
+
+	/* The compression and the key it induces still depend on rho, which is
+	 * drawn afresh for each pass, so they stay inside it. */
 	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
 	shuffle_rho_hash(rho, com, _m, rep);
 
@@ -1000,12 +1013,10 @@ static int run(vector < vector < params::poly_q >> m,
 		}
 	}
 
-	shuffle_commit_sigma(pcom, pr, sigma.data(), _key);
-
 	result &= shuffle_prover(y, w, _y, t, tp, _t, u, d, pcom, pr, s, cs, ms,
-			_ms, sigma.data(), r, rho, _key, rep);
+			_ms, sigma.data(), r, rho, _key, key, rep);
 	result &= shuffle_verifier(y, w, _y, t, tp, _t, u, d, pcom, s, cs, _ms,
-			rho, _key, rep);
+			rho, _key, key, rep);
 	}
 
 	return result;
@@ -1396,18 +1407,18 @@ static void bench() {
 	bdlop_sample_chal(beta);
 
 	BENCH_BEGIN("linear hash") {
-		BENCH_ADD(lin_hash(beta, key, com[0], com[1], com[1], coef, bu, bt,
+		BENCH_ADD(lin_hash(beta, key, key, com[0], com[1], com[1], coef, bu, bt,
 						btp, _bt));
 	} BENCH_END;
 
 	BENCH_BEGIN("linear proof") {
 		BENCH_ADD(lin_prover(by, bw, _by, bt, btp, _bt, bu, com[0], com[1],
-						com[1], coef, key, r[0], r[1], r[1]));
+						com[1], coef, key, key, r[0], r[1], r[1]));
 	} BENCH_END;
 
 	BENCH_BEGIN("linear verifier") {
 		BENCH_ADD(lin_verifier(by, bw, _by, bt, btp, _bt, bu, com[0], com[1],
-						com[1], coef, key));
+						com[1], coef, key, key));
 	} BENCH_END;
 
 	BENCH_SMALL("shuffle-proof (N messages)", run(m, _m, sigma, key));
