@@ -622,9 +622,10 @@ wrong lever: one hash for all of them means an abort anywhere re-rolls every
 challenge everywhere, and at the 0.49 acceptance of Section 9.1 all
 `MSGS * SHUFFLE_REPS` of them passing at once never happens, so the maskings
 have to be batched into one rejection test with it. **Section 8.1 prices that
-route and the three others**, including the challenge set this document pointed
-at first, which turns out to buy an extraction argument and lose 31 bits. The
-one worth wanting is an amortized linear proof, which is a redesign.
+route and the others**, including the challenge set this document pointed at
+first, which turns out to buy an extraction argument and lose 31 bits, and the
+amortized linear proof, which the large public coefficients of the relation
+rule out.
 
 ## 8. The challenge sets of the Sigma-protocols
 
@@ -743,7 +744,7 @@ The sizes below are of the published elements at `MSGS = 1000`: per pass the
 | challenges in `GR(q,2)` | `2^-88` | `2^90` | every element of the proof doubles, `+45%` |
 | challenges in `GR(q,3)` | `2^-132` | `2^134` | `+90%` |
 | bind them across the passes | `2^-44` | `2^-176` | `+6%`, but see below |
-| amortize them | by construction | `2^-176` | **smaller**, and a redesign |
+| amortize them | — | — | **does not apply here, see below** |
 
 **Monomials are the trap.** They do fix what Section 8 says is broken: Lemma 4
 of [8] gives `2 (X^i - X^j)^-1` integer coefficients in `{-1,0,1}`, and `q` is
@@ -767,14 +768,32 @@ stops being statistically binding and MSIS modulo `q` comes back as an
 assumption.** Batching per pass instead keeps `sigma_C` at `2^16` and a bit of
 margin, at four passes' worth of restarts, about eight times the prover.
 
-**The redesign is the one worth wanting.** A pass proves `MSGS` linear
-relations that differ only in public coefficients, which is what an amortized
-proof is for: `Pi_BND`'s own shape, `LEVEL + 2` columns of masked openings for
-all `MSGS` statements rather than one opening each. The 270 MB of linear proof
-in a pass becomes a few megabytes, the soundness is `2^-LEVEL` per pass by
-construction rather than `1 / p_min`, and binding the passes then costs
-nothing. It is a protocol change and not a repair, and it is the only entry in
-the table that makes the proof smaller and sounder at the same time.
+**Amortizing them is what one would want, and this relation will not take it.**
+A pass proves `MSGS` relations differing only in public coefficients, which
+looks exactly like what `Pi_BND`'s shape is for: `LEVEL + 2` columns of masked
+openings for all `MSGS` statements instead of one opening each, which at
+`MSGS = 1000` would be 14 MB a pass against 270. Every amortized proof of that
+shape combines statements with **small** coefficients, and that is what fails
+here: `shuffle_coeffs` gives each relation `coef[0] = beta` or `s[l-1]` and
+`coef[1] = raw tau`, all uniform elements of `R_q`. Any combination of the
+openings weighted by them has norm about `q`, a masked opening at that size is
+far above the `lambda_1` of Section 9's binding lattice, and binding says
+nothing about openings that are not short -- so the proof it would carry is
+vacuous.
+
+What makes the protocol work as it stands is that it never combines: the large
+coefficients are applied by the *verifier*, to short responses, one relation at
+a time. An amortized version has to preserve that, and the natural attempt does
+not. Prove the openings amortized in `Pi_BND`'s shape, then add a second family
+of responses for the coefficient-weighted combinations, tied to the
+commitments through `A1` as the first family is: the extractor then has short
+`r_l, pr_l, _r_l` and a large `R'_l`, and their difference lies in the kernel of
+`A1` with `A2` image `-L_l`. Binding kills such a difference only when it is
+short, and this one is not, so `L_l` is free to be non-zero. Making the relation
+amortizable means making its coefficients small, which means a different product
+argument -- or the general-purpose route of Section 6.4's alternative 1, where
+one proof system handles the whole membership and product statement and this
+question does not arise.
 
 ## 9. The decryption phase: `B_DDec` and the size of `q`
 
