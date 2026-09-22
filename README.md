@@ -101,7 +101,7 @@ Peak resident memory at the parameters currently in the sources. Every buffer he
 | `bgv`     | ~7 MiB | fixed |
 | `shuffle` | ~3.7 GiB at `MSGS = 1000` | ~3.75 MiB per message |
 | `pismall` | ~10 GiB at `TAU = 1024` | ~10 MiB per relation, mostly the `H[TAU][3][V]` codewords and the `v_{i,j}` coefficient arrays |
-| `pibnd`   | ~8.5 GiB at `TAU = 1000`, `NTI = 130` | 64 KiB x (8 TAU + 10 NTI + TAU NTI), dominated by the `C[TAU][NTI]` challenge matrix |
+| `pibnd`   | ~700 MiB at `TAU = 1000`, `NTI = 130` | 64 KiB x (2 TAU V + 2 V NTI + R NTI + NTI), dominated by the witness and statement matrices; it was 8.5 GiB before the challenge matrix was streamed a row at a time |
 
 The shuffle grew by about 40% in memory and 90% in prover time when the proof
 of shuffle was fixed: the linear proof now relates three commitments instead of

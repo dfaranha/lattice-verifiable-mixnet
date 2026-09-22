@@ -353,11 +353,14 @@ hash and consume it once, row by row, so `pibnd` keeps a single row. At
 satisfying the relation and the coefficient sets with no relaxation. `Pi_BND`,
 like every Fiat-Shamir Sigma protocol of its shape, extracts a *relaxed*
 opening: a short `s'` and a short non-zero `c` with `A s' = t c`, where `c` is a
-difference of challenges. Reading the `sigma_i` of the two as one ring element
-takes an argument, because the obvious one does not work: multiplying the exact
-relation by `c` and subtracting gives `A (c r - r') = 0`, and the binding of the
-commitment says nothing, since `r` is short only in each CRT component and `c r`
-need not be short over `Z_q` at all.
+difference of challenges. With the `{0,1}` challenge set Section 8 settles on
+that `c` is `+/-1` and the opening is exact, which is the best case of what
+follows; the argument is left general so that it survives the switch to the
+monomial challenge set, where `c` is 2. Reading the `sigma_i` of the two as one
+ring element takes an argument, because the obvious one does not work:
+multiplying the exact relation by `c` and subtracting gives `A (c r - r') = 0`,
+and the binding of the commitment says nothing, since `r` is short only in each
+CRT component and `c r` need not be short over `Z_q` at all.
 
 The way through is to stop working over `Z_q`, and it is Section 6.2 that makes
 it possible. Write the extracted randomness in CRT form, `r = e_1 r^(1) + e_2
@@ -545,29 +548,43 @@ The practical conclusion is that the repetitions carry more weight than their
 stated purpose, and removing them on the grounds that the product argument had
 been improved by other means would reopen this.
 
-**The same question, asked of `Pi_BND`, has a sharper answer.** Its challenge
-matrix is drawn from `nfl::ZO_dist()`, full-weight ternary ring elements. Baum
-et al. [8] give two instantiations of the amortized proof: Theorem 1 over
-`R = Z` with `C = {0,1}`, and Theorem 2 over `R = Z[X]/(X^d + 1)`, which is the
-one that applies here since `A` is a matrix of polynomials. Theorem 2 fixes
+**The same question, asked of `Pi_BND`, had a sharper answer, and this branch
+fixes it.** Its challenge matrix was drawn from `nfl::ZO_dist()`, full-weight
+ternary ring elements, which is neither of the two challenge sets the amortized
+proof is proven for. Baum et al. [8] give two instantiations, both of the
+protocol in their Figure 1:
 
-```
-C = {0} union {+/- X^j},
-```
+| | `C` | columns `n` | what the extractor returns |
+| --- | --- | --- | --- |
+| Theorem 1, `R = Z` | `{0,1}` | `n >= lambda + 2` | `A s' = t_i`, `\|s'\| <= 2B` |
+| Theorem 2, `R = Z[X]/(X^d+1)` | `{0} u {+-X^j}` | `n log(2d+1) >= lambda + 2` | `A s' = 2 t_i`, `\|s'\| <= 2 sqrt(d) B` |
 
-monomials and zero, and its extraction rests on their Lemma 4: for
-`a, b` in that set, `2 (a - b)^-1` has coefficients in `{-1, 0, 1}`. That is a
-statement about monomials, and it is what makes the extractor work. **A ternary
-challenge matrix is not that set**, Lemma 4 says nothing about it, and in this
-ring the differences have no invertibility to fall back on — which is Section 8
-one level up. So `Pi_BND` as implemented runs outside the soundness proof it
-cites.
+Theorem 2's extraction rests on their Lemma 4 — for `a, b` monomials or zero,
+`2 (a - b)^-1` has coefficients in `{-1,0,1}` — and Theorem 1's on nothing more
+than a difference of challenges being `+/-1`. **A ternary challenge matrix is
+neither**: Lemma 4 says nothing about it, and in this ring its differences have
+no invertibility to fall back on, for the reason the first half of this section
+gives for `beta`. So `Pi_BND` ran outside the soundness proof it cites.
 
-There is something to gain from fixing it rather than only a debt to pay. With
-the intended challenge set, Theorem 2's extractor returns `A S' = 2 T`, a clean
-factor of two rather than an arbitrary short `c`, and `Section 6.4` would
-simplify accordingly: the argument there carries `c` through only to cancel it
-at the end.
+**Which instantiation to repair it to is a real choice, and the paper has
+already made it.** Figure 4 of the CCS 2023 paper draws `C` from
+`C_Bnd = {0,1}` and asks for `n-hat >= kappa + 2`, which at `kappa = 128` is
+the 130 that `NTI` has always been in `src/pibnd.cpp`. The columns were the
+paper's; only the set they were drawn from was not. So the fix is one function:
+each entry of `C` is now a uniform bit, taken as a ring constant, and a
+challenge difference is `+/-1`.
+
+Theorem 2 is the tempting alternative, because `n = (LEVEL + 2) / log2(2N + 1)`
+is 10 at `N = 4096` and the proof would be **13 times smaller**. It was
+implemented, measured and put aside, because the two instantiations do not
+differ only in size: Theorem 2's extractor multiplies by the `g` of Lemma 4,
+whose `l2` norm is up to `sqrt(d)`, so what it returns is `2 sqrt(d) B` rather
+than `2 B` — a factor of 64 here. That slack is exactly what Section 9's
+`B_DDec` is made of. At the same `sigma` the decryption bound moves from
+`2^84.4` to `2^88.6`, past the `q/2 = 2^87` this branch's modulus offers, so
+taking the 13x means widening `q` by three or four bits and paying about eight
+bits of lattice security for it. The trade is recorded, not taken; it is the
+one place where this repository could still be made substantially smaller.
 
 `bdlop_open` uses the same challenge set as `Pi_LIN`, but `pismall` calls it
 with the factor fixed to one, so nothing there depends on a challenge being
@@ -603,20 +620,65 @@ sigma >= sqrt(ln 12 rho) * s * sqrt(l n),      s >= s_1(S),
 
 with `l` the number of statements and `n` the number of challenge columns —
 that is, `sqrt(tau * NTI)`, exactly the factor Appendix B drops and
-`src/pibnd.cpp` carries.
+`src/pibnd.cpp` carries. Only the shape of that requirement transfers: its
+constant is for the two-sided rejection sampling of their Lemma 1, and this
+implementation runs the one-sided variant, whose constant is the 0.954 below.
 
 Measurement agrees, and pins the exponents rather than the form alone.
-Instrumenting `pibnd_rej_sampling`:
+Instrumenting `pibnd_rej_sampling`, with the `{0,1}` challenge set of Section 8:
 
 | change | change in `||S'C'||` |
 | --- | --- |
-| `tau` 8 -> 32 -> 128 | +1.004, +0.999 bits |
-| `NTI` 8 -> 32 | +0.998 bits |
+| `tau` 16 -> 64 | +1.03 bits |
+| `NTI` 8 -> 32 | +0.98 bits |
 
-so `||S'C'||` grows as `sqrt(tau) sqrt(NTI)`, and `sigma / ||S'C'|| = 1.35` at
-every point — the form *and* the constant in `pibnd.cpp` are right. With the
-paper's constant instead, the honest prover exhausts `PIBND_TRIES` every time
-and the test `BND proof is consistent` fails.
+so `||S'C'||` grows as `sqrt(tau) sqrt(NTI)`, which is the factor Appendix B
+drops and `src/pibnd.cpp` carries. In absolute terms the measurement gives
+`||S'C'|| = 0.49 B_Com sqrt(k N tau NTI)`, which passes the paper's `sigma_Bnd`
+at `tau NTI = 2^13.9`, an eighth of the real parameters; past that point the
+honest prover exhausts `PIBND_TRIES` every time and the test `BND proof is
+consistent` fails.
+
+**What `sigma` has to clear is smaller than it looks, and this is where the
+0.954 comes from.** `pibnd_rej_sampling` rejects when `<Z, S'C'> < 0` before
+the usual test, which is Figure 2 of the paper run with `b = 1`: the variant of
+[38] that accepts inside a halfspace, leaks the one bit that says which, and in
+exchange needs only `M >= exp(||S'C'||^2 / 2 sigma^2)`. At the `M = sqrt(3)` of
+each of the two checks that is `sigma >= ||S'C'|| / sqrt(2 ln sqrt 3)`, i.e.
+`sigma >= 0.954 ||S'C'||` — the paper's constant exactly, applied to a
+worst-case `||S'C'||` of `sqrt(k) N B_Com`. So the protocol is sound and
+zero-knowledge at any `sigma` above that, and the old ternary challenges, which
+left the ratio at 1.35, were fine on this count.
+
+**But it is now 90 times more than that, and `q` is sized for it.** The
+`{0,1}` challenges are `2^5.5` shorter than ternary ones against the same
+`sigma`, so the measured ratio is **86** where **0.954** is what the sampler
+asks. `sigma_Bnd`, `B_Bnd` and `B_DDec` are therefore about six bits larger
+than they need to be, and `q` was widened to cover them: retightening `sigma`
+to `0.954 ||S'C'||` puts `B_DDec` between `2^76.7` and `2^77.9`, the interval
+spanned by whether `||E||_inf` is the `2^54` of the chain above or the `2^53.3`
+of `BOUND_D`, and by whether the bound on `||S'C'||` is the constant fitted
+above or one corrected for the last row being uniform rather than ternary.
+
+**It does not follow that `q` can go back to the 78 bits this branch started
+at.** Two things stand in the way, and the second is the real one. `q/2` at the
+old basis is `2^77`, which that interval straddles rather than clears — which is
+what an argued bound, rather than a fitted one, would have to settle. But
+`p_min` is not only covering `B_DDec`: `SHUFFLE_BITS` is
+`floor(log2 p_min) - ceil(log2 2 MSGS)`, so at `MSGS = 1000` two 39-bit primes
+give 28 bits a pass and **five passes where 44-bit primes give four**. Elements
+11% narrower, 25% more of them, is a proof 11% larger. Four passes survive only
+while `floor(log2 p_min) >= 42`: two 43-bit primes, `q = 86`, worth 2% of the
+sizes in section 11 and about four bits of lattice security rather than the
+twenty-two the widening spent.
+
+So the six bits are real but mostly unspendable here. They are worth having in
+the **decryption phase**, which shares none of this: there `Pi_BND` is the whole
+proof, `q` answers to `B_DDec` alone, and six bits of `q` is six bits of every
+ciphertext and partial decryption. Nothing has been changed: taking them needs a
+tail bound on `||S'C'||` that is argued rather than fitted to four measurements,
+a new RNS basis, and a fresh estimator run. Every number below is at the `q`
+that is in the sources.
 
 **`q` has been raised accordingly.** At `N = 4096`, `NTI = 130`, `tau = 1000`
 the corrected bound needs `q > 2^84.7`, so the RNS basis moved from two 39-bit

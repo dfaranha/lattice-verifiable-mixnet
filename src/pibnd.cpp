@@ -42,6 +42,10 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
 #ifndef TAU
 #define TAU     1000
 #endif
+/* Columns of the response matrix Z, which is what the soundness of the
+ * amortized proof is bought with: a prover succeeding with probability
+ * 2^-(LEVEL) is extractable, and the challenge column of one statement has
+ * NTI bits of entropy, so Lemma 3 of Baum et al. needs NTI >= LEVEL + 2. */
 #ifndef NTI
 #define NTI     130
 #endif
@@ -69,12 +73,17 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
  * i.e. sigma_Bnd = 0.954 sqrt(k) N B_Com, which carries no factor for the tau
  * statements the product S'C' sums over, nor for the NTI columns the rejection
  * sampling below tests as one vector. Both are needed: sigma has to track
- * ||S'C'||, and measuring it at TAU = NTI = 16 gives ||S'C'|| = 2^15.8 against
- * the paper's sigma = 2^12.7, so the honest prover exhausts PIBND_TRIES every
- * time. The factor below makes sigma track the measured norm to within 1.35.
- *
- * This matters beyond this file: the same bound is what the paper's B_DDec and
- * hence its choice of q rest on. See SOUNDNESS.md, section 9.
+ * ||S'C'||, which measurement puts at 0.49 B_Com sqrt(k N tau NTI) and so
+ * above the paper's sigma from tau NTI = 2^13.9 on -- an eighth of the real
+ * parameters -- and past that point the honest prover exhausts PIBND_TRIES.
+ * The factor below tracks the measured growth, which leaves sigma about 86
+ * times ||S'C'||. The rejection sampling below runs Figure 2 of the paper with
+ * b = 1 -- it rejects on <Z, S'C'> < 0 first -- and so asks only for
+ * sigma >= ||S'C'|| / sqrt(2 ln M), which at M = sqrt(3) is the 0.954 above.
+ * There are therefore about six bits here to give back. See SOUNDNESS.md
+ * section 9 for where they can be spent: the decryption phase, whose q answers
+ * to this bound alone, rather than the shuffle, whose q is pinned from below by
+ * the pass count of its product argument.
  */
 static const double SIGMA_ANEX =
 		0.954 * BETA * DEGREE * sqrt(ANEX_K * (double) NTI * TAU / 2.0);
@@ -275,6 +284,20 @@ void pibnd_sample_chall(params::poly_q & f) {
 	f.ntt_pow_phi();
 }
 
+/* One entry of the challenge matrix: a uniform bit, as a ring constant. That is
+ * the challenge set C_Bnd = {0,1} of the amortized proof, and the extractor
+ * needs it: it subtracts two transcripts differing in one entry and divides by
+ * the difference, which here is +-1. A ternary polynomial, which this used to
+ * draw, need not be invertible in a ring splitting into 2N factors -- see
+ * SOUNDNESS.md section 8 -- so the proof ran outside the argument it cites. */
+static void pibnd_sample_c(params::poly_q & c) {
+	uint8_t b;
+
+	nfl::fastrandombytes(&b, sizeof(b));
+	c = (uint64_t) (b & 1);
+	c.ntt_pow_phi();
+}
+
 static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		params::poly_q A[R][V], params::poly_q t[TAU][V],
 		params::poly_q s[TAU][V]) {
@@ -334,8 +357,7 @@ static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		}
 		for (int k = 0; k < TAU; k++) {
 			for (int j = 0; j < NTI; j++) {
-				Crow[j] = nfl::ZO_dist();
-				Crow[j].ntt_pow_phi();
+				pibnd_sample_c(Crow[j]);
 			}
 			for (int i = 0; i < V; i++) {
 				for (int j = 0; j < NTI; j++) {
@@ -389,8 +411,7 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 	nfl::fastrandombytes_seed(h1);
 	for (int k = 0; k < TAU; k++) {
 		for (int j = 0; j < NTI; j++) {
-			Crow[j] = nfl::ZO_dist();
-			Crow[j].ntt_pow_phi();
+			pibnd_sample_c(Crow[j]);
 		}
 		for (int i = 0; i < R; i++) {
 			for (int j = 0; j < NTI; j++) {
