@@ -8,9 +8,6 @@
 #include "sample_z_small.h"
 #include "sample_z_large.h"
 
-/* sqrt(3), the per-check rejection-sampling constant. */
-#define M_SQRT3     1.7320508075688772
-
 /**
  * Stores a 128-bit signed integer in an mpz_t. GMP only offers mpz_set_si for
  * long, which is too narrow for the coefficients of the last row.
@@ -78,12 +75,14 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
  * parameters -- and past that point the honest prover exhausts PIBND_TRIES.
  * The factor below tracks the measured growth, which leaves sigma about 86
  * times ||S'C'||. The rejection sampling below runs Figure 2 of the paper with
- * b = 1 -- it rejects on <Z, S'C'> < 0 first -- and so asks only for
- * sigma >= ||S'C'|| / sqrt(2 ln M), which at M = sqrt(3) is the 0.954 above.
- * There are therefore about six bits here to give back. See SOUNDNESS.md
- * section 9 for where they can be spent: the decryption phase, whose q answers
- * to this bound alone, rather than the shuffle, whose q is pinned from below by
- * the pass count of its product argument.
+ * b = 1 -- it rejects on <Z, S'C'> < 0 first -- and takes its M from ||S'C'||,
+ * so no value of sigma is invalid: a small one only costs restarts, at
+ * 1 / 2 exp(||S'C'||^2 / 2 sigma^2) each. The 0.954 above is what that trade
+ * settles at for a fixed M of sqrt(3), and 86 times it is about six bits more
+ * than the norm bound needs. See SOUNDNESS.md section 9 for where they can be
+ * spent: the decryption phase, whose q answers to this bound alone, rather
+ * than the shuffle, whose q is pinned from below by the pass count of its
+ * product argument.
  */
 static const double SIGMA_ANEX =
 		0.954 * BETA * DEGREE * sqrt(ANEX_K * (double) NTI * TAU / 2.0);
@@ -171,7 +170,7 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	array < mpz_t, params::poly_q::degree > coeffs0, coeffs1;
 	params::poly_q t;
 	mpz_t dot, norm, qDivBy2, tmp;
-	double r, M = M_SQRT3;
+	double r, M;
 	int64_t seed;
 	mpf_t u;
 	uint8_t buf[8];
@@ -220,7 +219,13 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	mpf_urandomb(u, state, mpf_get_default_prec());
 
 	/* Reject when <z, sc> < 0, then accept with probability min(1, r) for
-	 * r = exp((-2<z, sc> + ||sc||^2) / 2s2) / M. */
+	 * r = exp((-2<z, sc> + ||sc||^2) / 2s2) / M. Inside that halfspace the
+	 * ratio to dominate is at most exp(||sc||^2 / 2s2), which is what M is:
+	 * the sqrt(3) this used to divide by is what the constant would have to be
+	 * if sigma were the 0.954 ||S'C'|| the paper sizes for, and sigma is 86
+	 * times that, so the fixed constant was costing restarts and nothing else.
+	 * See SOUNDNESS.md section 9. */
+	M = exp(mpz_get_d(norm) / (2.0 * s2));
 	result = mpz_get_d(dot) < 0;
 	r = -2.0 * mpz_get_d(dot) + mpz_get_d(norm);
 	r = r / (2.0 * s2);

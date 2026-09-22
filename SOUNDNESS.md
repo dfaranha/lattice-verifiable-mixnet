@@ -774,12 +774,22 @@ consistent` fails.
 0.954 comes from.** `pibnd_rej_sampling` rejects when `<Z, S'C'> < 0` before
 the usual test, which is Figure 2 of the paper run with `b = 1`: the variant of
 [38] that accepts inside a halfspace, leaks the one bit that says which, and in
-exchange needs only `M >= exp(||S'C'||^2 / 2 sigma^2)`. At the `M = sqrt(3)` of
-each of the two checks that is `sigma >= ||S'C'|| / sqrt(2 ln sqrt 3)`, i.e.
+exchange needs only `M >= exp(||S'C'||^2 / 2 sigma^2)`. At a fixed `M` of
+`sqrt(3)` that reads `sigma >= ||S'C'|| / sqrt(2 ln sqrt 3)`, i.e.
 `sigma >= 0.954 ||S'C'||` — the paper's constant exactly, applied to a
 worst-case `||S'C'||` of `sqrt(k) N B_Com`. So the protocol is sound and
 zero-knowledge at any `sigma` above that, and the old ternary challenges, which
 left the ratio at 1.35, were fine on this count.
+
+`M` is no longer fixed: it is taken from the `||S'C'||^2` the function has
+already computed, as section 9.1 does for `Pi_LIN` and as the paper's own text
+specifies for `b = 1`. That makes no `sigma` invalid — a small one costs
+restarts and nothing else — and it removes the only thing the 0.954 was ever
+load-bearing for. At the 86 the file now runs at, `M` is `1.00007` and the
+honest prover restarts **2.08 times a proof against 7.85** before the change,
+measured over a `MSGS = 4` run; `pibnd` is 94% of the sub-proof cost and the
+sub-proofs are nearly all of the prover, so the `shuffle-proof` benchmark falls
+from 37.4 to **14.3 Gcycles**.
 
 **But it is now 90 times more than that, and `q` is sized for it.** The
 `{0,1}` challenges are `2^5.5` shorter than ternary ones against the same
