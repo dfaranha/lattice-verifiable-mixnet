@@ -376,7 +376,7 @@ static int poly_inverse(params::poly_q & inv, const params::poly_q & p) {
 	return 1;
 }
 
-static void simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
+static int simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
 	params::poly_q w;
 	int ok;
 
@@ -392,18 +392,20 @@ static void simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
 	/* The b_i behave like uniform elements of R_q, so this fails when one of
 	 * the 2N NTT residues of their product is zero: about 2N MSGS / p_min,
 	 * which is 2^-21 a pass at MSGS = 1000 and 2^-19 a shuffle. The event
-	 * depends on the sigma_i, so stopping here tells an observer something
-	 * about the permutation; it should be a restart of the pass instead, which
-	 * moves tau and mu and so moves the event. See SOUNDNESS.md section 5.2. */
+	 * depends on the sigma_i, so stopping on it would tell an observer
+	 * something about the permutation. The caller restarts instead, which moves
+	 * tau and mu and so moves the event. See SOUNDNESS.md section 5.2. */
 	ok = poly_inverse(w, w);
-	assert(ok == 1);
-	(void) ok;
+	if (!ok) {
+		return 0;
+	}
 
 	for (size_t i = MSGS - 1; i > 0; i--) {
 		inv[i] = w * inv[i - 1];
 		w = w * inv_tmp[i];
 	}
 	inv[0] = w;
+	return 1;
 }
 
 /* Accumulate <z, v> and ||v||^2 over one masked opening, centred. A proof has
@@ -497,6 +499,11 @@ static int rej_decide(mpz_t dot, mpz_t norm, uint64_t s2) {
  * that gave up may well verify while leaking. It must not be published, which
  * is why the status is threaded back to run(). */
 #define LIN_TRIES   256
+
+/* How many times the prover rebuilds its first message when a pass turns out
+ * unusable, which is the singular case of simul_inverse at about 2^-19 a
+ * shuffle. Eight of them leave 2^-152, and each costs the two sub-proofs. */
+#define SHUFFLE_TRIES 8
 
 /* One linear proof, run LIN_REPS times against challenges drawn from a single
  * hash of all LIN_REPS first messages. What it publishes is that hash and the
@@ -905,7 +912,7 @@ static void shuffle_factors(params::poly_q ms[MSGS], params::poly_q _ms[MSGS],
 /* The half of a pass the prover can send before beta: its tau and mu, and the
  * commitments D_i under them. Every pass reaches this point before any beta is
  * drawn, which is what binds them to each other. */
-static void shuffle_prover_commit(params::poly_q & tau, params::poly_q & mu,
+static int shuffle_prover_commit(params::poly_q & tau, params::poly_q & mu,
 		commit_t d[MSGS], vector < params::poly_q > _r[MSGS],
 		params::poly_q theta[MSGS], commit_t p[MSGS], commit_t c[MSGS],
 		params::poly_q ms[MSGS], params::poly_q _ms[MSGS],
@@ -914,6 +921,13 @@ static void shuffle_prover_commit(params::poly_q & tau, params::poly_q & mu,
 
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
 	shuffle_factors(ms, _ms, tau, mu);
+
+	/* The s_i of the second half divide by the b_i, so this pass is only usable
+	 * if their product inverts. Testing it here costs one inversion and saves
+	 * discovering it after the linear proofs have been built. */
+	if (!simul_inverse(inv, fb)) {
+		return 0;
+	}
 
 	/* Prover samples theta_i and computes commitments D_i. */
 	for (size_t i = 0; i < MSGS - 1; i++) {
@@ -935,6 +949,8 @@ static void shuffle_prover_commit(params::poly_q & tau, params::poly_q & mu,
 	_r[MSGS - 1].resize(WIDTH);
 	bdlop_sample_rand(_r[MSGS - 1]);
 	bdlop_commit(d[MSGS - 1], t0, key, _r[MSGS - 1]);
+
+	return 1;
 }
 
 /* The other half, once beta is known for every pass: the published s_i and the
@@ -953,7 +969,9 @@ static int shuffle_prover_respond(params::poly_q y[MSGS][LIN_REPS][WIDTH],
 	int complete = 1;
 
 	shuffle_factors(ms, _ms, tau, mu);
-	simul_inverse(inv, fb);
+	if (!simul_inverse(inv, fb)) {
+		return 0;
+	}
 	for (size_t i = 0; i < MSGS - 1; i++) {
 		if (i == 0) {
 			s[0] = theta[0] * fb[0] - beta * fa[0];
@@ -1062,7 +1080,7 @@ static int run(vector < vector < params::poly_q >> m,
 	static params::poly_q tau[SHUFFLE_REPS], mu[SHUFFLE_REPS];
 	static params::poly_q beta[SHUFFLE_REPS], vbeta[SHUFFLE_REPS];
 	comkey_t _key;
-	int result = 1;
+	int result = 1, ready, tries = 0;
 
 	/* The commitments to the sigma_i and the two sub-proofs that place them in D
 	 * are the prover's first message, and they are sent once. Every pass's
@@ -1071,21 +1089,32 @@ static int run(vector < vector < params::poly_q >> m,
 	 * message per pass would let a prover settle the passes one at a time. They
 	 * can be shared because they are committed under the original key rather
 	 * than the rho-compressed one of the pass. See SOUNDNESS.md section 7.1. */
-	shuffle_commit_sigma(pcom, pr, sigma.data(), key);
-	result &= pismall_const_verify(cst, key, pcom, MSGS);
-	result &= pibnd_short_verify(bnd, key, pcom, MSGS);
-
 	/* Every pass commits its D_i before any of them has a beta, for the same
 	 * reason: beta is a hash of all of them together. The compression and the
 	 * key it induces depend on rho and so stay inside the pass, recomputed in
-	 * the second half rather than held. */
-	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
-		shuffle_rho_hash(rho[rep], com, _m, rep);
-		shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
-		shuffle_prover_commit(tau[rep], mu[rep], &d[rep * MSGS],
-				&_r[rep * MSGS], &theta[rep * MSGS], pcom, cs, ms, _ms,
-				rho[rep], _key, rep);
-	}
+	 * the second half rather than held.
+	 *
+	 * The whole of it is a retry, because a pass is unusable when the product
+	 * of its b_i does not invert, and that event depends on the sigma_i: giving
+	 * up on it would tell an observer which permutations could have caused it.
+	 * What moves it is fresh randomness in the P_i, which moves every pass's
+	 * tau and mu, so the restart reaches back that far and takes the two
+	 * sub-proofs with it. It happens about once in 2^19 shuffles at
+	 * MSGS = 1000; SHUFFLE_TRIES of them leave 2^-152. See SOUNDNESS.md 5.2. */
+	do {
+		ready = 1;
+		shuffle_commit_sigma(pcom, pr, sigma.data(), key);
+		for (int rep = 0; rep < SHUFFLE_REPS && ready; rep++) {
+			shuffle_rho_hash(rho[rep], com, _m, rep);
+			shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
+			ready = shuffle_prover_commit(tau[rep], mu[rep], &d[rep * MSGS],
+					&_r[rep * MSGS], &theta[rep * MSGS], pcom, cs, ms, _ms,
+					rho[rep], _key, rep);
+		}
+	} while (!ready && ++tries < SHUFFLE_TRIES);
+	result &= ready;
+	result &= pismall_const_verify(cst, key, pcom, MSGS);
+	result &= pibnd_short_verify(bnd, key, pcom, MSGS);
 
 	/* Twice, because the verifier derives its challenges from the transcript
 	 * rather than taking the prover's word for them; the two must agree. */

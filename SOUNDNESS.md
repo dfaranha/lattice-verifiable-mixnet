@@ -293,21 +293,27 @@ and leaks twelve signs, each of a different linear function of it. Against
 `WIDTH * N = 16384` ternary coefficients that is nothing, but it scales with
 both kinds of repetition, which is worth knowing now that there are two.
 
-**Two: an abort is not free, and this one aborts.** `simul_inverse` inverts the
-`b_i` by the batch trick, which needs their product to be invertible, and
-`assert`s that it is. The event is witness-dependent:
-`b_i = _m_i + sigma_i tau - mu`, so an observer who sees the prover stop knows
-`tau`, `mu` and the output list, can compute `b_i` for every candidate value of
-each `sigma_i`, and learns that at least one of them is singular. That is a
+**Two: an abort is not free, and this one used to abort.** `simul_inverse`
+inverts the `b_i` by the batch trick, which needs their product to be
+invertible, and `assert`ed that it was. The event is witness-dependent:
+`b_i = _m_i + sigma_i tau - mu`, so an observer who saw the prover stop knew
+`tau`, `mu` and the output list, could compute `b_i` for every candidate value
+of each `sigma_i`, and learned that at least one of them is singular. That is a
 constraint on the permutation and not a bit of it. The rate is
 `2N MSGS / p_min`, which is `2^-21` a pass and `2^-19` a shuffle at
-`MSGS = 1000` — the comment in the code said `2^-26`, which is the figure for
-the old 39-bit basis and drops the factor of `MSGS`. The treatment it should
-get is the one rejection sampling gets: restart. Re-rolling the randomness of
-the `P_i` moves `tau` and `mu` and so moves the event, and at `2^-19` the
-expected cost of that is nothing. Aborting is what it does instead, and under
-`NDEBUG` — which this Makefile does not set — it would carry on with a value
-that is not an inverse.
+`MSGS = 1000` — the comment in the code said `2^-26`, the figure for the old
+39-bit basis with the factor of `MSGS` dropped.
+
+It now gets the treatment rejection sampling gets: a restart. `simul_inverse`
+returns a status, the first half of a pass tests it as soon as the `b_i` exist
+— one inversion, before any `D_i` is committed, so nothing expensive is built
+on a pass that cannot be finished — and `run()` rebuilds its first message when
+a pass reports it. Fresh randomness in the `P_i` moves every pass's `tau` and
+`mu` and so moves the event, which is what makes the retries independent; it
+takes the two sub-proofs with it, which is why the budget is `SHUFFLE_TRIES = 8`
+rather than the 256 of the linear proofs. Eight leave `2^-152`. The path was
+tested by forcing the singular case: the prover rebuilds and the proof still
+verifies.
 
 **Three: the clock.** The number of restarts the prover makes depends on the
 norms it is masking, and now also on the singular case above. None of it is in
@@ -1213,7 +1219,7 @@ of `Pi_SMALL` (6.2), the challenge set of `Pi_LIN` (8) and of `Pi_BND` (8, now
 repaired), the slack bound feeding `q` and the six bits it now carries for
 nothing (9), the rejection sampling of `Pi_LIN` (9.1), the compression by
 `rho` (10), the mask of the AEx proof and the two ways to publish an abandoned
-one (5.1), and the abort in `simul_inverse` (5.2, open).
+one (5.1), and the abort in `simul_inverse` (5.2).
 
 **Not reviewed.** The linear proof's own soundness beyond its challenge set and
 its masking; the internals of `pismall`'s AEx proof beyond the coefficient sets
