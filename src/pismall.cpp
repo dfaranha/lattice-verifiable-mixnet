@@ -14,7 +14,14 @@
 #include <assert.h>
 #include "blake3.h"
 
-#define ETA         325
+/* Columns opened. Lemma 2 of the paper bounds the proximity part of the
+ * soundness error by 2 max((g / (l - ETA))^ETA, (1 - 2 (g - g') / 3l)^ETA) over
+ * g' <= g <= l, with g' = 2N + ETA the message length and l = AEX_COLS the code
+ * length. The two balance at g = 13000-odd, and 451 is where that crosses
+ * 2^-LEVEL; 452 for a little room. It used to be 325, which is 2^-95 -- enough
+ * when the proof was run twice, and this one runs once. See SOUNDNESS.md 6.5.
+ */
+#define ETA         452
 /* Shape of the relation. The mix-net's own instance of this proof has
  * R = HEIGHT + 2 rows and V = WIDTH + 3 components; the proof of shuffle links
  * this file with the shape of a BDLOP commitment equation, R = HEIGHT + 1 and
@@ -38,12 +45,13 @@
 #endif
 
 /* --- GR(q,2), the challenge domain ---------------------------------------
- * q is a product of two 39-bit primes, so a challenge drawn from Z_q is only
+ * q is a product of two 44-bit primes, so a challenge drawn from Z_q is only
  * worth deg/p_min: an adversary can make the identity vanish modulo one prime
  * and gamble on the other alone. Drawing it from the quadratic Galois
- * extension Z_q[Y]/(Y^2 - AEX_NR) restores deg/p_min^2, because AEX_NR is a
- * non-residue modulo both primes and so Y^2 - AEX_NR stays irreducible in each
- * CRT component. An element is a0 + a1 Y.
+ * extension restores deg/p_min^AEX_DEG, because AEX_NR is a non-residue modulo
+ * both primes and so Y^AEX_DEG - AEX_NR stays irreducible in each CRT
+ * component. See the tower below, and SOUNDNESS.md section 6.5 for why the
+ * degree is 4 and not 2.
  *
  * 3 is the smallest usable constant, and the RNS basis is picked for it: the
  * NTT needs p = 1 mod 2^21, which forces p = 1 mod 8 and so makes both -1 and
@@ -101,80 +109,183 @@ static void gr_mul_nr(fmpz_t r, const fmpz_t a, const fmpz_mod_ctx_t ctx) {
 	fmpz_clear(d);
 }
 
+/* Degree of the challenge extension over Z_q. Section 6.5: the algebraic term
+ * of Lemma 2 is 18 TAU / p_min^AEX_DEG, since an adversary works modulo one
+ * prime of the basis and the challenge's slot lives in GR(p, AEX_DEG). At
+ * degree 2 that is 2^-74 and a proof needs two passes, which Fiat-Shamir then
+ * has to bind; at degree 4 it is 2^-162 and one pass carries the whole thing,
+ * which is smaller, faster, and leaves nothing to bind. */
+#define AEX_DEG     4
+
+/* GR(q, AEX_DEG) as a tower: c[0] + c[1] Z over Z_q, and u + v Y over that,
+ * with Z^2 = AEX_NR and Y^2 = Z. So Y^4 = AEX_NR, and X^4 - AEX_NR is
+ * irreducible modulo every prime of the basis exactly when AEX_NR is a
+ * non-residue there and p = 1 mod 4, both of which the test at the bottom of
+ * this file checks rather than assumes. The coordinates are in tower order,
+ * (1, Z, Y, ZY), which is a basis like any other: everything outside this
+ * block is Z_q-linear in them and does not care which. */
 typedef struct {
-	fmpz_t c0, c1;
+	fmpz_t c[AEX_DEG];
 } gr_t;
 
-static void gr_init(gr_t & a) { fmpz_init(a.c0); fmpz_init(a.c1); }
-static void gr_clear(gr_t & a) { fmpz_clear(a.c0); fmpz_clear(a.c1); }
-static void gr_one(gr_t & a) { fmpz_one(a.c0); fmpz_zero(a.c1); }
+static void gr_init(gr_t & a) {
+	for (int i = 0; i < AEX_DEG; i++) fmpz_init(a.c[i]);
+}
+
+static void gr_clear(gr_t & a) {
+	for (int i = 0; i < AEX_DEG; i++) fmpz_clear(a.c[i]);
+}
+
+static void gr_one(gr_t & a) {
+	fmpz_one(a.c[0]);
+	for (int i = 1; i < AEX_DEG; i++) fmpz_zero(a.c[i]);
+}
 
 static void gr_set(gr_t & r, const gr_t & a) {
-	fmpz_set(r.c0, a.c0);
-	fmpz_set(r.c1, a.c1);
+	for (int i = 0; i < AEX_DEG; i++) fmpz_set(r.c[i], a.c[i]);
 }
 
 static void gr_add(gr_t & r, const gr_t & a, const gr_t & b,
 		const fmpz_mod_ctx_t ctx) {
-	fmpz_mod_add(r.c0, a.c0, b.c0, ctx);
-	fmpz_mod_add(r.c1, a.c1, b.c1, ctx);
+	for (int i = 0; i < AEX_DEG; i++) fmpz_mod_add(r.c[i], a.c[i], b.c[i], ctx);
 }
 
 static void gr_sub(gr_t & r, const gr_t & a, const gr_t & b,
 		const fmpz_mod_ctx_t ctx) {
-	fmpz_mod_sub(r.c0, a.c0, b.c0, ctx);
-	fmpz_mod_sub(r.c1, a.c1, b.c1, ctx);
+	for (int i = 0; i < AEX_DEG; i++) fmpz_mod_sub(r.c[i], a.c[i], b.c[i], ctx);
 }
 
-/* (a0 + a1 Y)(b0 + b1 Y) = (a0 b0 + NR a1 b1) + (a0 b1 + a1 b0) Y, by
+/* --- the quadratic base, on pairs of Z_q coordinates ---------------------
+ * (a0 + a1 Z)(b0 + b1 Z) = (a0 b0 + NR a1 b1) + (a0 b1 + a1 b0) Z, by
  * Karatsuba so three Z_q multiplies instead of four. Safe to alias. */
-static void gr_mul(gr_t & r, const gr_t & a, const gr_t & b,
-		const fmpz_mod_ctx_t ctx) {
+static void gq_mul(fmpz_t r0, fmpz_t r1, const fmpz_t a0, const fmpz_t a1,
+		const fmpz_t b0, const fmpz_t b1, const fmpz_mod_ctx_t ctx) {
 	fmpz_t m0, m1, m2, t;
 
 	fmpz_init(m0); fmpz_init(m1); fmpz_init(m2); fmpz_init(t);
-	fmpz_mod_mul(m0, a.c0, b.c0, ctx);
-	fmpz_mod_mul(m1, a.c1, b.c1, ctx);
-	fmpz_mod_add(m2, a.c0, a.c1, ctx);
-	fmpz_mod_add(t, b.c0, b.c1, ctx);
+	fmpz_mod_mul(m0, a0, b0, ctx);
+	fmpz_mod_mul(m1, a1, b1, ctx);
+	fmpz_mod_add(m2, a0, a1, ctx);
+	fmpz_mod_add(t, b0, b1, ctx);
 	fmpz_mod_mul(m2, m2, t, ctx);
 	fmpz_mod_sub(m2, m2, m0, ctx);
 	fmpz_mod_sub(m2, m2, m1, ctx);
 	gr_mul_nr(t, m1, ctx);
-	fmpz_mod_add(r.c0, m0, t, ctx);
-	fmpz_set(r.c1, m2);
+	fmpz_mod_add(r0, m0, t, ctx);
+	fmpz_set(r1, m2);
 	fmpz_clear(m0); fmpz_clear(m1); fmpz_clear(m2); fmpz_clear(t);
 }
 
-/* GR times a plain Z_q scalar: two multiplies, not three. This is the common
- * case, since every witness stays in Z_q and only the challenge is extended. */
-static void gr_scalar(gr_t & r, const gr_t & a, const fmpz_t s,
+/* r <- Z * a in the base, i.e. (a0 + a1 Z) Z = NR a1 + a0 Z. */
+static void gq_mul_z(fmpz_t r0, fmpz_t r1, const fmpz_t a0, const fmpz_t a1,
 		const fmpz_mod_ctx_t ctx) {
-	fmpz_mod_mul(r.c0, a.c0, s, ctx);
-	fmpz_mod_mul(r.c1, a.c1, s, ctx);
+	fmpz_t t;
+
+	fmpz_init(t);
+	gr_mul_nr(t, a1, ctx);
+	fmpz_set(r1, a0);
+	fmpz_set(r0, t);
+	fmpz_clear(t);
 }
 
-/* (a0 + a1 Y)^-1 = (a0 - a1 Y)/(a0^2 - NR a1^2). The norm is non-invertible
- * exactly when a is a zero divisor, which for a challenge-derived value has
- * probability about deg/p_min^2; report it instead of letting FLINT abort
- * inside fmpz_mod_inv, and let the caller reject. */
+/* (u + v Y)(w + z Y) = (u w + Z v z) + (u z + v w) Y over the base, Karatsuba
+ * again: three base multiplies. Safe to alias. */
+static void gr_mul(gr_t & r, const gr_t & a, const gr_t & b,
+		const fmpz_mod_ctx_t ctx) {
+	fmpz_t p0, p1, q0, q1, s0, s1, t0, t1;
+
+	fmpz_init(p0); fmpz_init(p1); fmpz_init(q0); fmpz_init(q1);
+	fmpz_init(s0); fmpz_init(s1); fmpz_init(t0); fmpz_init(t1);
+
+	gq_mul(p0, p1, a.c[0], a.c[1], b.c[0], b.c[1], ctx);      /* u w */
+	gq_mul(q0, q1, a.c[2], a.c[3], b.c[2], b.c[3], ctx);      /* v z */
+	fmpz_mod_add(s0, a.c[0], a.c[2], ctx);
+	fmpz_mod_add(s1, a.c[1], a.c[3], ctx);
+	fmpz_mod_add(t0, b.c[0], b.c[2], ctx);
+	fmpz_mod_add(t1, b.c[1], b.c[3], ctx);
+	gq_mul(s0, s1, s0, s1, t0, t1, ctx);                      /* (u+v)(w+z) */
+	fmpz_mod_sub(s0, s0, p0, ctx);
+	fmpz_mod_sub(s1, s1, p1, ctx);
+	fmpz_mod_sub(s0, s0, q0, ctx);
+	fmpz_mod_sub(s1, s1, q1, ctx);
+	gq_mul_z(q0, q1, q0, q1, ctx);                            /* Z v z */
+	fmpz_mod_add(r.c[0], p0, q0, ctx);
+	fmpz_mod_add(r.c[1], p1, q1, ctx);
+	fmpz_set(r.c[2], s0);
+	fmpz_set(r.c[3], s1);
+
+	fmpz_clear(p0); fmpz_clear(p1); fmpz_clear(q0); fmpz_clear(q1);
+	fmpz_clear(s0); fmpz_clear(s1); fmpz_clear(t0); fmpz_clear(t1);
+}
+
+/* The product of two basis elements, for the one place that multiplies
+ * extension-valued polynomials by an extension scalar and so cannot go through
+ * gr_mul: e0 = 1, e1 = Z, e2 = Y, e3 = ZY with Z^2 = NR and Y^2 = Z, so
+ * e1 e1 = NR e0, e1 e2 = e3, e1 e3 = NR e2, e2 e2 = e1, e2 e3 = NR e0 and
+ * e3 e3 = NR e1. idx says which basis element the product lands on and nr
+ * whether it carries a factor of NR. */
+static const int aex_basis_idx[AEX_DEG][AEX_DEG] = {
+	{0, 1, 2, 3},
+	{1, 0, 3, 2},
+	{2, 3, 1, 0},
+	{3, 2, 0, 1},
+};
+static const int aex_basis_nr[AEX_DEG][AEX_DEG] = {
+	{0, 0, 0, 0},
+	{0, 1, 0, 1},
+	{0, 0, 0, 1},
+	{0, 1, 1, 1},
+};
+
+/* GR times a plain Z_q scalar: AEX_DEG multiplies. This is the common case,
+ * since every witness stays in Z_q and only the challenge is extended. */
+static void gr_scalar(gr_t & r, const gr_t & a, const fmpz_t s,
+		const fmpz_mod_ctx_t ctx) {
+	for (int i = 0; i < AEX_DEG; i++) fmpz_mod_mul(r.c[i], a.c[i], s, ctx);
+}
+
+/* (u + v Y)^-1 = (u - v Y) / (u^2 - Z v^2), whose denominator is in the base,
+ * and the base inverse is (a0 - a1 Z)/(a0^2 - NR a1^2). Either norm is
+ * non-invertible exactly when a is a zero divisor, which for a
+ * challenge-derived value has probability about deg/p_min^AEX_DEG; report it
+ * instead of letting FLINT abort inside fmpz_mod_inv, and let the caller
+ * reject. */
 static int gr_inv(gr_t & r, const gr_t & a, const fmpz_mod_ctx_t ctx) {
-	fmpz_t n, t, g;
+	fmpz_t n0, n1, m0, m1, g, t;
 	int ok;
 
-	fmpz_init(n); fmpz_init(t); fmpz_init(g);
-	fmpz_mod_mul(n, a.c0, a.c0, ctx);
-	fmpz_mod_mul(t, a.c1, a.c1, ctx);
+	fmpz_init(n0); fmpz_init(n1); fmpz_init(m0); fmpz_init(m1);
+	fmpz_init(g); fmpz_init(t);
+
+	gq_mul(n0, n1, a.c[0], a.c[1], a.c[0], a.c[1], ctx);      /* u^2 */
+	gq_mul(m0, m1, a.c[2], a.c[3], a.c[2], a.c[3], ctx);      /* v^2 */
+	gq_mul_z(m0, m1, m0, m1, ctx);                            /* Z v^2 */
+	fmpz_mod_sub(n0, n0, m0, ctx);
+	fmpz_mod_sub(n1, n1, m1, ctx);
+
+	/* Invert n0 + n1 Z in the base. */
+	fmpz_mod_mul(m0, n0, n0, ctx);
+	fmpz_mod_mul(t, n1, n1, ctx);
 	gr_mul_nr(t, t, ctx);
-	fmpz_mod_sub(n, n, t, ctx);
-	ok = fmpz_invmod(g, n, fmpz_mod_ctx_modulus(ctx));
+	fmpz_mod_sub(m0, m0, t, ctx);
+	ok = fmpz_invmod(g, m0, fmpz_mod_ctx_modulus(ctx));
 	if (ok) {
-		fmpz_mod_neg(t, a.c1, ctx);
-		fmpz_mod_mul(t, t, g, ctx);
-		fmpz_mod_mul(r.c0, a.c0, g, ctx);
-		fmpz_set(r.c1, t);
+		fmpz_mod_mul(m0, n0, g, ctx);
+		fmpz_mod_neg(m1, n1, ctx);
+		fmpz_mod_mul(m1, m1, g, ctx);
+		/* r = (u - v Y) * (m0 + m1 Z). */
+		gq_mul(n0, n1, a.c[0], a.c[1], m0, m1, ctx);
+		fmpz_mod_neg(t, a.c[2], ctx);
+		fmpz_mod_neg(g, a.c[3], ctx);
+		gq_mul(t, g, t, g, m0, m1, ctx);
+		fmpz_set(r.c[0], n0);
+		fmpz_set(r.c[1], n1);
+		fmpz_set(r.c[2], t);
+		fmpz_set(r.c[3], g);
 	}
-	fmpz_clear(n); fmpz_clear(t); fmpz_clear(g);
+
+	fmpz_clear(n0); fmpz_clear(n1); fmpz_clear(m0); fmpz_clear(m1);
+	fmpz_clear(g); fmpz_clear(t);
 	return ok;
 }
 
@@ -350,9 +461,13 @@ static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 
 /* Rows of E, as RowsToMatrix lists them: H, H_0, then H_{i,j} for each k. */
 #define AEX_ROWS    (V * (2 + 3 * TAU))
-/* Codeword length, i.e. number of columns of E. */
-/* Columns opened per repetition, and the number of repetitions. */
-#define AEX_REPS    2
+/* How many times the whole proof is run. The algebraic part of Lemma 2 is
+ * 18 TAU / p_min^AEX_DEG, since the ring is split and an adversary works modulo
+ * one prime: at AEX_DEG = 2 that is 2^-74, so two passes were needed, and
+ * Fiat-Shamir then had to bind them to each other, which it did not -- see
+ * SOUNDNESS.md 6.5. At AEX_DEG = 4 it is 2^-162, one pass carries the proof,
+ * and there is nothing left to bind. */
+#define AEX_REPS    1
 
 /* Row r of E, in RowsToMatrix order. */
 static aex_code_t & aex_row(size_t r) {
@@ -534,7 +649,7 @@ static void aex_absorb(blake3_hasher * h, const fmpz_t x) {
 
 /* Derive the eta opened columns from the root and the step-9 openings. */
 static void aex_sample_I(size_t I[ETA], const uint8_t root[BLAKE3_OUT_LEN],
-		fmpz_mod_poly_t f[V][2], gr_t rf[ETA], fmpz_mod_poly_t h[2][V][2],
+		fmpz_mod_poly_t f[V][AEX_DEG], gr_t rf[ETA], fmpz_mod_poly_t h[2][V][AEX_DEG],
 		gr_t rh[ETA], const fmpz_mod_ctx_t ctx) {
 	blake3_hasher hasher;
 	fmpz_t c;
@@ -543,7 +658,7 @@ static void aex_sample_I(size_t I[ETA], const uint8_t root[BLAKE3_OUT_LEN],
 	fmpz_init(c);
 	blake3_hasher_init(&hasher);
 	blake3_hasher_update(&hasher, root, BLAKE3_OUT_LEN);
-	for (int cc = 0; cc < 2; cc++) {
+	for (int cc = 0; cc < AEX_DEG; cc++) {
 		for (size_t k = 0; k < V; k++) {
 			for (size_t l = 0; l < 2 * params::poly_q::degree; l++) {
 				if (l < params::poly_q::degree) {
@@ -558,10 +673,10 @@ static void aex_sample_I(size_t I[ETA], const uint8_t root[BLAKE3_OUT_LEN],
 		}
 	}
 	for (size_t i = 0; i < ETA; i++) {
-		aex_absorb(&hasher, rf[i].c0);
-		aex_absorb(&hasher, rf[i].c1);
-		aex_absorb(&hasher, rh[i].c0);
-		aex_absorb(&hasher, rh[i].c1);
+		for (int c = 0; c < AEX_DEG; c++) {
+			aex_absorb(&hasher, rf[i].c[c]);
+			aex_absorb(&hasher, rh[i].c[c]);
+		}
 	}
 	blake3_hasher_finalize(&hasher, out, ETA * 8);
 	for (size_t i = 0; i < ETA; i++) {
@@ -635,7 +750,7 @@ static void aex_root_tau(fmpz_t w, const fmpz_mod_ctx_t ctx) {
  * evaluating TAU + 1 dense polynomials. */
 static void gr_comp(fmpz * out, gr_t in[ETA], int c) {
 	for (size_t i = 0; i < ETA; i++) {
-		fmpz_set(out + i, c ? in[i].c1 : in[i].c0);
+		fmpz_set(out + i, in[i].c[c]);
 	}
 }
 
@@ -664,7 +779,7 @@ static int aex_lagrange(gr_t * lev, const gr_t & x, const fmpz_mod_ctx_t ctx) {
 
 	/* l_0(x) = x^TAU - 1, now evaluated in the extension. */
 	gr_pow_ui(xt, x, TAU, ctx);
-	fmpz_mod_sub_ui(xt.c0, xt.c0, 1, ctx);
+	fmpz_mod_sub_ui(xt.c[0], xt.c[0], 1, ctx);
 	gr_set(lev[0], xt);
 
 	/* TAU is a power of two and q is odd, so TAU stays invertible in Z_q and
@@ -674,8 +789,10 @@ static int aex_lagrange(gr_t * lev, const gr_t & x, const fmpz_mod_ctx_t ctx) {
 
 	fmpz_one(wi);
 	for (size_t i = 0; i < TAU; i++) {
-		fmpz_mod_sub(den[i].c0, x.c0, wi, ctx);
-		fmpz_set(den[i].c1, x.c1);
+		fmpz_mod_sub(den[i].c[0], x.c[0], wi, ctx);
+		for (int c = 1; c < AEX_DEG; c++) {
+			fmpz_set(den[i].c[c], x.c[c]);
+		}
 		fmpz_set(wpow + i, wi);
 		fmpz_mod_mul(wi, wi, w_cache, ctx);
 	}
@@ -713,11 +830,11 @@ static int aex_lagrange(gr_t * lev, const gr_t & x, const fmpz_mod_ctx_t ctx) {
  *      == l0(x) H0|I + sum_ij li(x) l0(x)^j Hij|I
  *   Encode(hbar, rhbar)|I == H|I + b0 H0|I + sum_ij bij Hij|I
  */
-static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][2],
-		gr_t rf[ETA], fmpz_mod_poly_t h[2][V][2], gr_t rh[ETA],
+static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
+		gr_t rf[ETA], fmpz_mod_poly_t h[2][V][AEX_DEG], gr_t rh[ETA],
 		const gr_t & x, const gr_t & beta0, gr_t beta[TAU][3],
 		fmpz_mod_poly_t lag[TAU + 1], const fmpz_mod_ctx_t ctx) {
-	fmpz_t tmp, sym, accf[2], acch[2];
+	fmpz_t tmp, sym, accf[AEX_DEG], acch[AEX_DEG];
 	fmpz *rc = _fmpz_vec_init(ETA);
 	gr_t l0, l0inv, one, fv, cub, t;
 	gr_t lpow[3];
@@ -726,13 +843,13 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][2],
 	 * to be recomputed inside both loops; hoisting it out pays for most of the
 	 * extra work the extension costs here. */
 	gr_t (*wt)[3] = new gr_t[TAU][3];
-	fmpz_mod_poly_t g[2];
-	aex_code_t *lhs_f = new aex_code_t[2 * V];
-	aex_code_t *lhs_h = new aex_code_t[2 * V];
+	fmpz_mod_poly_t g[AEX_DEG];
+	aex_code_t *lhs_f = new aex_code_t[AEX_DEG * V];
+	aex_code_t *lhs_h = new aex_code_t[AEX_DEG * V];
 	int ok = 1;
 
 	fmpz_init(tmp); fmpz_init(sym);
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < AEX_DEG; i++) {
 		fmpz_init(accf[i]);
 		fmpz_init(acch[i]);
 	}
@@ -749,8 +866,9 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][2],
 			gr_init(wt[i][j]);
 		}
 	}
-	fmpz_mod_poly_init(g[0], ctx);
-	fmpz_mod_poly_init(g[1], ctx);
+	for (int i = 0; i < AEX_DEG; i++) {
+		fmpz_mod_poly_init(g[i], ctx);
+	}
 	gr_one(one);
 
 	/* A challenge whose l_0(x) is a zero divisor is not usable; at deg/p^2 it
@@ -775,12 +893,14 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][2],
 			for (size_t l = 0; l < params::poly_q::degree; l++) {
 				aex_set_t set = aex_set_at(k, l);
 
-				fmpz_mod_poly_get_coeff_fmpz(fv.c0, f[k][0], l, ctx);
-				fmpz_mod_poly_get_coeff_fmpz(fv.c1, f[k][1], l, ctx);
+				for (int i = 0; i < AEX_DEG; i++) {
+					fmpz_mod_poly_get_coeff_fmpz(fv.c[i], f[k][i], l, ctx);
+				}
 				if (set == AEX_FREE) {
 					/* 0 */
-					fmpz_zero(cub.c0);
-					fmpz_zero(cub.c1);
+					for (int i = 0; i < AEX_DEG; i++) {
+						fmpz_zero(cub.c[i]);
+					}
 				} else if (set == AEX_ZERO) {
 					/* f */
 					gr_set(cub, fv);
@@ -799,14 +919,15 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][2],
 					}
 				}
 				gr_mul(cub, cub, l0inv, ctx);
-				fmpz_mod_poly_set_coeff_fmpz(g[0], l, cub.c0, ctx);
-				fmpz_mod_poly_set_coeff_fmpz(g[1], l, cub.c1, ctx);
+				for (int i = 0; i < AEX_DEG; i++) {
+					fmpz_mod_poly_set_coeff_fmpz(g[i], l, cub.c[i], ctx);
+				}
 			}
-			for (int c = 0; c < 2; c++) {
+			for (int c = 0; c < AEX_DEG; c++) {
 				gr_comp(rc, rf, c);
-				aex_encode(lhs_f[k * 2 + c], f[k][c], g[c], rc, ctx);
+				aex_encode(lhs_f[k * AEX_DEG + c], f[k][c], g[c], rc, ctx);
 				gr_comp(rc, rh, c);
-				aex_encode(lhs_h[k * 2 + c], h[0][k][c], h[1][k][c], rc, ctx);
+				aex_encode(lhs_h[k * AEX_DEG + c], h[0][k][c], h[1][k][c], rc, ctx);
 			}
 		}
 	}
@@ -817,38 +938,42 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][2],
 			/* Both identities and both components read the same H_ij symbol,
 			 * so unpack the column once per row and fan it out over the four
 			 * accumulators instead of fetching it four times. */
+			/* H carries the mask, which is a Z_q value, so it lands in the
+			 * first coordinate and the others start empty. */
 			aex_col_sym(acch[0], col, AEX_ROW_H(k));
-			fmpz_zero(acch[1]);
+			for (int c = 1; c < AEX_DEG; c++) {
+				fmpz_zero(acch[c]);
+			}
 			aex_col_sym(sym, col, AEX_ROW_H0(k));
-			for (int c = 0; c < 2; c++) {
-				fmpz_mod_mul(accf[c], c ? l0.c1 : l0.c0, sym, ctx);
-				fmpz_mod_mul(tmp, c ? beta0.c1 : beta0.c0, sym, ctx);
+			for (int c = 0; c < AEX_DEG; c++) {
+				fmpz_mod_mul(accf[c], l0.c[c], sym, ctx);
+				fmpz_mod_mul(tmp, beta0.c[c], sym, ctx);
 				fmpz_mod_add(acch[c], acch[c], tmp, ctx);
 			}
 			for (size_t i = 0; i < TAU; i++) {
 				for (size_t j = 0; j < 3; j++) {
 					aex_col_sym(sym, col, AEX_ROW_HIJ(i, j, k));
-					for (int c = 0; c < 2; c++) {
-						fmpz_mod_mul(tmp, c ? wt[i][j].c1 : wt[i][j].c0,
+					for (int c = 0; c < AEX_DEG; c++) {
+						fmpz_mod_mul(tmp, wt[i][j].c[c],
 								sym, ctx);
 						fmpz_mod_add(accf[c], accf[c], tmp, ctx);
-						fmpz_mod_mul(tmp, c ? beta[i][j].c1 : beta[i][j].c0,
+						fmpz_mod_mul(tmp, beta[i][j].c[c],
 								sym, ctx);
 						fmpz_mod_add(acch[c], acch[c], tmp, ctx);
 					}
 				}
 			}
-			for (int c = 0; c < 2; c++) {
-				aex_unpack(tmp, lhs_f + k * 2 + c, o.I[n]);
+			for (int c = 0; c < AEX_DEG; c++) {
+				aex_unpack(tmp, lhs_f + k * AEX_DEG + c, o.I[n]);
 				ok &= fmpz_equal(accf[c], tmp);
-				aex_unpack(tmp, lhs_h + k * 2 + c, o.I[n]);
+				aex_unpack(tmp, lhs_h + k * AEX_DEG + c, o.I[n]);
 				ok &= fmpz_equal(acch[c], tmp);
 			}
 		}
 	}
 
 	fmpz_clear(tmp); fmpz_clear(sym);
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < AEX_DEG; i++) {
 		fmpz_clear(accf[i]);
 		fmpz_clear(acch[i]);
 	}
@@ -865,8 +990,9 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][2],
 			gr_clear(wt[i][j]);
 		}
 	}
-	fmpz_mod_poly_clear(g[0], ctx);
-	fmpz_mod_poly_clear(g[1], ctx);
+	for (int i = 0; i < AEX_DEG; i++) {
+		fmpz_mod_poly_clear(g[i], ctx);
+	}
 	_fmpz_vec_clear(rc, ETA);
 	delete[]lev;
 	delete[]wt;
@@ -1180,16 +1306,17 @@ static void pismall_hash(gr_t & x, gr_t & beta0, gr_t beta[TAU][3], fmpz_t q,
 	memcpy(&seed[0], hash, sizeof(ulong));
 	memcpy(&seed[1], hash + BLAKE3_OUT_LEN / 2, sizeof(ulong));
 	flint_rand_set_seed(rand, seed[0], seed[1]);
-	/* Both coordinates of every challenge come from Z_q, so each is uniform
+	/* Every coordinate of every challenge comes from Z_q, so each is uniform
 	 * over the whole extension. */
-	fmpz_randm(x.c0, rand, q);
-	fmpz_randm(x.c1, rand, q);
-	fmpz_randm(beta0.c0, rand, q);
-	fmpz_randm(beta0.c1, rand, q);
+	for (int c = 0; c < AEX_DEG; c++) {
+		fmpz_randm(x.c[c], rand, q);
+		fmpz_randm(beta0.c[c], rand, q);
+	}
 	for (size_t i = 0; i < TAU; i++) {
 		for (size_t j = 0; j < 3; j++) {
-			fmpz_randm(beta[i][j].c0, rand, q);
-			fmpz_randm(beta[i][j].c1, rand, q);
+			for (int c = 0; c < AEX_DEG; c++) {
+				fmpz_randm(beta[i][j].c[c], rand, q);
+			}
 		}
 	}
 
@@ -1299,8 +1426,8 @@ static void pismall_setup(fmpz_mod_poly_t lag[], fmpz_t a[TAU], fmpz_t & q,
 	}
 }
 
-static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][2],
-		gr_t rf[ETA], fmpz_mod_poly_t h[2][V][2], gr_t rh[ETA],
+static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG],
+		gr_t rf[ETA], fmpz_mod_poly_t h[2][V][AEX_DEG], gr_t rh[ETA],
 		vector < params::poly_q > rd, comkey_t & key,
 		fmpz_mod_poly_t lag[TAU + 1], flint_rand_t prng,
 		const fmpz_mod_ctx_t ctx, aex_open_t & o) {
@@ -1353,16 +1480,22 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][2],
 	for (size_t i = 0; i < ETA; i++) {
 		fmpz_init(r0[i]);
 		fmpz_randm(r0[i], prng, q);
-		/* the masks are Z_q values, so they live in the Y^0 coordinate and the
-		 * Y^1 coordinate starts empty */
-		fmpz_randm(rh[i].c0, prng, q);
-		fmpz_zero(rh[i].c1);
+		/* the masks are Z_q values, so they live in the first coordinate and
+		 * the others start empty */
+		fmpz_randm(rh[i].c[0], prng, q);
+		for (int c = 1; c < AEX_DEG; c++) {
+			fmpz_zero(rh[i].c[c]);
+		}
 	}
 	for (size_t i = 0; i < V; i++) {
+		/* The masks are Z_q values: they live in the first coordinate of the
+		 * extension and the others start empty. */
 		fmpz_mod_poly_randtest(h[0][i][0], prng, params::poly_q::degree, ctx);
 		fmpz_mod_poly_randtest(h[1][i][0], prng, params::poly_q::degree, ctx);
-		fmpz_mod_poly_zero(h[0][i][1], ctx);
-		fmpz_mod_poly_zero(h[1][i][1], ctx);
+		for (int c = 1; c < AEX_DEG; c++) {
+			fmpz_mod_poly_zero(h[0][i][c], ctx);
+			fmpz_mod_poly_zero(h[1][i][c], ctx);
+		}
 	}
 
 	/* Generate s_0 = Z_q^vN, h = Z_q^2vn. */
@@ -1518,18 +1651,18 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][2],
 	/* Compute f = s_0 * l_0(x). */
 	for (int i = 0; i < V; i++) {
 		poly_from(poly, s0[i], ctx_q);
-		for (int c = 0; c < 2; c++) {
+		for (int c = 0; c < AEX_DEG; c++) {
 			fmpz_mod_poly_scalar_mul_fmpz(f[i][c], poly,
-					c ? prover_y[0].c1 : prover_y[0].c0, ctx_q);
+					prover_y[0].c[c], ctx_q);
 		}
 	}
 	/* Compute remaining f = f(x) = \Sum s_i * l_i(x). */
 	for (size_t i = 1; i <= TAU; i++) {
 		for (int j = 0; j < V; j++) {
 			poly_from(poly, s[i - 1][j], ctx_q);
-			for (int c = 0; c < 2; c++) {
+			for (int c = 0; c < AEX_DEG; c++) {
 				fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
-						c ? prover_y[i].c1 : prover_y[i].c0, ctx_q);
+						prover_y[i].c[c], ctx_q);
 				fmpz_mod_poly_add(f[j][c], f[j][c], poly2, ctx_q);
 			}
 		}
@@ -1556,9 +1689,9 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][2],
 	/* Compute _h = h + s_0 * beta_0 + \sum beta_i,j * (\delta_i * si, v_i,j) */
 	for (size_t k = 0; k < V; k++) {
 		poly_from(poly, s0[k], ctx);
-		for (int c = 0; c < 2; c++) {
+		for (int c = 0; c < AEX_DEG; c++) {
 			fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
-					c ? beta0.c1 : beta0.c0, ctx);
+					beta0.c[c], ctx);
 			fmpz_mod_poly_add(h[0][k][c], h[0][k][c], poly2, ctx);
 		}
 		for (size_t i = 1; i <= TAU; i++) {
@@ -1569,9 +1702,9 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][2],
 					 * every other access in this loop; s[i] read one row past
 					 * the end of the matrix on the last iteration. */
 					poly_from(poly, s[i - 1][k], ctx_q);
-					for (int c = 0; c < 2; c++) {
+					for (int c = 0; c < AEX_DEG; c++) {
 						fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
-								c ? b.c1 : b.c0, ctx_q);
+								b.c[c], ctx_q);
 						fmpz_mod_poly_add(h[0][k][c], h[0][k][c], poly2, ctx);
 					}
 				}
@@ -1579,9 +1712,9 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][2],
 					flint_poly_set_coeff_mpz(poly, l, v[j][i - 1][k][l],
 							ctx_q);
 				}
-				for (int c = 0; c < 2; c++) {
+				for (int c = 0; c < AEX_DEG; c++) {
 					fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
-							c ? b.c1 : b.c0, ctx_q);
+							b.c[c], ctx_q);
 					fmpz_mod_poly_add(h[1][k][c], h[1][k][c], poly2, ctx);
 				}
 			}
@@ -1633,13 +1766,13 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][2],
 	return 1;
 }
 
-static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][2],
-		gr_t rf[ETA], fmpz_mod_poly_t h[2][V][2], gr_t rh[ETA],
+static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
+		gr_t rf[ETA], fmpz_mod_poly_t h[2][V][AEX_DEG], gr_t rh[ETA],
 		vector < params::poly_q > rd, comkey_t & key,
 		fmpz_mod_poly_t lag[TAU + 1], flint_rand_t prng,
 		const fmpz_mod_ctx_t ctx, const aex_open_t & o) {
 	array < mpz_t, params::poly_q::degree > coeffs;
-	fmpz_mod_poly_t poly, poly2, u0, u1, w, r[R][2];
+	fmpz_mod_poly_t poly, poly2, u[AEX_DEG], w, r[R][AEX_DEG];
 	fmpz_mod_ctx_t ctx_q;
 	fmpz_t q, nrb;
 	gr_t x, beta0, l0i;
@@ -1669,15 +1802,16 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][2],
 	fmpz_mod_ctx_init(ctx_q, q);
 	fmpz_mod_poly_init(poly, ctx_q);
 	fmpz_mod_poly_init(poly2, ctx_q);
-	fmpz_mod_poly_init(u0, ctx_q);
-	fmpz_mod_poly_init(u1, ctx_q);
+	for (int c = 0; c < AEX_DEG; c++) {
+		fmpz_mod_poly_init(u[c], ctx_q);
+	}
 	fmpz_mod_poly_init(w, ctx_q);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
 	}
 	for (int i = 0; i < R; i++) {
-		for (int c = 0; c < 2; c++) {
+		for (int c = 0; c < AEX_DEG; c++) {
 			fmpz_mod_poly_init(r[i][c], ctx_q);
 			fmpz_mod_poly_zero(r[i][c], ctx_q);
 		}
@@ -1688,9 +1822,9 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][2],
 		for (int i = 1; i <= TAU; i++) {
 			for (int j = 0; j < R; j++) {
 				poly_from(poly, t[i - 1][j], ctx_q);
-				for (int c = 0; c < 2; c++) {
+				for (int c = 0; c < AEX_DEG; c++) {
 					fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
-							c ? vlev[i].c1 : vlev[i].c0, ctx_q);
+							vlev[i].c[c], ctx_q);
 					fmpz_mod_poly_add(r[j][c], r[j][c], poly2, ctx_q);
 				}
 			}
@@ -1698,7 +1832,7 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][2],
 
 		/* Compute d = A * _f. */
 		for (int j = 0; j < V; j++) {
-			for (int c = 0; c < 2; c++) {
+			for (int c = 0; c < AEX_DEG; c++) {
 				for (int i = 0; i < R; i++) {
 					poly_to(one, f[j][c], ctx_q);
 					one = one * A[i][j];
@@ -1715,20 +1849,30 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][2],
 		m[i] = 0;
 	}
 	if (result) {
-		/* m = r / l_0(x), a multiplication by a scalar of the extension:
-		 * (r0 + r1 Y)(a + b Y) = (r0 a + NR r1 b) + (r0 b + r1 a) Y. The
-		 * committed value is a Z_q element, so the Y^1 coordinate of the
-		 * quotient has to come out zero. */
-		gr_mul_nr(nrb, l0i.c1, ctx_q);
+		/* m = r / l_0(x), a multiplication of an extension-valued polynomial by
+		 * a scalar of the extension, coordinate by coordinate through the basis
+		 * table above. The committed value is a Z_q element, so every
+		 * coordinate of the quotient but the first has to come out zero. */
 		for (int i = 0; i < R; i++) {
-			fmpz_mod_poly_scalar_mul_fmpz(u0, r[i][0], l0i.c0, ctx_q);
-			fmpz_mod_poly_scalar_mul_fmpz(w, r[i][1], nrb, ctx_q);
-			fmpz_mod_poly_add(u0, u0, w, ctx_q);
-			fmpz_mod_poly_scalar_mul_fmpz(u1, r[i][0], l0i.c1, ctx_q);
-			fmpz_mod_poly_scalar_mul_fmpz(w, r[i][1], l0i.c0, ctx_q);
-			fmpz_mod_poly_add(u1, u1, w, ctx_q);
-			result &= fmpz_mod_poly_is_zero(u1, ctx_q);
-			poly_to(m[i], u0, ctx_q);
+			for (int c = 0; c < AEX_DEG; c++) {
+				fmpz_mod_poly_zero(u[c], ctx_q);
+			}
+			for (int a = 0; a < AEX_DEG; a++) {
+				for (int b = 0; b < AEX_DEG; b++) {
+					if (aex_basis_nr[a][b]) {
+						gr_mul_nr(nrb, l0i.c[b], ctx_q);
+					} else {
+						fmpz_set(nrb, l0i.c[b]);
+					}
+					fmpz_mod_poly_scalar_mul_fmpz(w, r[i][a], nrb, ctx_q);
+					fmpz_mod_poly_add(u[aex_basis_idx[a][b]],
+							u[aex_basis_idx[a][b]], w, ctx_q);
+				}
+			}
+			for (int c = 1; c < AEX_DEG; c++) {
+				result &= fmpz_mod_poly_is_zero(u[c], ctx_q);
+			}
+			poly_to(m[i], u[0], ctx_q);
 			m[i].invntt_pow_invphi();
 		}
 		one = 1;
@@ -1756,11 +1900,12 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][2],
 	gr_clear(l0i);
 	fmpz_mod_poly_clear(poly, ctx_q);
 	fmpz_mod_poly_clear(poly2, ctx_q);
-	fmpz_mod_poly_clear(u0, ctx_q);
-	fmpz_mod_poly_clear(u1, ctx_q);
+	for (int c = 0; c < AEX_DEG; c++) {
+		fmpz_mod_poly_clear(u[c], ctx_q);
+	}
 	fmpz_mod_poly_clear(w, ctx_q);
 	for (int i = 0; i < R; i++) {
-		for (int c = 0; c < 2; c++) {
+		for (int c = 0; c < AEX_DEG; c++) {
 			fmpz_mod_poly_clear(r[i][c], ctx_q);
 		}
 	}
@@ -1792,7 +1937,7 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][2],
 struct pismall_pass {
 	commit_t com;
 	vector < params::poly_q > rd;
-	fmpz_mod_poly_t f[V][2], h[2][V][2];
+	fmpz_mod_poly_t f[V][AEX_DEG], h[2][V][AEX_DEG];
 	gr_t rf[ETA], rh[ETA];
 	aex_open_t o;
 };
@@ -1885,7 +2030,7 @@ pismall_const_t *pismall_const_prove(comkey_t & key, commit_t * P,
 		pismall_pass & ps = pi->pass[rep];
 
 		for (int i = 0; i < V; i++) {
-			for (int c = 0; c < 2; c++) {
+			for (int c = 0; c < AEX_DEG; c++) {
 				fmpz_mod_poly_init(ps.f[i][c], mono_ctx);
 				fmpz_mod_poly_init(ps.h[0][i][c], mono_ctx);
 				fmpz_mod_poly_init(ps.h[1][i][c], mono_ctx);
@@ -1933,7 +2078,7 @@ void pismall_const_free(pismall_const_t * pi) {
 		pismall_pass & ps = pi->pass[rep];
 
 		for (int i = 0; i < V; i++) {
-			for (int c = 0; c < 2; c++) {
+			for (int c = 0; c < AEX_DEG; c++) {
 				fmpz_mod_poly_clear(ps.f[i][c], mono_ctx);
 				fmpz_mod_poly_clear(ps.h[0][i][c], mono_ctx);
 				fmpz_mod_poly_clear(ps.h[1][i][c], mono_ctx);
@@ -1989,7 +2134,7 @@ static void test(flint_rand_t rand) {
 	comkey_t key;
 	commit_t com;
 	vector < params::poly_q > rd;
-	fmpz_mod_poly_t f[V][2], lag[TAU + 1], h[2][V][2];
+	fmpz_mod_poly_t f[V][AEX_DEG], lag[TAU + 1], h[2][V][AEX_DEG];
 
 	fmpz_init(q);
 	gr_init(x);
@@ -2003,7 +2148,7 @@ static void test(flint_rand_t rand) {
 	aex_ntt_setup(ctx);
 	fmpz_mod_poly_init(poly, ctx);
 	for (int i = 0; i < V; i++) {
-		for (int c = 0; c < 2; c++) {
+		for (int c = 0; c < AEX_DEG; c++) {
 			fmpz_mod_poly_init(f[i][c], ctx);
 			fmpz_mod_poly_init(h[0][i][c], ctx);
 			fmpz_mod_poly_init(h[1][i][c], ctx);
@@ -2206,9 +2351,13 @@ static void test(flint_rand_t rand) {
 		 * other test still passed. Check the openings carry real data in the
 		 * second coordinate, and that the proof verifies anyway, so that the
 		 * Y^1 identity is satisfied rather than vacuous. */
-		/* Y^2 - AEX_NR is only irreducible while AEX_NR is a non-residue
+		/* X^AEX_DEG - AEX_NR is only irreducible while AEX_NR is a non-residue
 		 * modulo every prime of the basis. If that ever stops holding the
-		 * extension silently collapses and the soundness claim with it. */
+		 * extension silently collapses and the soundness claim with it. At
+		 * degree 4 the criterion also asks that AEX_NR not lie in -4 (Z_p)^4,
+		 * which follows: p = 1 mod 4 here, so -1 is a square, and -AEX_NR/4 is
+		 * then a non-square and cannot be a fourth power. Both halves are
+		 * checked below. */
 		live = 1;
 		for (size_t i = 0; i < params::poly_q::nmoduli; i++) {
 			fmpz_t pi, e, w;
@@ -2221,19 +2370,23 @@ static void test(flint_rand_t rand) {
 			fmpz_powm(w, w, e, pi);          /* Euler: -1 iff a non-residue */
 			fmpz_sub_ui(e, pi, 1);
 			live &= fmpz_equal(w, e);
+			/* p = 1 mod 4, the other half of the degree-4 criterion. */
+			live &= (nfl::params < uint64_t >::P[i] % 4 == 1);
 			fmpz_clear(pi);
 			fmpz_clear(e);
 			fmpz_clear(w);
 		}
-		live &= !fmpz_is_zero(x.c1);
-		for (int k = 0; k < V; k++) {
-			live &= !fmpz_mod_poly_is_zero(f[k][1], ctx);
-			live &= !fmpz_mod_poly_is_zero(h[0][k][1], ctx);
-			live &= !fmpz_mod_poly_is_zero(h[1][k][1], ctx);
-		}
-		for (size_t i = 0; i < ETA; i++) {
-			any |= !fmpz_is_zero(rf[i].c1);
-			any |= !fmpz_is_zero(rh[i].c1);
+		for (int c = 1; c < AEX_DEG; c++) {
+			live &= !fmpz_is_zero(x.c[c]);
+			for (int k = 0; k < V; k++) {
+				live &= !fmpz_mod_poly_is_zero(f[k][c], ctx);
+				live &= !fmpz_mod_poly_is_zero(h[0][k][c], ctx);
+				live &= !fmpz_mod_poly_is_zero(h[1][k][c], ctx);
+			}
+			for (size_t i = 0; i < ETA; i++) {
+				any |= !fmpz_is_zero(rf[i].c[c]);
+				any |= !fmpz_is_zero(rh[i].c[c]);
+			}
 		}
 		live &= any;
 		live &= pismall_verifier(com, f, rf, h, rh, rd, key, lag, rand, ctx, o);
@@ -2423,7 +2576,7 @@ static void test(flint_rand_t rand) {
 
   end:
 	for (int i = 0; i < V; i++) {
-		for (int c = 0; c < 2; c++) {
+		for (int c = 0; c < AEX_DEG; c++) {
 			fmpz_mod_poly_clear(f[i][c], ctx);
 			fmpz_mod_poly_clear(h[0][i][c], ctx);
 			fmpz_mod_poly_clear(h[1][i][c], ctx);

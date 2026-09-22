@@ -544,7 +544,7 @@ file draws its challenges from
 `18 TAU / p_min^2`, which is **`2^-73.8`** at `TAU = 1024` and the 44-bit basis.
 Section 7's `2^-66` a pass is the same quantity at the old 39-bit primes.
 
-**And the two passes are not bound to each other.** `AEX_REPS = 2` exists
+**And the two passes were not bound to each other.** `AEX_REPS = 2` exists
 because one pass is not enough, and the comment on it says the passes are
 independent, which is exactly the trouble: `pismall_hash` takes that pass's
 Merkle root and that pass's commitment and nothing else, and `aex_sample_I`
@@ -558,11 +558,11 @@ bound        (18 TAU / p_min^2)^2  = 2^-148
 as built     2 * p_min^2 / 18 TAU  = 2^75 queries
 ```
 
-**It is a claim not met rather than a practical attack**, which is the
+**It was a claim not met rather than a practical attack**, which is the
 difference between this and 8.1. A query here costs a BDLOP commitment and the
 derivation of `2 + 6 TAU` extension-field challenges, some tenths of a
 millisecond, so `2^75` of them is astronomical wall-clock; the `2^46` of 8.1 was
-days. But `LEVEL` is a count of queries, and by that count `Pi_SMALL` is the
+days. But `LEVEL` is a count of queries, and by that count `Pi_SMALL` was the
 weakest thing in the protocol at `2^75`, below `Pi_BND`'s `2^-130`.
 
 **The repair is 7.1's in principle and dearer in practice.** One hash over both
@@ -577,18 +577,35 @@ to recompute — save each pass's randomness, discard its codewords, and encode 
 second time after the challenge — which binds the passes at the cost of doubling
 the encoding, the dominant cost of this file.
 
-**Or one pass could be made to suffice, which is cheaper than any of that.**
-The per-pass algebraic term is `18 TAU / p_min^2` only because the challenge
-lives in a quadratic extension. In `GR(q,4)` it is `18 TAU / p_min^4 =
-2^-162`, and a single pass then answers to the column term alone, which needs
-`ETA = 437` rather than 325 to reach `2^-128`. That is 35% more opened columns
-against half as many passes: the `Pi_SMALL` of Section 11 falls from 108 MB to
-about 73, the prover halves, the binding question disappears because there is
-nothing to bind, and the arithmetic to write is a quartic extension in place of
-a quadratic one — the same lemma with `p^4` where it had `p^2`. The paper's own
-footnote to Lemma 2 says its bound "only applies to the interactive version of
-the proof" and has to be raised for Fiat-Shamir, which is the same observation
-one level up, and either route answers it.
+**What this branch does instead is make one pass suffice**, which is cheaper
+than any of that. The per-pass algebraic term is `18 TAU / p_min^2` only because
+the challenge lived in a quadratic extension. `AEX_DEG` is now 4, the term is
+`18 TAU / p_min^4 = 2^-162`, and a single pass answers to the column term alone
+— which at `ETA = 325` is `2^-95`, so `ETA` is now **452**, where the two terms
+of Lemma 2 balance at `2^-128.3`. `Pi_SMALL` is therefore worth `2^-128` on its
+own, with nothing left to bind because there is nothing left to repeat.
+
+`GR(q,4)` is built as a tower: `Z^2 = AEX_NR` over `Z_q`, then `Y^2 = Z`, so
+`Y^4 = AEX_NR` and the existing quadratic arithmetic carries the new one, three
+base multiplications by Karatsuba instead of nine. `X^4 - AEX_NR` is irreducible
+modulo a prime of the basis exactly when `AEX_NR` is a non-residue there and
+`p = 1 mod 4`: the first is what `AEX_NR = 3` was chosen for, the second holds
+because `p = 1 mod 2^21`, and the test at the bottom of `pismall.cpp` now checks
+both rather than assuming them.
+
+It is 39% more opened columns against half as many passes, so `Pi_SMALL` falls
+from 108 MB to about 76 and the prover with it. The paper's own footnote to
+Lemma 2 says its bound "only applies to the interactive version of the proof"
+and has to be raised for Fiat-Shamir, which is the same observation one level
+up; removing the repetition answers it rather than binding it.
+
+**Two places where the degree was written into the code rather than derived**
+turned up on the way, both of the same shape: a coordinate 1 that meant "the
+rest of the extension". `aex_identities` zeroed only `acch[1]` before
+accumulating, and the `h` masks zeroed only `h[*][i][1]`, so at degree 4 the
+upper coordinates carried whatever the previous proof had left. Both showed up
+as the consistency test failing, which is the cheap way to find them; neither
+would have been visible at degree 2.
 
 There is a second, cheaper-to-state instance of the same thing inside a pass:
 the columns are hashed from the openings, so a prover can re-roll the openings'
