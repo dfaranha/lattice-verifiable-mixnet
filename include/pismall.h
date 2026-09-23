@@ -54,6 +54,9 @@ pismall_const_t *pismall_const_prove(comkey_t & key, commit_t * P,
 int pismall_const_verify(pismall_const_t * pi, comkey_t & key, commit_t * P,
 		size_t n);
 
+/** Bytes the proof occupies on the wire. */
+size_t pismall_const_bytes(const pismall_const_t * pi);
+
 /** Release a proof and the one-time setup it shares with the other proofs. */
 void pismall_const_free(pismall_const_t * pi);
 void pismall_const_clear(void);

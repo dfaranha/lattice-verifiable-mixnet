@@ -8,6 +8,7 @@
 #include <assert.h>
 #include "sample_z_small.h"
 #include "pismall.h"
+#include "serial.h"
 #include "pibnd.h"
 
 /*============================================================================*/
@@ -1461,6 +1462,60 @@ static void test() {
 	return;
 }
 
+/* The size of the transcript the last run() produced. The pass-local buffers
+ * are reused across passes, so one pass is measured and multiplied; everything
+ * else is measured as it stands. */
+static void proof_size(void) {
+	serial::bits pass, once;
+	params::poly_q t0;
+
+	for (size_t i = 0; i < MSGS; i++) {
+		serial::put_uniform(pass, d[i].c1);
+		for (size_t j = 0; j < d[i].c2.size(); j++) {
+			serial::put_uniform(pass, d[i].c2[j]);
+		}
+		serial::put_uniform(pass, s[i]);
+		for (int j = 0; j < LIN_REPS; j++) {
+			for (int k = 0; k < WIDTH; k++) {
+				t0 = y[i][j][k];
+				t0.invntt_pow_invphi();
+				serial::put_gauss(pass, t0, SIGMA_C);
+				t0 = w[i][j][k];
+				t0.invntt_pow_invphi();
+				serial::put_gauss(pass, t0, SIGMA_C);
+				t0 = _y[i][j][k];
+				t0.invntt_pow_invphi();
+				serial::put_gauss(pass, t0, SIGMA_C);
+			}
+		}
+		pass.put(0, 8 * BLAKE3_OUT_LEN);        /* the linear proof's hash */
+		serial::put_uniform(once, pcom[i].c1);
+		for (size_t j = 0; j < pcom[i].c2.size(); j++) {
+			serial::put_uniform(once, pcom[i].c2[j]);
+		}
+	}
+
+	size_t per_pass = pass.bytes();
+	size_t small = pismall_const_bytes(cst);
+	size_t bound = pibnd_short_bytes(bnd);
+	size_t first = once.bytes() + small + bound;
+	size_t total = SHUFFLE_REPS * per_pass + first;
+
+	printf("\n** Proof size, measured, at MSGS = %d:\n\n", (int)MSGS);
+	printf("  a pass                                = %8.1f KB/vote\n",
+			per_pass / 1024.0 / MSGS);
+	printf("  %d passes                              = %8.1f KB/vote\n",
+			SHUFFLE_REPS, SHUFFLE_REPS * per_pass / 1024.0 / MSGS);
+	printf("  P_i, Pi_SMALL and Pi_BND, sent once   = %8.1f KB/vote\n",
+			first / 1024.0 / MSGS);
+	printf("    of which Pi_SMALL                   = %8.1f KB/vote\n",
+			small / 1024.0 / MSGS);
+	printf("    of which Pi_BND                     = %8.1f KB/vote\n",
+			bound / 1024.0 / MSGS);
+	printf("  TOTAL                                 = %8.1f KB/vote\n",
+			total / 1024.0 / MSGS);
+}
+
 static void microbench() {
 	params::poly_q alpha[2] = { nfl::uniform(), nfl::uniform() };
 
@@ -1542,6 +1597,8 @@ int main(int argc, char *argv[]) {
 
 	printf("\n** Tests for lattice-based shuffle proof:\n\n");
 	test();
+
+	proof_size();
 
 	printf("\n** Microbenchmarks for polynomial arithmetic:\n\n");
 	microbench();

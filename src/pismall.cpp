@@ -9,6 +9,7 @@
 
 #include "common.h"
 #include "pismall.h"
+#include "serial.h"
 #include "test.h"
 #include "bench.h"
 #include <assert.h>
@@ -2068,6 +2069,32 @@ int pismall_const_verify(pismall_const_t * pi, comkey_t & key, commit_t * P,
 	}
 
 	return result;
+}
+
+size_t pismall_const_bytes(const pismall_const_t * pi) {
+	size_t n = 0;
+
+	if (pi == NULL) {
+		return 0;
+	}
+	for (int rep = 0; rep < AEX_REPS; rep++) {
+		const pismall_pass & ps = pi->pass[rep];
+		size_t coef = (params::poly_q::bits_in_moduli_product() + 7) / 8;
+
+		/* The commitment and its randomness, then f and h, all uniform. */
+		n += (1 + ps.com.c2.size()) * params::poly_q::degree * coef;
+		n += ps.rd.size() * params::poly_q::degree * coef;
+		n += 3 * V * AEX_DEG * params::poly_q::degree * coef;
+		/* The Reed-Solomon randomness. */
+		n += 2 * ETA * AEX_DEG * coef;
+		/* The opening: root, indices, columns, Merkle paths. The columns are
+		 * packed symbols already and there is no distribution to exploit. */
+		n += BLAKE3_OUT_LEN;
+		n += ETA * sizeof(size_t);
+		n += ETA * AEX_COLBYTES;
+		n += ETA * (ps.o.levels - 1) * BLAKE3_OUT_LEN;
+	}
+	return n;
 }
 
 void pismall_const_free(pismall_const_t * pi) {

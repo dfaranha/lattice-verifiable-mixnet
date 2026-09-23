@@ -5,6 +5,7 @@
 #include "bench.h"
 #include "common.h"
 #include "pibnd.h"
+#include "serial.h"
 #include "sample_z_small.h"
 #include "sample_z_large.h"
 
@@ -590,6 +591,24 @@ int pibnd_short_verify(pibnd_short_t * pi, comkey_t & key, commit_t * P,
 	}
 
 	return pibnd_verifier(pi->h, short_scratch, A, t);
+}
+
+size_t pibnd_short_bytes(const pibnd_short_t * pi) {
+	serial::bits b;
+	params::poly_q t;
+
+	if (pi == NULL) {
+		return 0;
+	}
+	for (int i = 0; i < V; i++) {
+		for (int j = 0; j < NTI; j++) {
+			t = pi->Z[i][j];
+			t.invntt_pow_invphi();
+			serial::put_gauss(b, t,
+					i < ANEX_K ? SIGMA_ANEX : SIGMA_ANEX_HAT);
+		}
+	}
+	return b.bytes() + BLAKE3_OUT_LEN;
 }
 
 double pibnd_short_bound(void) {

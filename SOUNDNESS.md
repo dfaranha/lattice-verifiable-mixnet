@@ -979,7 +979,7 @@ Dropping it pays for the extra repetitions and more:
 
 with `P_i`, `Pi_SMALL` and `Pi_BND` a further 206 MB once for all passes. The
 proof is **1822 KB a vote against 2094**, which 5.5 and the end of section 7
-then take to 1715; the
+then take to 1715 modelled and section 10 measures at 1698; the
 prover's linear proofs cost 3.8 times what they did — 362 against 95 Mcycles —
 and the `shuffle-proof`
 benchmark at `MSGS = 4` goes from 14.3 to 31.9 Gcycles. Memory at `MSGS = 1000`
@@ -1032,13 +1032,14 @@ for soundness — it only has to leave the set too large to guess, and at 9 it
 still holds about `2^88` elements against the `2^44` that would matter. What it
 does control is `||beta r||`, which grows as its square root, and so `sigma_C`,
 and so the width of every published response: `log2(6 sigma_C)` bits a
-coefficient.
+coefficient, which section 10 measures at 13.36 and explains how it is reached.
 
 Taking `NONZERO` from 36 to 9 and `sigma_C` from `2^12` to `2^11` keeps the
 rejection sampling at the same working point — measured, the batched
 `||beta r||` is 1154 against a `sigma_C` of 2048, so `M = 1.17` and acceptance
 `0.43`, which is where the old pair sat — and takes a bit off every coefficient
-of every response: **1076 to 1002 KB a vote**, with the proof at 1715. The
+of every response: **1076 to 1002 KB a vote** modelled, and 962 measured,
+with the proof at 1698. The
 verifier's norm bound falls with it, `2^21` to `2^20`, which widens the margin
 5.4 turns on and the one the commitment's binding turns on in section 8. If the
 extraction argument this section says is missing were ever repaired, `NONZERO`
@@ -1368,26 +1369,48 @@ itself; and `vericrypt`/the ballot-submission side, which this repository does
 not implement. The proof of shuffle's simulator is now 5.2, which is a review of
 what the transcript reveals rather than a simulator.
 
-**Sizes, at `MSGS = 1000`, `q = 2^88`, four passes.**
+**Sizes, at `MSGS = 1000`, `q = 2^88`, four passes.** These are measured, not
+modelled: `proof_size()` in `src/shuffle.cpp` walks the proof through the
+serialiser of `include/serial.h` and reports what it wrote.
 
 | | per pass | once | per vote |
 | --- | --- | --- | --- |
-| responses of the `MSGS` linear proofs, `LIN_REPS` each | 251 MB | | 1002 KB |
-| `D_i` and `s_i` | 135 MB | | 540 KB |
-| `P_i`, the commitments to the `sigma_i` | | 90 MB | 90 KB |
-| `Pi_SMALL`, one AEx pass | | 76 MB | 76.0 KB |
-| `Pi_BND` | | 7.9 MB | 7.9 KB |
-| **total, four passes** | | | **1715 KB** |
+| responses of the `MSGS` linear proofs, `LIN_REPS` each | 241 MB | | 962 KB |
+| `D_i` and `s_i` | 132 MB | | 528 KB |
+| `P_i`, the commitments to the `sigma_i` | | 88 MB | 88.0 KB |
+| `Pi_SMALL`, one AEx pass | | 112 MB | 111.8 KB |
+| `Pi_BND` | | 7.6 MB | 7.6 KB |
+| **total, four passes** | | | **1698 KB** |
+
+What a pass costs is measured directly and does not depend on the batch: it is
+372.6 KB a vote at `MSGS = 4` and at `MSGS = 8` alike, since every term of it
+is per message. The two sub-proofs amortize, so they are measured at both sizes
+and extrapolated along the shape each one has. `Pi_SMALL` is linear in `TAU` --
+the opened columns are `ETA * V * (2 + 3 TAU) * 16` bytes and the rest is
+fixed -- measuring 3258 KB plus 106 KB a relation, which at `TAU = 1024` is the
+112 MB above. `Pi_BND` sends a fixed `V * NTI` openings whose width grows with
+the batch, and the measurement puts that growth at 0.496 bits a coefficient per
+doubling of `TAU`, the half bit that `sqrt(TAU)` in `sigma` predicts; from
+20.03 bits at `TAU = 8` that is 23.5 bits at 1000.
 
 The first messages of the linear proofs are not in the table because they are
 not sent: 8.1 replaced them with a hash the verifier checks by rebuilding them,
-which is what paid for the repetitions. `Pi_SMALL` is almost all opened
-columns, `ETA * V * 3 * ceil(q/8)` per relation and flat per vote, which is
-what 5.5's trade of `ETA` against `AEX_REPS` moves. The growth from the
-523 KB per vote this branch started at is almost all Section 6's repetitions,
-which multiply everything including the sub-proofs now that `rho` is drawn
-inside them; the wider `q` adds 13%. For scale, the mixnet of ePrint 2025/658
-reports 110 KB per user per server for shuffle *and* decryption together.
+which is what paid for the repetitions. The growth from the 523 KB per vote
+this branch started at is almost all Section 6's repetitions, which multiply
+everything including the sub-proofs now that `rho` is drawn inside them; the
+wider `q` adds 13%. For scale, the mixnet of ePrint 2025/658 reports 110 KB per
+user per server for shuffle *and* decryption together.
+
+The responses cost **13.36 bits a coefficient**, measured, and that number is
+worth a paragraph because section 9 quotes `log2(6 sigma_C) = 13.58` for it.
+Six standard deviations either side is not a width a flat code can use: a
+discrete Gaussian leaves that interval about once in 370 coefficients, so a
+polynomial of 4096 has some eleven outside it, and a flat encoding needs
+`log2(12 sigma_C)`, or 14.58 bits. What makes 13.58 reachable is coding the
+distribution rather than its bound. `include/serial.h` zigzags the centred
+coefficient and Golomb-Rice codes it, which lands within half a bit of the
+entropy `log2(sigma_C sqrt(2 pi e)) = 13.05`. So section 9's figure was right,
+but only for an encoder that did not exist until the serialiser did.
 
 ## 11. Summary
 

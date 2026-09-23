@@ -56,6 +56,9 @@ int pibnd_short_verify(pibnd_short_t * pi, comkey_t & key, commit_t * P,
  */
 double pibnd_short_bound(void);
 
+/** Bytes the proof occupies on the wire, its openings entropy-coded. */
+size_t pibnd_short_bytes(const pibnd_short_t * pi);
+
 /** Release a proof, and the buffers the proofs share. */
 void pibnd_short_free(pibnd_short_t * pi);
 void pibnd_short_clear(void);
