@@ -25,6 +25,17 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
 }
 
 #define R       (HEIGHT+1)
+/* The instance the proof of shuffle links: the openings of its MSGS
+ * commitments to the sigma_i. The Makefile selects it with -DPIBND_SHORT and
+ * the three facts that follow from it are here, since each is a property of
+ * that relation rather than of the build. */
+#ifdef PIBND_SHORT
+#define PIBND_V     (WIDTH+1)
+#undef TAU
+#define TAU         MSGS
+#define ANEX_E_INF  TAU
+#endif
+
 /* Number of witness components. The mix-net's own instance of this proof has
  * V = HEIGHT + 3; the proof of shuffle links this file with V = WIDTH + 1, the
  * shape of a BDLOP commitment equation, to bound the norm of the openings of
@@ -58,8 +69,11 @@ static void mpz_set_int128(mpz_t rop, __int128 op) {
  * it on the norm test instead of looping here forever. */
 #define PIBND_TRIES 64
 
-/* Infinity-norm bound on the last witness row (the decryption noise E in the
- * mix-net; ternary like the others in the test below). */
+/* Infinity-norm bound on the last witness row: the decryption noise E in the
+ * mix-net, ternary like the others in the test below. The short instance puts
+ * the ring constants g(i) = i of Lemma 5 there instead, which reach TAU, and
+ * says so above; sized for a ternary row, sigma-hat left the rejection
+ * sampling of that row accepting once in 90 attempts at MSGS = 256. */
 #ifndef ANEX_E_INF
 #define ANEX_E_INF  BETA
 #endif

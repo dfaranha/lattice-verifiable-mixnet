@@ -391,12 +391,21 @@ Two implementation notes, both visible in `src/pibnd.cpp`:
   opening it has, which the verifier rejects on the norm test, rather than
   looping forever. An honest prover passes both checks with probability about
   `1/3` per attempt, so giving up is a `3^-64` event.
-* The last witness row is sampled with `sigma-hat_ANEx`, which needs the
-  quad-precision sampler only when it runs past `2^64`, as it does when that row
-  is the mix-net's decryption noise. Here the row is a committed constant and
-  `sigma-hat` is a few thousand, so the double sampler covers it. Choosing the
-  sampler by magnitude rather than by row index makes `Pi_BND` about ten times
-  faster, the mix-net's own instance included.
+* The last witness row is sampled with `sigma-hat_ANEx`, whose width is set by
+  `ANEX_E_INF`, the infinity norm of that row. It defaults to `BETA`, the
+  ternary bound of the decryption noise the proof was written for, but here the
+  row holds the ring constants `g(i) = i`, which reach `MSGS`. The Makefile
+  passes `-DANEX_E_INF=MSGS` for this instance. Sized for ternary it was wrong
+  by that factor, and since `S'C'` on that row sums about `TAU / 2` constants of
+  size up to `TAU` while `sigma-hat` grows only as `sqrt(TAU)`, the rejection
+  factor climbed with the batch: about 5 at `MSGS = 128`, 90 at 256, where the
+  honest prover exhausted `PIBND_TRIES` about half the time, and out of reach at
+  1000. With the override it is 1.02 at 256 and 1.03 at 1000, and the prover
+  accepts on its first attempt.
+* `sigma-hat` is `9.96e8` at `MSGS = 1000`, still short of the `2^64` that would
+  call for the quad-precision sampler, as the mix-net's decryption noise does.
+  Choosing the sampler by magnitude rather than by row index makes `Pi_BND`
+  about ten times faster, the mix-net's own instance included.
 
 The challenge matrix is never stored: both sides derive it from the transcript
 hash and consume it once, row by row, so `pibnd` keeps a single row. At
@@ -453,9 +462,10 @@ conclusion is the invertibility Lemma 5 asks for, obtained without naming `D` at
 all — there is no membership statement to get wrong. And the inequality the
 argument turns on, `2 B` below `p_min`, is checked rather than assumed: the test
 `the norm bound leaves room for the CRT argument` compares them at the
-parameters in force, with a factor of 24000 to spare at `MSGS = 1000`. The 762
-this said until the sweep of Section 12 is the same quantity at the 39-bit
-basis, which Section 8 replaced.
+parameters in force, with a factor of 49 to spare at `MSGS = 1000` and 377 at
+256. The 24000 this said until `ANEX_E_INF` was corrected is the same quantity
+with the last row's mask sized for a ternary row, and the 762 before that is it
+at the 39-bit basis, which Section 8 replaced.
 
 **The cost is one assumption the mix-net did not make before:** MSIS modulo each
 prime of the basis. It is genuinely additional, and Section 8 says why in

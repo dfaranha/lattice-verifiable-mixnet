@@ -94,7 +94,7 @@ $(OBJ)/pismall-const.o: src/pismall.cpp $(STAMP) | $(OBJ)
 # the HEIGHT + 3 of the mix-net's own instance, and it needs no padding: the
 # amortization parameter is MSGS itself.
 $(OBJ)/pibnd-short.o: src/pibnd.cpp $(STAMP) | $(OBJ)
-	$(CPP) $(CFLAGS) -DPIBND_V='(WIDTH+1)' -UTAU -DTAU=MSGS -c $< -o $@
+	$(CPP) $(CFLAGS) -DPIBND_SHORT -c $< -o $@
 
 bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) $(STAMP)
 	$(CPP) $(CFLAGS) -DMAIN src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) -o $@ $(LIBS)
