@@ -149,14 +149,25 @@ static_assert(LIN_REPS > 1, "one linear proof cannot reach LEVEL on its own");
  * randomness, and the responses and first messages of the third opening that
  * the linear proof now carries for them. */
 static commit_t *com, *d, *cs, *pcom;
-static vector < params::poly_q > *r, *pr, *_r;
+static vector < params::poly_q > *r, *pr;
+/* The randomness of the D_i is not kept. A pass draws it from a seed of its
+ * own, one derivation per index, so the second half of the pass can reproduce
+ * exactly the vector the first half committed under without holding
+ * SHUFFLE_REPS * MSGS * WIDTH polynomials alive in between -- a gigabyte at
+ * MSGS = 1024. Per index rather than as one stream, because the linear proofs
+ * draw from the same generator in between and would otherwise shift it. */
+static uint8_t (*rseed)[BLAKE3_OUT_LEN];
+static vector < params::poly_q > _rtmp;
 static params::poly_q *ms, *_ms, *s;
-static params::poly_q (*y)[LIN_REPS][WIDTH], (*w)[LIN_REPS][WIDTH],
-		(*_y)[LIN_REPS][WIDTH];
+/* The responses of one relation. They used to be indexed by relation as well,
+ * which is 2.4 GiB at MSGS = 1024; each relation is now checked as it is
+ * produced, so only one is ever live. */
+static params::poly_q y[LIN_REPS][WIDTH], w[LIN_REPS][WIDTH],
+		_y[LIN_REPS][WIDTH];
 /* What a linear proof publishes besides its responses: the hash its challenges
  * come from. The first messages are rebuilt by the verifier. */
 static uint8_t (*lh)[BLAKE3_OUT_LEN];
-static params::poly_q *theta, *inv, *inv_tmp;
+static params::poly_q *inv, *inv_tmp;
 static params::poly_q *sg, *fa, *fb;
 
 /* The proof that every committed sigma_i is a ring constant, the algebraic
@@ -171,12 +182,14 @@ static pibnd_short_t *bnd;
 
 static void shuffle_alloc(void) {
 	com = new commit_t[MSGS];
-	/* d, _r and theta are the part of a pass that outlives it: every pass's
-	 * D_i has to exist before any beta is drawn, so they are dimensioned by
-	 * SHUFFLE_REPS as well and indexed d[rep * MSGS + i]. See SOUNDNESS.md
-	 * section 6.1. */
+	/* d is the part of a pass that outlives it: every pass's D_i has to exist
+	 * before any beta is drawn, so it is dimensioned by SHUFFLE_REPS as well
+	 * and indexed d[rep * MSGS + i]. What went with it -- the randomness of
+	 * those commitments and the masks theta_i -- is now derived from the
+	 * pass's seed twice over instead. See SOUNDNESS.md section 6.1. */
 	d = new commit_t[SHUFFLE_REPS * MSGS];
-	_r = new vector < params::poly_q >[SHUFFLE_REPS * MSGS];
+	rseed = new uint8_t[SHUFFLE_REPS][BLAKE3_OUT_LEN];
+	_rtmp.resize(WIDTH);
 	cs = new commit_t[MSGS];
 	pcom = new commit_t[MSGS];
 	r = new vector < params::poly_q >[MSGS];
@@ -184,11 +197,7 @@ static void shuffle_alloc(void) {
 	ms = new params::poly_q[MSGS];
 	_ms = new params::poly_q[MSGS];
 	s = new params::poly_q[MSGS];
-	y = new params::poly_q[MSGS][LIN_REPS][WIDTH];
-	w = new params::poly_q[MSGS][LIN_REPS][WIDTH];
-	_y = new params::poly_q[MSGS][LIN_REPS][WIDTH];
 	lh = new uint8_t[MSGS][BLAKE3_OUT_LEN];
-	theta = new params::poly_q[SHUFFLE_REPS * MSGS];
 	inv = new params::poly_q[MSGS];
 	inv_tmp = new params::poly_q[MSGS];
 	sg = new params::poly_q[MSGS];
@@ -199,7 +208,7 @@ static void shuffle_alloc(void) {
 static void shuffle_free(void) {
 	delete[]com;
 	delete[]d;
-	delete[]_r;
+	delete[]rseed;
 	delete[]cs;
 	delete[]pcom;
 	delete[]r;
@@ -207,11 +216,7 @@ static void shuffle_free(void) {
 	delete[]ms;
 	delete[]_ms;
 	delete[]s;
-	delete[]y;
-	delete[]w;
-	delete[]_y;
 	delete[]lh;
-	delete[]theta;
 	delete[]inv;
 	delete[]inv_tmp;
 	delete[]sg;
@@ -913,12 +918,46 @@ static void shuffle_factors(params::poly_q ms[MSGS], params::poly_q _ms[MSGS],
 /* The half of a pass the prover can send before beta: its tau and mu, and the
  * commitments D_i under them. Every pass reaches this point before any beta is
  * drawn, which is what binds them to each other. */
+/* Seed the generator for index i of pass rep, whose seed is given. Every draw
+ * a pass has to be able to repeat is taken this way: per index rather than as
+ * one stream, because the linear proofs draw from the same generator in
+ * between and would otherwise shift it. */
+static void shuffle_seed_at(const uint8_t seed[BLAKE3_OUT_LEN], size_t i,
+		uint8_t tag) {
+	uint8_t h[BLAKE3_OUT_LEN];
+	blake3_hasher hasher;
+
+	blake3_hasher_init(&hasher);
+	blake3_hasher_update(&hasher, seed, BLAKE3_OUT_LEN);
+	blake3_hasher_update(&hasher, &tag, 1);
+	blake3_hasher_update(&hasher, (const uint8_t *) &i, sizeof(i));
+	blake3_hasher_finalize(&hasher, h, BLAKE3_OUT_LEN);
+	nfl::fastrandombytes_seed(h);
+}
+
+/* The commitment randomness of D_i, and the mask theta_i on the s_i, neither
+ * of which is stored between the two halves of a pass. */
+static void shuffle_commit_rand(vector < params::poly_q > &out,
+		const uint8_t seed[BLAKE3_OUT_LEN], size_t i) {
+	shuffle_seed_at(seed, i, 'r');
+	bdlop_sample_rand(out);
+	nfl::fastrandombytes_reseed();
+}
+
+static void shuffle_theta(params::poly_q & out,
+		const uint8_t seed[BLAKE3_OUT_LEN], size_t i) {
+	shuffle_seed_at(seed, i, 't');
+	out = nfl::uniform();
+	nfl::fastrandombytes_reseed();
+}
+
 static int shuffle_prover_commit(params::poly_q & tau, params::poly_q & mu,
-		commit_t d[MSGS], vector < params::poly_q > _r[MSGS],
-		params::poly_q theta[MSGS], commit_t p[MSGS], commit_t c[MSGS],
+		commit_t d[MSGS], const uint8_t seed[BLAKE3_OUT_LEN],
+		commit_t p[MSGS], commit_t c[MSGS],
 		params::poly_q ms[MSGS], params::poly_q _ms[MSGS],
 		params::poly_q rho[SIZE], comkey_t & key, int rep) {
 	vector < params::poly_q > t0(1);
+	params::poly_q th[2];
 
 	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
 	shuffle_factors(ms, _ms, tau, mu);
@@ -930,91 +969,88 @@ static int shuffle_prover_commit(params::poly_q & tau, params::poly_q & mu,
 		return 0;
 	}
 
-	/* Prover samples theta_i and computes commitments D_i. */
+	/* Prover samples theta_i and computes commitments D_i. Uniform, not short:
+	 * theta_i is the only mask on the s_i the prover publishes, and
+	 * nfl::uniform already fills the NTT domain. Only theta_{i-1} and theta_i
+	 * are ever needed at once, so a two-element window is kept rather than the
+	 * SHUFFLE_REPS * MSGS polynomials the pass would otherwise hold. */
 	for (size_t i = 0; i < MSGS - 1; i++) {
-		/* Uniform, not short: theta_i is the only mask on the s_i the prover
-		 * publishes, and nfl::uniform already fills the NTT domain. */
-		theta[i] = nfl::uniform();
+		shuffle_theta(th[i & 1], seed, i);
 		if (i == 0) {
-			t0[0] = theta[0] * fb[0];
+			t0[0] = th[0] * fb[0];
 		} else {
-			t0[0] = theta[i - 1] * fa[i] + theta[i] * fb[i];
+			t0[0] = th[(i - 1) & 1] * fa[i] + th[i & 1] * fb[i];
 		}
 		t0[0].invntt_pow_invphi();
-		_r[i].resize(WIDTH);
-		bdlop_sample_rand(_r[i]);
-		bdlop_commit(d[i], t0, key, _r[i]);
+		shuffle_commit_rand(_rtmp, seed, i);
+		bdlop_commit(d[i], t0, key, _rtmp);
 	}
-	t0[0] = theta[MSGS - 2] * fa[MSGS - 1];
+	t0[0] = th[(MSGS - 2) & 1] * fa[MSGS - 1];
 	t0[0].invntt_pow_invphi();
-	_r[MSGS - 1].resize(WIDTH);
-	bdlop_sample_rand(_r[MSGS - 1]);
-	bdlop_commit(d[MSGS - 1], t0, key, _r[MSGS - 1]);
+	shuffle_commit_rand(_rtmp, seed, MSGS - 1);
+	bdlop_commit(d[MSGS - 1], t0, key, _rtmp);
 
 	return 1;
 }
 
 /* The other half, once beta is known for every pass: the published s_i and the
  * MSGS linear proofs. */
-static int shuffle_prover_respond(params::poly_q y[MSGS][LIN_REPS][WIDTH],
-		params::poly_q w[MSGS][LIN_REPS][WIDTH],
-		params::poly_q _y[MSGS][LIN_REPS][WIDTH],
+/* The second half of a pass: the published s_i, then the MSGS linear proofs,
+ * each checked as soon as it is produced. Verifying relation l there rather
+ * than after all of them is what lets one relation's responses be all that is
+ * held: indexed by relation, y, w and _y were 2.4 GiB at MSGS = 1024. It costs
+ * the verifier nothing -- it still derives its own tau, mu and beta from the
+ * transcript and rebuilds the first messages -- it only reads each relation
+ * earlier than it used to. */
+static int shuffle_respond_verify(params::poly_q y[LIN_REPS][WIDTH],
+		params::poly_q w[LIN_REPS][WIDTH],
+		params::poly_q _y[LIN_REPS][WIDTH],
 		uint8_t lh[MSGS][BLAKE3_OUT_LEN], commit_t d[MSGS],
 		commit_t p[MSGS], vector < params::poly_q > pr[MSGS],
-		vector < params::poly_q > _r[MSGS], params::poly_q theta[MSGS],
+		const uint8_t seed[BLAKE3_OUT_LEN],
 		params::poly_q s[MSGS], commit_t c[MSGS], params::poly_q ms[MSGS],
 		params::poly_q _ms[MSGS], vector < params::poly_q > r[MSGS],
-		params::poly_q & beta, params::poly_q & tau, params::poly_q & mu,
-		comkey_t & key, comkey_t & pkey) {
-	params::poly_q coef[3];
+		params::poly_q & beta, params::poly_q & vbeta, params::poly_q & tau,
+		params::poly_q & mu, params::poly_q rho[SIZE],
+		comkey_t & key, comkey_t & pkey, int rep) {
+	params::poly_q coef[3], vcoef[3], th[2], vtau, vmu;
 	int complete = 1;
 
 	shuffle_factors(ms, _ms, tau, mu);
 	if (!simul_inverse(inv, fb)) {
 		return 0;
 	}
+	shuffle_theta(th[0], seed, 0);
 	for (size_t i = 0; i < MSGS - 1; i++) {
 		if (i == 0) {
-			s[0] = theta[0] * fb[0] - beta * fa[0];
+			s[0] = th[0] * fb[0] - beta * fa[0];
 		} else {
-			s[i] = theta[i - 1] * fa[i] + theta[i] * fb[i] - s[i - 1] * fa[i];
+			shuffle_theta(th[i & 1], seed, i);
+			s[i] = th[(i - 1) & 1] * fa[i] + th[i & 1] * fb[i]
+					- s[i - 1] * fa[i];
 		}
 		s[i] = s[i] * inv[i];
 	}
 
+	/* The verifier's own challenges, from the transcript rather than from the
+	 * prover: the sub-proofs about the P_i are not checked here, run() checks
+	 * them once for every pass. */
+	shuffle_chal_hash(vtau, vmu, c, p, _ms, rho, rep);
+
 	/* Now run \Prod_LIN instances, one for each commitment. */
 	for (size_t l = 0; l < MSGS; l++) {
 		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
-		complete &= lin_prover(y[l], w[l], _y[l], lh[l], c[l], p[l], d[l], coef,
-				key, pkey, r[l], pr[l], _r[l]);
+		shuffle_commit_rand(_rtmp, seed, l);
+		complete &= lin_prover(y, w, _y, lh[l], c[l], p[l], d[l], coef,
+				key, pkey, r[l], pr[l], _rtmp);
+		shuffle_coeffs(vcoef, l, s, _ms, vbeta, vtau, vmu);
+		complete &= lin_verifier(y, w, _y, lh[l], c[l], p[l], d[l], vcoef,
+				key, pkey);
 	}
 
 	return complete;
 }
 
-static int shuffle_verifier(params::poly_q y[MSGS][LIN_REPS][WIDTH],
-		params::poly_q w[MSGS][LIN_REPS][WIDTH],
-		params::poly_q _y[MSGS][LIN_REPS][WIDTH],
-		uint8_t lh[MSGS][BLAKE3_OUT_LEN], commit_t d[MSGS],
-		commit_t p[MSGS], params::poly_q s[MSGS], commit_t c[MSGS],
-		params::poly_q _ms[MSGS], params::poly_q rho[SIZE],
-		params::poly_q & beta, comkey_t & key, comkey_t & pkey, int rep) {
-	params::poly_q coef[3], tau, mu;
-	int result = 1;
-
-	/* The sub-proofs about the P_i are not checked here: the P_i are the first
-	 * message, sent once for every pass, and run() checks them once. beta is
-	 * not derived here either, being a function of every pass's D_i; run()
-	 * derives all of them from the transcript before this is called. */
-	shuffle_chal_hash(tau, mu, c, p, _ms, rho, rep);
-	for (size_t l = 0; l < MSGS; l++) {
-		shuffle_coeffs(coef, l, s, _ms, beta, tau, mu);
-		result &= lin_verifier(y[l], w[l], _y[l], lh[l], c[l], p[l], d[l], coef,
-				key, pkey);
-	}
-
-	return result;
-}
 
 /**
  * Run a full proof of shuffle.
@@ -1074,8 +1110,8 @@ static void shuffle_compress(comkey_t & _key, commit_t cs[MSGS],
 	}
 }
 
-static int run(vector < vector < params::poly_q >> m,
-		vector < vector < params::poly_q >> _m,
+static int run(vector < vector < params::poly_q >> &m,
+		vector < vector < params::poly_q >> &_m,
 		vector < params::poly_q > &sigma, comkey_t & key) {
 	static params::poly_q rho[SHUFFLE_REPS][SIZE];
 	static params::poly_q tau[SHUFFLE_REPS], mu[SHUFFLE_REPS];
@@ -1108,8 +1144,12 @@ static int run(vector < vector < params::poly_q >> m,
 		for (int rep = 0; rep < SHUFFLE_REPS && ready; rep++) {
 			shuffle_rho_hash(rho[rep], com, _m, rep);
 			shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
+			if (getrandom(rseed[rep], BLAKE3_OUT_LEN, 0) != BLAKE3_OUT_LEN) {
+				fprintf(stderr, "ERROR: could not read entropy for a pass\n");
+				abort();
+			}
 			ready = shuffle_prover_commit(tau[rep], mu[rep], &d[rep * MSGS],
-					&_r[rep * MSGS], &theta[rep * MSGS], pcom, cs, ms, _ms,
+					rseed[rep], pcom, cs, ms, _ms,
 					rho[rep], _key, rep);
 		}
 	} while (!ready && ++tries < SHUFFLE_TRIES);
@@ -1124,11 +1164,9 @@ static int run(vector < vector < params::poly_q >> m,
 
 	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
 		shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
-		result &= shuffle_prover_respond(y, w, _y, lh, &d[rep * MSGS], pcom, pr,
-				&_r[rep * MSGS], &theta[rep * MSGS], s, cs, ms, _ms, r,
-				beta[rep], tau[rep], mu[rep], _key, key);
-		result &= shuffle_verifier(y, w, _y, lh, &d[rep * MSGS], pcom, s, cs,
-				_ms, rho[rep], vbeta[rep], _key, key, rep);
+		result &= shuffle_respond_verify(y, w, _y, lh, &d[rep * MSGS], pcom,
+				pr, rseed[rep], s, cs, ms, _ms, r, beta[rep], vbeta[rep],
+				tau[rep], mu[rep], rho[rep], _key, key, rep);
 	}
 
 	return result;
@@ -1469,25 +1507,31 @@ static void proof_size(void) {
 	serial::bits pass, once;
 	params::poly_q t0;
 
+	/* The responses of one relation. Only one is live at a time, and they are
+	 * the same shape for every relation, so this walks the one the last pass
+	 * left behind and scales it. The coding is sample-dependent, so that is
+	 * one sample rather than a sum of MSGS of them. */
+	serial::bits one;
+
+	for (int j = 0; j < LIN_REPS; j++) {
+		for (int k = 0; k < WIDTH; k++) {
+			t0 = y[j][k];
+			t0.invntt_pow_invphi();
+			serial::put_gauss(one, t0, SIGMA_C);
+			t0 = w[j][k];
+			t0.invntt_pow_invphi();
+			serial::put_gauss(one, t0, SIGMA_C);
+			t0 = _y[j][k];
+			t0.invntt_pow_invphi();
+			serial::put_gauss(one, t0, SIGMA_C);
+		}
+	}
 	for (size_t i = 0; i < MSGS; i++) {
 		serial::put_uniform(pass, d[i].c1);
 		for (size_t j = 0; j < d[i].c2.size(); j++) {
 			serial::put_uniform(pass, d[i].c2[j]);
 		}
 		serial::put_uniform(pass, s[i]);
-		for (int j = 0; j < LIN_REPS; j++) {
-			for (int k = 0; k < WIDTH; k++) {
-				t0 = y[i][j][k];
-				t0.invntt_pow_invphi();
-				serial::put_gauss(pass, t0, SIGMA_C);
-				t0 = w[i][j][k];
-				t0.invntt_pow_invphi();
-				serial::put_gauss(pass, t0, SIGMA_C);
-				t0 = _y[i][j][k];
-				t0.invntt_pow_invphi();
-				serial::put_gauss(pass, t0, SIGMA_C);
-			}
-		}
 		pass.put(0, 8 * BLAKE3_OUT_LEN);        /* the linear proof's hash */
 		serial::put_uniform(once, pcom[i].c1);
 		for (size_t j = 0; j < pcom[i].c2.size(); j++) {
@@ -1495,7 +1539,7 @@ static void proof_size(void) {
 		}
 	}
 
-	size_t per_pass = pass.bytes();
+	size_t per_pass = pass.bytes() + MSGS * one.bytes();
 	size_t small = pismall_const_bytes(cst);
 	size_t bound = pibnd_short_bytes(bnd);
 	size_t first = once.bytes() + small + bound;

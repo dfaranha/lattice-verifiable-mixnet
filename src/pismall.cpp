@@ -355,7 +355,11 @@ static void aex_sample_set(params::poly_q & out, aex_set_t set) {
  * CONFIG=-DTAU=8 to make to try it on a smaller machine. */
 static params::poly_q A[R][V];
 static params::poly_q (*s)[V], (*t)[R];
-static array < mpz_t, params::poly_q::degree > (*v)[TAU][V];
+/* The v_{i,j} of the prover, one element of Z_q per coefficient. Held as the
+ * two limbs the value already is rather than as mpz_t: an initialised mpz_t
+ * costs its struct, its limbs and a malloc header, which is five times the 16
+ * bytes of the value and 3.7 GiB of the difference at TAU = 1024. */
+static uint64_t (*v)[TAU][V][params::poly_q::degree][2];
 static gr_t *prover_y;                      /* prover_y[i] = l_i(x) */
 static gr_t (*prover_beta)[3];
 static gr_t (*prover_wt)[3];                /* l_i(x) l_0(x)^j */
@@ -378,7 +382,7 @@ static void pismall_alloc(void) {
 	s = new params::poly_q[TAU][V];
 	t = new params::poly_q[TAU][R];
 	H = new aex_code_t[TAU][3][V];
-	v = new array < mpz_t, params::poly_q::degree >[3][TAU][V];
+	v = new uint64_t[3][TAU][V][params::poly_q::degree][2];
 	prover_y = new gr_t[TAU + 1];
 	prover_beta = new gr_t[TAU][3];
 	prover_wt = new gr_t[TAU][3];
@@ -1459,13 +1463,6 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 	gr_init(prover_y[TAU]);
 	for (size_t i = 0; i < TAU; i++) {
 		gr_init(prover_y[i]);
-		for (size_t j = 0; j < 3; j++) {
-			for (size_t k = 0; k < V; k++) {
-				for (size_t l = 0; l < params::poly_q::degree; l++) {
-					mpz_init(v[j][i][k][l]);
-				}
-			}
-		}
 	}
 	gr_init(beta0);
 	for (size_t i = 0; i < TAU; i++) {
@@ -1584,12 +1581,9 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 						aex_u64 d = aex_sub(r1 % P[1], r0 % P[1], P[1]);
 						aex_u64 t2 = aex_mul(d, pinv, P[1]);
 						__uint128_t val = (__uint128_t) P[0] * t2 + r0;
-						unsigned long limb[2] = {
-							(unsigned long) (val & 0xffffffffffffffffULL),
-							(unsigned long) (val >> 64)
-						};
-						mpz_import(v[jj][i][k][l], 2, -1, sizeof(limb[0]), 0, 0,
-								limb);
+						v[jj][i][k][l][0] =
+								(uint64_t) (val & 0xffffffffffffffffULL);
+						v[jj][i][k][l][1] = (uint64_t) (val >> 64);
 					}
 				}
 			}
@@ -1617,7 +1611,8 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 		for (size_t i = 0; i < TAU; i++) {
 			for (size_t j = 0; j < 3; j++) {
 				for (size_t l = 0; l < params::poly_q::degree; l++) {
-					flint_poly_set_coeff_mpz(poly, l, v[j][i][k][l], ctx_q);
+					fmpz_set_ui_array(t, v[j][i][k][l], 2);
+					fmpz_mod_poly_set_coeff_fmpz(poly, l, t, ctx_q);
 				}
 				if (j == 0) {
 					poly_from(zero, s[i][k], ctx_q);
@@ -1710,8 +1705,8 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 					}
 				}
 				for (size_t l = 0; l < params::poly_q::degree; l++) {
-					flint_poly_set_coeff_mpz(poly, l, v[j][i - 1][k][l],
-							ctx_q);
+					fmpz_set_ui_array(t, v[j][i - 1][k][l], 2);
+					fmpz_mod_poly_set_coeff_fmpz(poly, l, t, ctx_q);
 				}
 				for (int c = 0; c < AEX_DEG; c++) {
 					fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
@@ -1742,13 +1737,6 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 	gr_clear(prover_y[TAU]);
 	for (size_t i = 0; i < TAU; i++) {
 		gr_clear(prover_y[i]);
-		for (size_t j = 0; j < 3; j++) {
-			for (size_t k = 0; k < V; k++) {
-				for (size_t l = 0; l < params::poly_q::degree; l++) {
-					mpz_clear(v[j][i][k][l]);
-				}
-			}
-		}
 	}
 	gr_clear(beta0);
 	for (size_t i = 0; i < TAU; i++) {
@@ -2565,15 +2553,16 @@ static void test(flint_rand_t rand) {
 		commit_t *P = new commit_t[TAU];
 		vector < params::poly_q > *pr = new vector < params::poly_q >[TAU];
 		params::poly_q *sigma = new params::poly_q[TAU];
-		aex_open_t o;
 		int ok = 1;
 
 		aex_scalar_test_setup(key, P, pr, sigma, 1);
+		/* Through the API the proof of shuffle calls, rather than by repeating
+		 * its steps here: pismall_const_prove carries its own one-time setup,
+		 * and nothing else exercises it. */
 		for (int rep = 0; rep < AEX_REPS; rep++) {
-			pismall_prover(com, x, f, rf, h, rh, rd, key, lag, rand, ctx, o);
-			ok &= pismall_verifier(com, f, rf, h, rh, rd, key, lag, rand, ctx,
-					o);
-			aex_open_clear(o);
+			pismall_const_t *pc = pismall_const_prove(key, P, pr, sigma, TAU);
+			ok &= pismall_const_verify(pc, key, P, TAU);
+			pismall_const_free(pc);
 		}
 		delete[]sigma;
 		delete[]pr;
