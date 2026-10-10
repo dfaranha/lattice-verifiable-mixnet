@@ -5,6 +5,9 @@
  * ****************************** */
 
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
 #include <stdint.h>
 #include "sample_z_small.h"
 #include "param.h"
@@ -166,6 +169,17 @@ int64_t sample_z(const double center, const double sigma)
 
 	rc = exp(c * c / sigma2) / (sigma * sqrt_pi2);
 
+	/* cosac_comp() is exact only for probabilities of at least
+	 * 2^-(COSAC_R_EXPONENT_L + 1); below that it shifts by a negative amount,
+	 * and this first comparison, which decides whether to return the center,
+	 * goes wrong. rc is about 1 / (sigma sqrt(2 pi)), so that happens past
+	 * sigma = 2^52 / sqrt(2 pi) = 1.8 * 10^15. The same flaw in a sampler with a 19-bit field made it
+	 * return its center for most samples past sigma = 418000. */
+	if (rc < ldexp(1.0, -(COSAC_R_EXPONENT_L + 1))) {
+		fprintf(stderr, "sample_z: sigma = %g is beyond what the sampler supports\n", sigma);
+		abort();
+	}
+
 	fastrandombytes(r, COMP_ENTRY_SIZE);
 
 	if (cosac_comp(r, rc))
@@ -185,8 +199,18 @@ int64_t sample_z(const double center, const double sigma)
 
 				fastrandombytes((unsigned char *)r_bm, BOX_MULLER_BYTES);
 
-				r1 = (((*((uint64_t *)r)) & FP_MASK) + 1) * FP_FACTOR;
-				r2 = (((*((uint64_t *)(r + 8))) & FP_MASK) + 1) * FP_FACTOR;
+				/* The uniforms come from r_bm, drawn for this purpose. They
+				 * used to be read from r, whose bytes are also the coins of
+				 * the acceptance tests below, so each deviate was correlated
+				 * with its own acceptance: at sigma = 4 the samples came out
+				 * 4.6 per cent too wide, with a chi-square of 13061 over 32
+				 * bins against the exact distribution, 33 once read from
+				 * r_bm. memcpy, since r_bm + 8 need not be aligned. */
+				uint64_t u1, u2;
+				memcpy(&u1, r_bm, sizeof(u1));
+				memcpy(&u2, r_bm + 8, sizeof(u2));
+				r1 = ((u1 & FP_MASK) + 1) * FP_FACTOR;
+				r2 = ((u2 & FP_MASK) + 1) * FP_FACTOR;
 
 				r1 = sqrt(-2 * log(r1)) * sigma;
 				r2 = r2 * pi2;

@@ -5,6 +5,8 @@
  * ****************************** */
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "sample_z_large.h"
 #include "param.h"
 #include "fastrandombytes.h"
@@ -165,6 +167,15 @@ __int128 sample_z(const __float128 center, const __float128 sigma)
 
 	rc = expq(c * c / sigma2) / (sigma * sqrt_pi2);
 
+	/* cosac_comp() is exact only for probabilities of at least
+	 * 2^-(COSAC_R_EXPONENT_L + 1); rc is about 1 / (sigma sqrt(2 pi)), so past
+	 * sigma = 2^56 / sqrt(2 pi) = 2.9 * 10^16 this comparison goes wrong (see
+	 * sample_z_small.c). */
+	if (rc < 1.0Q / (__float128) (((__uint128_t) 1) << (COSAC_R_EXPONENT_L + 1))) {
+		fprintf(stderr, "sample_z: sigma = %g is beyond what the sampler supports\n", (double) sigma);
+		abort();
+	}
+
 	fastrandombytes(r, COMP_ENTRY_SIZE);
 
 	if (cosac_comp(r, rc))
@@ -184,8 +195,10 @@ __int128 sample_z(const __float128 center, const __float128 sigma)
 
 				fastrandombytes((unsigned char *)r_bm, BOX_MULLER_BYTES);
 
-				r1 = (load_96(r) + 1) * FP_FACTOR;
-				r2 = (load_96(r + 12) + 1) * FP_FACTOR;
+				/* From r_bm, drawn for this purpose; reading r reused the
+				 * acceptance tests' coins (see sample_z_small.c). */
+				r1 = (load_96(r_bm) + 1) * FP_FACTOR;
+				r2 = (load_96(r_bm + 12) + 1) * FP_FACTOR;
 
 				r1 = sqrtq(-2 * logq(r1)) * sigma;
 				r2 = r2 * pi2;
