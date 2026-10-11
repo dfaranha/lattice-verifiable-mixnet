@@ -402,13 +402,7 @@ static void pismall_free(void) {
 
 /* --- Reed-Solomon encoding over Z_q ------------------------------------- */
 
-static fmpz *aex_scratch;                              /* symbol buffer */
-static std::array < mpz_t, params::poly_big::degree > aex_mpz;
 static params::poly_big *aex_poly;                     /* NTT working poly */
-
-static inline void aex_pack(aex_code_t * c, size_t i, const fmpz_t x) {
-	fmpz_get_ui_array(c->w + 2 * i, 2, x);
-}
 
 static inline void aex_unpack(fmpz_t x, const aex_code_t * c, size_t i) {
 	fmpz_set_ui_array(x, c->w + 2 * i, 2);
@@ -416,18 +410,33 @@ static inline void aex_unpack(fmpz_t x, const aex_code_t * c, size_t i) {
 
 
 static void aex_ntt_setup(const fmpz_mod_ctx_t ctx) {
-	aex_scratch = _fmpz_vec_init(AEX_COLS);
-	aex_poly = new params::poly_big;
-	for (size_t i = 0; i < params::poly_big::degree; i++) {
-		mpz_init2(aex_mpz[i], params::poly_big::bits_in_moduli_product() << 2);
+	/* The symbols are reduced mod q by the context and taken apart into
+	 * poly_big's residues by aex_residues; the two must be the same q. */
+	fmpz_t Q;
+	fmpz_init(Q);
+	fmpz_set_mpz(Q, params::poly_big::moduli_product());
+	if (!fmpz_equal(Q, fmpz_mod_ctx_modulus(ctx))) {
+		fprintf(stderr, "aex: the code's modulus is not q\n");
+		abort();
 	}
+	fmpz_clear(Q);
+	aex_poly = new params::poly_big;
 }
 
 static void aex_ntt_clear(void) {
-	_fmpz_vec_clear(aex_scratch, AEX_COLS);
 	delete aex_poly;
-	for (size_t i = 0; i < params::poly_big::degree; i++) {
-		mpz_clear(aex_mpz[i]);
+}
+
+/* A symbol of Z_q, below 2^128, as its residues mod each of poly_big's moduli,
+ * which is what mpz2poly computed through an mpz. */
+static inline void aex_residues(params::poly_big & a, size_t i, const fmpz_t x) {
+	ulong w[2] = { 0, 0 };
+
+	fmpz_get_ui_array(w, 2, x);
+	const __uint128_t v = ((__uint128_t) w[1] << 64) | w[0];
+	for (size_t cm = 0; cm < params::poly_big::nmoduli; cm++) {
+		const uint64_t p = params::poly_big::get_modulus(cm);
+		a(cm, i) = (w[1] == 0) ? w[0] % p : (uint64_t) (v % p);
 	}
 }
 
@@ -435,32 +444,47 @@ static void aex_ntt_clear(void) {
  * low coefficients, then evaluate at the AEX_COLS roots of unity. */
 static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 		fmpz_mod_poly_t in1, const fmpz * in, const fmpz_mod_ctx_t ctx) {
+	static_assert(params::poly_big::nmoduli == 2, "a symbol is two residues");
 	const size_t N = params::poly_q::degree;
+	const slong l0 = fmpz_mod_poly_length(in0, ctx), l1 = fmpz_mod_poly_length(in1, ctx);
+	const util::crt < params::poly_big > &c = util::crt < params::poly_big >::get();
+	params::poly_big & a = *aex_poly;
+	fmpz_t zero;
 	size_t i;
 
+	/* The coefficients are reduced mod q; past a polynomial's length they are
+	 * zero. */
+	fmpz_init(zero);
 	for (i = 0; i < N; i++) {
-		fmpz_mod_poly_get_coeff_fmpz(aex_scratch + i, in0, i, ctx);
-		fmpz_get_mpz(aex_mpz[i], aex_scratch + i);
+		aex_residues(a, i, ((slong) i < l0) ? in0->coeffs + i : zero);
 	}
 	for (; i < 2 * N; i++) {
-		fmpz_mod_poly_get_coeff_fmpz(aex_scratch + i, in1, i - N, ctx);
-		fmpz_get_mpz(aex_mpz[i], aex_scratch + i);
+		aex_residues(a, i, ((slong) (i - N) < l1) ? in1->coeffs + (i - N) : zero);
 	}
 	for (; i < 2 * N + ETA; i++) {
-		fmpz_get_mpz(aex_mpz[i], in + (i - 2 * N));
+		aex_residues(a, i, in + (i - 2 * N));
 	}
 	for (; i < AEX_COLS; i++) {
-		mpz_set_ui(aex_mpz[i], 0);
+		aex_residues(a, i, zero);
 	}
+	fmpz_clear(zero);
 
 	/* Both NFLlib moduli satisfy p = 1 mod 2 * AEX_COLS, so this is a genuine
-	 * length-AEX_COLS transform; poly2mpz then CRTs each symbol back. */
-	aex_poly->mpz2poly(aex_mpz);
-	aex_poly->ntt_pow_phi();
-	aex_poly->poly2mpz(aex_mpz);
+	 * length-AEX_COLS transform. Each symbol is recombined from its two
+	 * residues by the CRT, r_0 + p_0 ((r_1 - r_0) p_0^-1 mod p_1), below
+	 * q < 2^128, and written as aex_pack wrote it: low limb, then high. */
+	a.ntt_pow_phi();
 	for (i = 0; i < AEX_COLS; i++) {
-		fmpz_set_mpz(aex_scratch + i, aex_mpz[i]);
-		aex_pack(&out, i, aex_scratch + i);
+		const uint64_t r0 = a(0, i), r1 = a(1, i), p1 = c.p1;
+		const uint64_t r0m = (r0 >= p1) ? r0 % p1 : r0;
+		const uint64_t d = (r1 >= r0m) ? r1 - r0m : r1 + p1 - r0m;
+		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
+		uint64_t t = d * c.w - h * p1;
+		t -= (t >= p1) ? p1 : 0;
+		const __uint128_t x = (__uint128_t) r0 + (__uint128_t) c.p0 * t;
+
+		out.w[2 * i] = (uint64_t) x;
+		out.w[2 * i + 1] = (uint64_t) (x >> 64);
 	}
 }
 
@@ -1330,22 +1354,23 @@ static void pismall_hash(gr_t & x, gr_t & beta0, gr_t beta[TAU][3], fmpz_t q,
 
 static void poly_to(params::poly_q & out, fmpz_mod_poly_t & in,
 		const fmpz_mod_ctx_t ctx) {
-	array < mpz_t, params::poly_q::degree > coeffs;
+	/* in's coefficients are reduced mod q, so each is below 2^128 and is taken
+	 * apart into its residues directly; past in's length they are zero. */
+	const slong len = fmpz_mod_poly_length(in, ctx);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
-	}
+		ulong w[2] = { 0, 0 };
 
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		flint_poly_get_coeff_mpz(coeffs[i], in, i, ctx);
+		if ((slong) i < len) {
+			fmpz_get_ui_array(w, 2, in->coeffs + i);
+		}
+		const __uint128_t v = ((__uint128_t) w[1] << 64) | w[0];
+		for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
+			const uint64_t p = params::poly_q::get_modulus(cm);
+			out(cm, i) = (w[1] == 0) ? w[0] % p : (uint64_t) (v % p);
+		}
 	}
-
-	out.mpz2poly(coeffs);
 	out.ntt_pow_phi();
-
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(coeffs[i]);
-	}
 }
 
 static void poly_from(fmpz_mod_poly_t & out, params::poly_q & in,
