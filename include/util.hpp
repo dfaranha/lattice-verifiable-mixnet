@@ -87,6 +87,52 @@ template <class P> struct crt {
 	}
 };
 
+/* Reduction of a 128-bit value mod each of P's moduli without dividing: the
+ * low word by Barrett's method, with mu = floor((2^64 - 1) / p), and the high
+ * word, reduced the same way, times 2^64 mod p by Shoup's precomputed
+ * quotient. A 128-bit % compiles to a call that costs as much as the rest of
+ * a conversion. Moduli below 2^63. */
+template <class P> struct rns {
+	uint64_t p[P::nmoduli], mu[P::nmoduli], c[P::nmoduli], cp[P::nmoduli];
+
+	rns() {
+		for (size_t cm = 0; cm < P::nmoduli; cm++) {
+			p[cm] = P::get_modulus(cm);
+			mu[cm] = UINT64_MAX / p[cm];
+			c[cm] = (uint64_t) (((__uint128_t) 1 << 64) % p[cm]);
+			cp[cm] = (uint64_t) (((__uint128_t) c[cm] << 64) / p[cm]);
+		}
+	}
+	static const rns &get() {
+		static const rns r;
+		return r;
+	}
+	/* x mod p_cm, for any 64-bit x. */
+	inline uint64_t red(uint64_t x, size_t cm) const {
+		const uint64_t qh = (uint64_t) (((__uint128_t) x * mu[cm]) >> 64);
+		uint64_t r = x - qh * p[cm];
+
+		r -= (r >= p[cm]) ? p[cm] : 0;
+		r -= (r >= p[cm]) ? p[cm] : 0;
+		return r;
+	}
+	/* (hi 2^64 + lo) mod p_cm. */
+	inline uint64_t red(uint64_t lo, uint64_t hi, size_t cm) const {
+		uint64_t r = red(lo, cm);
+
+		if (hi != 0) {
+			const uint64_t h = red(hi, cm);
+			const uint64_t qh = (uint64_t) (((__uint128_t) cp[cm] * h) >> 64);
+			uint64_t t = c[cm] * h - qh * p[cm];
+
+			t -= (t >= p[cm]) ? p[cm] : 0;
+			r += t;
+			r -= (r >= p[cm]) ? p[cm] : 0;
+		}
+		return r;
+	}
+};
+
 /* The coefficients of a, read as they are stored (the coefficient domain, for
  * them to mean anything), centred into (-q/2, q/2]. */
 template <class P> inline void centred(__int128 out[], P const &a) {
@@ -98,7 +144,7 @@ template <class P> inline void centred(__int128 out[], P const &a) {
 
 		if (P::nmoduli == 2) {
 			const uint64_t r1 = a(P::nmoduli - 1, i), p1 = c.p1;
-			const uint64_t r0m = r0 % p1;
+			const uint64_t r0m = rns<P>::get().red(r0, P::nmoduli - 1);
 			const uint64_t d = (r1 >= r0m) ? r1 - r0m : r1 + p1 - r0m;
 			/* Shoup: d w mod p_1, in [0, 2 p_1), then reduced. */
 			const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
@@ -113,14 +159,15 @@ template <class P> inline void centred(__int128 out[], P const &a) {
 /* a = the polynomial with signed coefficients v, in the coefficient domain,
  * each reduced mod every modulus. */
 template <class P> inline void set_signed(P &a, const __int128 v[]) {
+	const rns<P> &n = rns<P>::get();
+
 	for (size_t cm = 0; cm < P::nmoduli; cm++) {
 		const uint64_t p = P::get_modulus(cm);
 
 		for (size_t i = 0; i < P::degree; i++) {
 			const __int128 x = v[i];
 			const __uint128_t m = (x < 0) ? (__uint128_t) 0 - (__uint128_t) x : (__uint128_t) x;
-			/* Most coefficients fit 64 bits, where the division is cheap. */
-			const uint64_t r = (m >> 64) ? (uint64_t) (m % p) : (uint64_t) m % p;
+			const uint64_t r = n.red((uint64_t) m, (uint64_t) (m >> 64), cm);
 			a(cm, i) = (x < 0 && r != 0) ? p - r : r;
 		}
 	}

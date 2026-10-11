@@ -432,11 +432,11 @@ static void aex_ntt_clear(void) {
 static inline void aex_residues(params::poly_big & a, size_t i, const fmpz_t x) {
 	ulong w[2] = { 0, 0 };
 
+	const util::rns < params::poly_big > &n = util::rns < params::poly_big >::get();
+
 	fmpz_get_ui_array(w, 2, x);
-	const __uint128_t v = ((__uint128_t) w[1] << 64) | w[0];
 	for (size_t cm = 0; cm < params::poly_big::nmoduli; cm++) {
-		const uint64_t p = params::poly_big::get_modulus(cm);
-		a(cm, i) = (w[1] == 0) ? w[0] % p : (uint64_t) (v % p);
+		a(cm, i) = n.red(w[0], w[1], cm);
 	}
 }
 
@@ -476,7 +476,7 @@ static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 	a.ntt_pow_phi();
 	for (i = 0; i < AEX_COLS; i++) {
 		const uint64_t r0 = a(0, i), r1 = a(1, i), p1 = c.p1;
-		const uint64_t r0m = (r0 >= p1) ? r0 % p1 : r0;
+		const uint64_t r0m = util::rns < params::poly_big >::get().red(r0, 1);
 		const uint64_t d = (r1 >= r0m) ? r1 - r0m : r1 + p1 - r0m;
 		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
 		uint64_t t = d * c.w - h * p1;
@@ -1046,6 +1046,19 @@ static_assert((TAU & (TAU - 1)) == 0, "TAU must be a power of two");
 typedef unsigned long long aex_u64;
 
 static inline aex_u64 aex_mul(aex_u64 a, aex_u64 b, aex_u64 p) {
+	/* For p below 2^50, as both moduli here are: a b < 2^100 rounds to a
+	 * double within a part in 2^53, so the quotient it gives is off by at most
+	 * one, and the remainder a b - quo p, which is that small, can be taken
+	 * modulo 2^64 and corrected once. A 128-bit % calls __umodti3, which
+	 * costs several times as much. a and b are below p. */
+	if (p < ((aex_u64) 1 << 50)) {
+		const aex_u64 quo = (aex_u64) ((double) a * (double) b / (double) p);
+		int64_t r = (int64_t) (a * b - quo * p);
+
+		r += (r < 0) ? (int64_t) p : 0;
+		r -= (r >= (int64_t) p) ? (int64_t) p : 0;
+		return (aex_u64) r;
+	}
 	return (aex_u64) ((__uint128_t) a * b % p);
 }
 
@@ -1357,6 +1370,7 @@ static void poly_to(params::poly_q & out, fmpz_mod_poly_t & in,
 	/* in's coefficients are reduced mod q, so each is below 2^128 and is taken
 	 * apart into its residues directly; past in's length they are zero. */
 	const slong len = fmpz_mod_poly_length(in, ctx);
+	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		ulong w[2] = { 0, 0 };
@@ -1364,10 +1378,8 @@ static void poly_to(params::poly_q & out, fmpz_mod_poly_t & in,
 		if ((slong) i < len) {
 			fmpz_get_ui_array(w, 2, in->coeffs + i);
 		}
-		const __uint128_t v = ((__uint128_t) w[1] << 64) | w[0];
 		for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-			const uint64_t p = params::poly_q::get_modulus(cm);
-			out(cm, i) = (w[1] == 0) ? w[0] % p : (uint64_t) (v % p);
+			out(cm, i) = n.red(w[0], w[1], cm);
 		}
 	}
 	out.ntt_pow_phi();
@@ -2246,6 +2258,29 @@ static void test(flint_rand_t rand) {
 	fmpz_mod_poly_init(lag[TAU], ctx);
 
 	rd.resize(WIDTH);
+	TEST_ONCE("aex_mul agrees with a 128-bit remainder") {
+		/* Its floating-point quotient against the exact one, for both moduli,
+		 * at random operands and at the extremes. */
+		int ok = 1;
+
+		for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
+			const aex_u64 p = params::poly_q::get_modulus(cm);
+			const aex_u64 ends[4] = { 0, 1, p - 2, p - 1 };
+
+			for (int i = 0; i < 4; i++) {
+				for (int j = 0; j < 4; j++) {
+					ok &= aex_mul(ends[i], ends[j], p) ==
+							(aex_u64) ((__uint128_t) ends[i] * ends[j] % p);
+				}
+			}
+			for (int k = 0; k < 1000000; k++) {
+				const aex_u64 a = n_randint(rand, p), b = n_randint(rand, p);
+				ok &= aex_mul(a, b, p) == (aex_u64) ((__uint128_t) a * b % p);
+			}
+		}
+		TEST_ASSERT(ok, end);
+	} TEST_END;
+
 	TEST_BEGIN("conversion is correct") {
 		for (int i = 0; i < R; i++) {
 			for (int j = 0; j < V; j++) {
