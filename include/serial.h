@@ -57,12 +57,15 @@ class bits {
 	size_t nbits = 0;
 	size_t pos = 0;
 
+	/* The low n bits of v, most significant first; for n > 64, the bits
+	 * above v's 64 are zeros, written without shifting a 64-bit value by 64
+	 * or more, which is undefined (proof_size puts a 256-bit hash this way). */
 	void put(uint64_t v, int n) {
 		for (int i = n - 1; i >= 0; i--) {
 			if ((nbits & 7) == 0) {
 				buf.push_back(0);
 			}
-			if ((v >> i) & 1) {
+			if (i < 64 && ((v >> i) & 1)) {
 				buf[nbits >> 3] |= 0x80 >> (nbits & 7);
 			}
 			nbits++;
