@@ -82,6 +82,15 @@ namespace params {
     using poly_big = nfl::poly_from_modulus<uint64_t, 4 * DEGREE, 88>;
 }
 
+/* The hashes in shuffle.cpp, pismall.cpp and pibnd.cpp absorb a ring element as
+ * 16 * DEGREE bytes, at 38 call sites. That is the whole element only
+ * while it is two 64-bit residues a coefficient; with another number of moduli
+ * every challenge would leave part of each element out, which is the bug
+ * ntru_voting_impl's SOUNDNESS.md records three times. */
+static_assert(16 * DEGREE == sizeof(params::poly_q::value_type) *
+              params::poly_q::nmoduli * params::poly_q::degree,
+              "the hashes absorb 16 * DEGREE bytes a ring element");
+
 /*============================================================================*/
 /* Type definitions                                                           */
 /*============================================================================*/

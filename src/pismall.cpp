@@ -2226,7 +2226,7 @@ static void test(flint_rand_t rand) {
 			for (int j = 0; j < V; j++) {
 				poly_from(f[j][0], A[i][j], ctx);
 				poly_to(rd[0], f[j][0], ctx);
-				TEST_ASSERT(rd[0] == A[i][j], end);
+				TEST_ASSERT(util::equal(rd[0], A[i][j]), end);
 			}
 		}
 		fmpz_mod_poly_zero(poly, ctx_q);
@@ -2239,7 +2239,7 @@ static void test(flint_rand_t rand) {
 				poly_from(f[j][0], A[i][j], ctx_q);
 				fmpz_mod_poly_mulmod(f[j][0], f[j][0], f[j][0], poly, ctx_q);
 				poly_to(rd[1], f[j][0], ctx_q);
-				TEST_ASSERT(rd[0] == rd[1], end);
+				TEST_ASSERT(util::equal(rd[0], rd[1]), end);
 			}
 		}
 	} TEST_END;
