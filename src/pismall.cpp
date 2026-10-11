@@ -1365,6 +1365,64 @@ static void pismall_hash(gr_t & x, gr_t & beta0, gr_t beta[TAU][3], fmpz_t q,
 	flint_rand_clear(rand);
 }
 
+/* out = in * x mod q, as fmpz_mod_poly_scalar_mul_fmpz, through the residues
+ * of q's two moduli: Z_q is Z_p0 x Z_p1, so each coefficient is taken apart,
+ * each residue multiplied by x's with Shoup's precomputed quotient, and the
+ * product recombined by the CRT. FLINT does a two-limb multiplication and
+ * reduction a coefficient instead. Other moduli, and a scalar outside
+ * [0, q), go to FLINT. out may be in. */
+static void scalar_mul(fmpz_mod_poly_t out, const fmpz_mod_poly_t in,
+		const fmpz_t x, const fmpz_mod_ctx_t ctx) {
+	static_assert(params::poly_q::nmoduli == 2, "q is two moduli");
+	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
+	const util::crt < params::poly_q > &c = util::crt < params::poly_q >::get();
+	const slong len = fmpz_mod_poly_length(in, ctx);
+	fmpz_t Q;
+	ulong xw[2] = { 0, 0 };
+	uint64_t s[2], sp[2];
+
+	fmpz_init(Q);
+	fmpz_set_mpz(Q, params::poly_q::moduli_product());
+	const int ours = fmpz_equal(Q, fmpz_mod_ctx_modulus(ctx)) &&
+			fmpz_sgn(x) >= 0 && fmpz_cmp(x, Q) < 0;
+	fmpz_clear(Q);
+	if (!ours) {
+		fmpz_mod_poly_scalar_mul_fmpz(out, in, x, ctx);
+		return;
+	}
+	fmpz_get_ui_array(xw, 2, x);
+	for (size_t cm = 0; cm < 2; cm++) {
+		s[cm] = n.red(xw[0], xw[1], cm);
+		sp[cm] = (uint64_t) (((__uint128_t) s[cm] << 64) / n.p[cm]);
+	}
+	fmpz_mod_poly_fit_length(out, len, ctx);
+	for (slong i = 0; i < len; i++) {
+		ulong w[2] = { 0, 0 };
+		uint64_t r[2];
+
+		fmpz_get_ui_array(w, 2, in->coeffs + i);
+		for (size_t cm = 0; cm < 2; cm++) {
+			const uint64_t v = n.red(w[0], w[1], cm), p = n.p[cm];
+			const uint64_t h = (uint64_t) (((__uint128_t) sp[cm] * v) >> 64);
+			uint64_t t = s[cm] * v - h * p;
+
+			r[cm] = t - ((t >= p) ? p : 0);
+		}
+		/* CRT: r0 + p0 ((r1 - r0) p0^-1 mod p1), below q. */
+		const uint64_t p1 = c.p1, r0m = n.red(r[0], 1);
+		const uint64_t d = (r[1] >= r0m) ? r[1] - r0m : r[1] + p1 - r0m;
+		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
+		uint64_t t = d * c.w - h * p1;
+		t -= (t >= p1) ? p1 : 0;
+		const __uint128_t v = (__uint128_t) r[0] + (__uint128_t) c.p0 * t;
+		const ulong o[2] = { (ulong) v, (ulong) (v >> 64) };
+
+		fmpz_set_ui_array(out->coeffs + i, o, 2);
+	}
+	_fmpz_mod_poly_set_length(out, len);
+	_fmpz_mod_poly_normalise(out);
+}
+
 static void poly_to(params::poly_q & out, fmpz_mod_poly_t & in,
 		const fmpz_mod_ctx_t ctx) {
 	/* in's coefficients are reduced mod q, so each is below 2^128 and is taken
@@ -1455,7 +1513,7 @@ static void pismall_setup(fmpz_mod_poly_t lag[], fmpz_t a[TAU], fmpz_t & q,
 			}
 		}
 		fmpz_invmod(u, u, q);
-		fmpz_mod_poly_scalar_mul_fmpz(lag[i], lag[i], u, ctx);
+		scalar_mul(lag[i], lag[i], u, ctx);
 	}
 
 	fmpz_clear(t);
@@ -1685,7 +1743,7 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 	for (int i = 0; i < V; i++) {
 		poly_from(poly, s0[i], ctx_q);
 		for (int c = 0; c < AEX_DEG; c++) {
-			fmpz_mod_poly_scalar_mul_fmpz(f[i][c], poly,
+			scalar_mul(f[i][c], poly,
 					prover_y[0].c[c], ctx_q);
 		}
 	}
@@ -1694,7 +1752,7 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 		for (int j = 0; j < V; j++) {
 			poly_from(poly, s[i - 1][j], ctx_q);
 			for (int c = 0; c < AEX_DEG; c++) {
-				fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
+				scalar_mul(poly2, poly,
 						prover_y[i].c[c], ctx_q);
 				fmpz_mod_poly_add(f[j][c], f[j][c], poly2, ctx_q);
 			}
@@ -1723,7 +1781,7 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 	for (size_t k = 0; k < V; k++) {
 		poly_from(poly, s0[k], ctx);
 		for (int c = 0; c < AEX_DEG; c++) {
-			fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
+			scalar_mul(poly2, poly,
 					beta0.c[c], ctx);
 			fmpz_mod_poly_add(h[0][k][c], h[0][k][c], poly2, ctx);
 		}
@@ -1736,7 +1794,7 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 					 * the end of the matrix on the last iteration. */
 					poly_from(poly, s[i - 1][k], ctx_q);
 					for (int c = 0; c < AEX_DEG; c++) {
-						fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
+						scalar_mul(poly2, poly,
 								b.c[c], ctx_q);
 						fmpz_mod_poly_add(h[0][k][c], h[0][k][c], poly2, ctx);
 					}
@@ -1746,7 +1804,7 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 					fmpz_mod_poly_set_coeff_fmpz(poly, l, t, ctx_q);
 				}
 				for (int c = 0; c < AEX_DEG; c++) {
-					fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
+					scalar_mul(poly2, poly,
 							b.c[c], ctx_q);
 					fmpz_mod_poly_add(h[1][k][c], h[1][k][c], poly2, ctx);
 				}
@@ -1849,7 +1907,7 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 			for (int j = 0; j < R; j++) {
 				poly_from(poly, t[i - 1][j], ctx_q);
 				for (int c = 0; c < AEX_DEG; c++) {
-					fmpz_mod_poly_scalar_mul_fmpz(poly2, poly,
+					scalar_mul(poly2, poly,
 							vlev[i].c[c], ctx_q);
 					fmpz_mod_poly_add(r[j][c], r[j][c], poly2, ctx_q);
 				}
@@ -1890,7 +1948,7 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 					} else {
 						fmpz_set(nrb, l0i.c[b]);
 					}
-					fmpz_mod_poly_scalar_mul_fmpz(w, r[i][a], nrb, ctx_q);
+					scalar_mul(w, r[i][a], nrb, ctx_q);
 					fmpz_mod_poly_add(u[aex_basis_idx[a][b]],
 							u[aex_basis_idx[a][b]], w, ctx_q);
 				}
@@ -2278,6 +2336,39 @@ static void test(flint_rand_t rand) {
 				ok &= aex_mul(a, b, p) == (aex_u64) ((__uint128_t) a * b % p);
 			}
 		}
+		TEST_ASSERT(ok, end);
+	} TEST_END;
+
+	TEST_ONCE("scalar multiplication agrees with FLINT's") {
+		fmpz_mod_poly_t u, w, pp;
+		fmpz_t x, Q;
+		int ok = 1;
+
+		fmpz_init(x);
+		fmpz_init(Q);
+		fmpz_set_mpz(Q, params::poly_q::moduli_product());
+		fmpz_mod_poly_init(u, ctx_q);
+		fmpz_mod_poly_init(w, ctx_q);
+		fmpz_mod_poly_init(pp, ctx_q);
+		for (int k = 0; k < 6 && ok; k++) {
+			fmpz_mod_poly_randtest(pp, rand, params::poly_q::degree, ctx_q);
+			/* Random, 0, 1, q - 1, then one past q, which goes to FLINT. */
+			if (k == 0 || k == 5) fmpz_randm(x, rand, Q);
+			if (k == 1) fmpz_zero(x);
+			if (k == 2) fmpz_one(x);
+			if (k == 3) fmpz_sub_ui(x, Q, 1);
+			if (k == 4) fmpz_add_ui(x, Q, 5);
+			fmpz_mod_poly_scalar_mul_fmpz(u, pp, x, ctx_q);
+			scalar_mul(w, pp, x, ctx_q);
+			ok &= fmpz_mod_poly_equal(u, w, ctx_q);
+			scalar_mul(pp, pp, x, ctx_q); /* in place */
+			ok &= fmpz_mod_poly_equal(u, pp, ctx_q);
+		}
+		fmpz_mod_poly_clear(u, ctx_q);
+		fmpz_mod_poly_clear(w, ctx_q);
+		fmpz_mod_poly_clear(pp, ctx_q);
+		fmpz_clear(x);
+		fmpz_clear(Q);
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
