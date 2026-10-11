@@ -9,22 +9,6 @@
 #include "sample_z_small.h"
 #include "sample_z_large.h"
 
-/**
- * Stores a 128-bit signed integer in an mpz_t. GMP only offers mpz_set_si for
- * long, which is too narrow for the coefficients of the last row.
- */
-static void mpz_set_int128(mpz_t rop, __int128 op) {
-	int negative = (op < 0);
-	__uint128_t abs = negative ? -((__uint128_t) op) : (__uint128_t) op;
-
-	mpz_set_ui(rop, (uint64_t) (abs >> 64));
-	mpz_mul_2exp(rop, rop, 64);
-	mpz_add_ui(rop, rop, (uint64_t) abs);
-	if (negative) {
-		mpz_neg(rop, rop);
-	}
-}
-
 #define R       (HEIGHT+1)
 /* The instance the proof of shuffle links: the openings of its MSGS
  * commitments to the sigma_i. The Makefile selects it with -DPIBND_SHORT and
@@ -182,9 +166,9 @@ static void pibnd_hash(uint8_t h[BLAKE3_OUT_LEN], params::poly_q A[R][V],
 
 static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 		params::poly_q SC[V][NTI], int lo, int hi, double s2) {
-	array < mpz_t, params::poly_q::degree > coeffs0, coeffs1;
+	__int128 a[params::poly_q::degree], b[params::poly_q::degree];
 	params::poly_q t;
-	mpz_t dot, norm, qDivBy2, tmp;
+	long double dot = 0, norm = 0;
 	double r, M;
 	int64_t seed;
 	mpf_t u;
@@ -195,33 +179,15 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	/// Constructors
 	mpf_init(u);
 	gmp_randinit_mt(state);
-	mpz_inits(dot, norm, qDivBy2, tmp, nullptr);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_init2(coeffs0[i], (params::poly_q::bits_in_moduli_product() << 2));
-		mpz_init2(coeffs1[i], (params::poly_q::bits_in_moduli_product() << 2));
-	}
-
-	mpz_fdiv_q_2exp(qDivBy2, params::poly_q::moduli_product(), 1);
-	mpz_set_ui(norm, 0);
-	mpz_set_ui(dot, 0);
 	for (int i = lo; i < hi; i++) {
 		for (int j = 0; j < NTI; j++) {
 			t = Z[i][j];
 			t.invntt_pow_invphi();
-			t.poly2mpz(coeffs0);
+			util::centred(a, t);
 			t = SC[i][j];
 			t.invntt_pow_invphi();
-			t.poly2mpz(coeffs1);
-			for (size_t l = 0; l < params::poly_q::degree; l++) {
-				util::center(coeffs0[l], coeffs0[l],
-						params::poly_q::moduli_product(), qDivBy2);
-				util::center(coeffs1[l], coeffs1[l],
-						params::poly_q::moduli_product(), qDivBy2);
-				mpz_mul(tmp, coeffs0[l], coeffs1[l]);
-				mpz_add(dot, dot, tmp);
-				mpz_mul(tmp, coeffs1[l], coeffs1[l]);
-				mpz_add(norm, norm, tmp);
-			}
+			util::centred(b, t);
+			util::dot_norm(dot, norm, a, b, params::poly_q::degree);
 		}
 	}
 
@@ -248,19 +214,14 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
 	 * section 8's six bits are ever reclaimed this flips back. Dropping it also
 	 * stops the transcript leaking which halfspace the opening fell in, which
 	 * is one of the three things 4.2 lists. */
-	M = exp((24.0 * sqrt(s2 * mpz_get_d(norm)) + mpz_get_d(norm)) / (2.0 * s2));
-	r = -2.0 * mpz_get_d(dot) + mpz_get_d(norm);
+	M = exp((24.0 * sqrt(s2 * (double) norm) + (double) norm) / (2.0 * s2));
+	r = (double) (-2.0L * dot + norm);
 	r = r / (2.0 * s2);
 	r = exp(r) / M;
 	result = mpf_get_d(u) > r;
 
 	mpf_clear(u);
 	gmp_randclear(state);
-	mpz_clears(dot, norm, qDivBy2, tmp, nullptr);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(coeffs0[i]);
-		mpz_clear(coeffs1[i]);
-	}
 	return result;
 }
 
@@ -271,6 +232,16 @@ static int pibnd_rej_sampling(params::poly_q Z[V][NTI],
  * @param[in] sigma			- the Gaussian parameter the row was sampled with.
  */
 static bool pibnd_test_norm(params::poly_q r, double sigma) {
+	/* Exactly in 128 bits when every coefficient is below 2^57, which every
+	 * honest opening is, against 2 N floor(sigma)^2 as the mpz code below
+	 * builds it, while that fits; anything else takes the mpz code. */
+	unsigned __int128 n2;
+
+	if (sigma < 0x1p56 && util::norm2_small(n2, r)) {
+		const unsigned __int128 s = (uint64_t) sigma;
+		return n2 <= s * s * (2 * params::poly_q::degree);
+	}
+
 	array < mpz_t, params::poly_q::degree > coeffs;
 	mpz_t norm, qDivBy2, tmp, bound;
 
@@ -332,16 +303,8 @@ static int pibnd_sample_c(void) {
 static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		params::poly_q A[R][V], params::poly_q t[TAU][V],
 		params::poly_q s[TAU][V]) {
-	std::array < mpz_t, params::poly_q::degree > coeffs;
-	mpz_t qDivBy2;
-	__int128 coeff;
+	__int128 coeffs[params::poly_q::degree];
 	int rej0, rej1, tries = 0;
-
-	mpz_init(qDivBy2);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
-	}
-	mpz_fdiv_q_2exp(qDivBy2, params::poly_q::moduli_product(), 1);
 
 	do {
 		/* Prover samples Y from Gaussian. */
@@ -349,16 +312,15 @@ static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 			for (int j = 0; j < NTI; j++) {
 				for (size_t k = 0; k < params::poly_q::degree; k++) {
 					if (i < V - 1) {
-						coeff = sample_z(0.0, SIGMA_ANEX);
+						coeffs[k] = sample_z(0.0, SIGMA_ANEX);
 					} else if (!ANEX_HAT_LARGE) {
-						coeff = sample_z(0.0, SIGMA_ANEX_HAT);
+						coeffs[k] = sample_z(0.0, SIGMA_ANEX_HAT);
 					} else {
-						coeff = sample_z((__float128) 0.0,
+						coeffs[k] = sample_z((__float128) 0.0,
 								(__float128) SIGMA_ANEX_HAT);
 					}
-					mpz_set_int128(coeffs[k], coeff);
 				}
-				Z[i][j].mpz2poly(coeffs);
+				util::set_signed(Z[i][j], coeffs);
 				Z[i][j].ntt_pow_phi();
 			}
 		}
@@ -414,11 +376,6 @@ static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		rej1 = pibnd_rej_sampling(Z, SC, ANEX_K, V,
 				SIGMA_ANEX_HAT * SIGMA_ANEX_HAT);
 	} while ((rej0 || rej1) && ++tries < PIBND_TRIES);
-
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(coeffs[i]);
-	}
-	mpz_clear(qDivBy2);
 
 	return !(rej0 || rej1);
 }

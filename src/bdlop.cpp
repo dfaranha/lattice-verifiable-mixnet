@@ -18,6 +18,14 @@ using namespace std;
  * @return the computed norm.
  */
 bool bdlop_test_norm(params::poly_q r, uint64_t sigma_sqr) {
+	/* Exactly in 128 bits when every coefficient is below 2^57, which every
+	 * honest opening is; anything else takes the mpz code below. */
+	unsigned __int128 n2;
+
+	if (util::norm2_small(n2, r)) {
+		return n2 < (unsigned __int128) (16 * sigma_sqr * params::poly_q::degree);
+	}
+
 	array < mpz_t, params::poly_q::degree > coeffs;
 	mpz_t norm, qDivBy2, tmp;
 
