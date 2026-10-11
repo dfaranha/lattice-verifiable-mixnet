@@ -9,12 +9,17 @@
 
 static __m128i round_key[15];
 static __m128i iv;
+/* The counter is incremented as a 64-bit lane, so it wraps only after 2^64
+ * blocks; the 32-bit add it replaces repeated the keystream after 2^32
+ * blocks (64 GiB) from one seed. The two agree until then. */
 static const __m128i ONE = {1, 0};
 
 #define AES256_KEY_LENGTH   32
 
 namespace nfl {
 
+/* 0: to be keyed from the operating system on the next draw; 1: keyed from
+ * it; -1: keyed by fastrandombytes_seed() with a caller's, public, seed. */
 static int init = 0;
 
 static inline void KEY_256_ASSIST_1(__m128i* temp1, __m128i * temp2)
@@ -95,6 +100,10 @@ void fastrandombytes_reseed() {
     init = 0;
 }
 
+int fastrandombytes_is_public() {
+    return init == -1;
+}
+
 static inline void AES_ctr_round(unsigned char *out)
 {
 	__m128i tmp;
@@ -116,7 +125,7 @@ static inline void AES_ctr_round(unsigned char *out)
 	tmp = _mm_aesenclast_si128(tmp,round_key[14]);
 	_mm_storeu_si128((__m128i*)out,tmp);
 
-	iv = _mm_add_epi32(iv, ONE);
+	iv = _mm_add_epi64(iv, ONE);
 }
 
 /* r <-- aes256_ctr(round_key, iv, rlen) */

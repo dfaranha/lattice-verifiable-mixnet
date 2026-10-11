@@ -183,6 +183,13 @@ __int128 sample_z(const __float128 center, const __float128 sigma)
 		abort();
 	}
 
+	/* The samples are secret, and the global stream may be keyed with a
+	 * public hash between deriving a challenge and reseeding. */
+	if (fastrandombytes_is_public()) {
+		fprintf(stderr, "sample_z: the stream is keyed with a public seed\n");
+		abort();
+	}
+
 	fastrandombytes(r, COMP_ENTRY_SIZE);
 
 	if (cosac_comp(r, rc))
