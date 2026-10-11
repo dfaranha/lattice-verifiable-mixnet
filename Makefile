@@ -35,6 +35,10 @@ BIN      = bdlop bgv shuffle pismall pibnd
 # and what you get is an assertion at best. Record CONFIG in a stamp that every
 # object depends on, rewritten only when it actually changes so that repeated
 # builds at the same settings still do nothing.
+# The first rule below is the config stamp, and its target contains a slash, so
+# make would take it as the default goal and a bare `make` would build nothing.
+.DEFAULT_GOAL := all
+
 STAMP    = $(OBJ)/.config
 .PHONY: FORCE
 $(STAMP): FORCE | $(OBJ)
