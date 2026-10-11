@@ -5,6 +5,7 @@
  * ****************************** */
 
 #include <stdint.h>
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "sample_z_large.h"
@@ -118,7 +119,7 @@ static inline __uint128_t load_96(const unsigned char *x)
 
 static inline int64_t cosac_comp(const unsigned char *r, const __float128 x)
 {
-	__uint128_t res = *((__uint128_t *)(&x));
+	__uint128_t res;
 	__uint128_t res_mantissa;
 	uint64_t res_exponent;
 	__uint128_t r1;
@@ -126,16 +127,22 @@ static inline int64_t cosac_comp(const unsigned char *r, const __float128 x)
 	__uint128_t r_mantissa;
 	uint64_t r_exponent;
 
+	/* x's bits; reading them through a __uint128_t pointer breaks strict
+	 * aliasing, which -O3 is entitled to miscompile. */
+	memcpy(&res, &x, sizeof(res));
 	res_mantissa = (res & COSAC_EXP_MANTISSA_MASK) | (((__uint128_t)1) << COSAC_EXP_MANTISSA_PRECISION);
 	res_exponent = COSAC_R_EXPONENT_L - 0x3fff + 1 + (res >> COSAC_EXP_MANTISSA_PRECISION);
 
-	r1 = *((__uint128_t *)r);
+	/* The caller passes r + i * COMP_ENTRY_SIZE, and COMP_ENTRY_SIZE is 21, so
+	 * this is rarely 16-byte aligned, and a 16-byte integer read through a
+	 * pointer may be compiled to an aligned vector load, which faults. */
+	memcpy(&r1, r, sizeof(r1));
 	r2 = load_40(r + 16);
 
 	r_mantissa = r1 & COSAC_R_MANTISSA_MASK;
 	r_exponent = (r1 >> COSAC_R_MANTISSA_PRECISION) | (r2 << (128 - COSAC_R_MANTISSA_PRECISION));
 
-	return (res == COSAC_FLOAT128_ONE) || ((r_mantissa < res_mantissa) && (r_exponent < (1LL << res_exponent)));
+	return (res == COSAC_FLOAT128_ONE) || ((r_mantissa < res_mantissa) && (r_exponent < (1ULL << res_exponent)));
 }
 
 /* New COSAC sampler.

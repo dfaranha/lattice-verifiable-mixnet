@@ -116,7 +116,7 @@ static inline uint64_t load_40(const unsigned char *x)
 
 static inline int64_t cosac_comp(const unsigned char *r, const double x)
 {
-	uint64_t res = *((uint64_t *)(&x));
+	uint64_t res;
 	uint64_t res_mantissa;
 	uint64_t res_exponent;
 	uint64_t r1;
@@ -124,6 +124,9 @@ static inline int64_t cosac_comp(const unsigned char *r, const double x)
 	uint64_t r_mantissa;
 	uint64_t r_exponent;
 
+	/* x's bits; reading them through a uint64_t pointer breaks strict
+	 * aliasing, which -O3 is entitled to miscompile. */
+	memcpy(&res, &x, sizeof(res));
 	res_mantissa = (res & COSAC_EXP_MANTISSA_MASK) | (1LL << COSAC_EXP_MANTISSA_PRECISION);
 	res_exponent = COSAC_R_EXPONENT_L - 0x3ff + 1 + (res >> COSAC_EXP_MANTISSA_PRECISION);
 
@@ -137,7 +140,7 @@ static inline int64_t cosac_comp(const unsigned char *r, const double x)
 	r_mantissa = r1 & COSAC_R_MANTISSA_MASK;
 	r_exponent = (r1 >> COSAC_R_MANTISSA_PRECISION) | (r2 << (64 - COSAC_R_MANTISSA_PRECISION));
 
-	return (res == COSAC_DOUBLE_ONE) || ((r_mantissa < res_mantissa) && (r_exponent < (1LL << res_exponent)));
+	return (res == COSAC_DOUBLE_ONE) || ((r_mantissa < res_mantissa) && (r_exponent < (1ULL << res_exponent)));
 }
 
 /* New COSAC sampler.
