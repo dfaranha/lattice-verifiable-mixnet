@@ -373,10 +373,27 @@ static int poly_inverse(params::poly_q & inv, const params::poly_q & p) {
 		}
 	}
 
+	/* Montgomery's trick, modulus by modulus: the prefix products of the
+	 * residues, one inversion of their product, and a pass back that peels
+	 * off one residue at a time. Three multiplications a residue and one
+	 * extended Euclid, where there was a Euclid per residue. Each residue of
+	 * p is read before inv's is written, so the two may alias. */
+	nfl::ops::mulmod < uint64_t, nfl::simd::serial > mulmod;
+	uint64_t pre[params::poly_q::degree];
+
 	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-		uint64_t pm = nfl::params < uint64_t >::P[cm];
+		uint64_t pm = nfl::params < uint64_t >::P[cm], acc = 1, r;
+
 		for (size_t i = 0; i < params::poly_q::degree; i++) {
-			inv(cm, i) = residue_inverse(p(cm, i), pm);
+			pre[i] = acc;
+			acc = mulmod(acc, p(cm, i), cm);
+		}
+		r = residue_inverse(acc, pm);
+		for (size_t i = params::poly_q::degree; i-- > 0;) {
+			const uint64_t pi = p(cm, i);
+
+			inv(cm, i) = mulmod(r, pre[i], cm);
+			r = mulmod(r, pi, cm);
 		}
 	}
 	return 1;
@@ -1324,6 +1341,9 @@ static void test() {
 		params::poly_q alpha[2] = { nfl::uniform(), nfl::uniform() };
 
 		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 1, end);
+		/* In place, as simul_inverse calls it, gives the same inverse. */
+		params::poly_q b = alpha[0];
+		TEST_ASSERT(poly_inverse(b, b) == 1 && util::equal(b, alpha[1]), end);
 		alpha[0] = alpha[0] * alpha[1];
 		alpha[0] = alpha[0] * alpha[1];
 		TEST_ASSERT(util::equal(alpha[0], alpha[1]), end);
@@ -1334,8 +1354,13 @@ static void test() {
 		 * pass silently, leaving a zero polynomial to flow into the proof. */
 		params::poly_q alpha[2] = { nfl::uniform(), nfl::uniform() };
 
+		params::poly_q before;
+
 		alpha[0](0, 0) = 0;
+		before = alpha[1];
 		TEST_ASSERT(poly_inverse(alpha[1], alpha[0]) == 0, end);
+		/* And the output is left alone. */
+		TEST_ASSERT(util::equal(alpha[1], before), end);
 	} TEST_END;
 
 	TEST_ONCE("scalar differences are invertible") {
