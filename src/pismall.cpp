@@ -359,7 +359,8 @@ static params::poly_q (*s)[V], (*t)[R];
  * two limbs the value already is rather than as mpz_t: an initialised mpz_t
  * costs its struct, its limbs and a malloc header, which is five times the 16
  * bytes of the value and 3.7 GiB of the difference at TAU = 1024. */
-static uint64_t (*v)[TAU][V][params::poly_q::degree][2];
+/* v[j][i][k] in aex_rpoly's layout: coefficient l mod p_cm at cm * N + l. */
+static uint64_t (*v)[TAU][V][2 * params::poly_q::degree];
 static gr_t *prover_y;                      /* prover_y[i] = l_i(x) */
 static gr_t (*prover_beta)[3];
 static gr_t (*prover_wt)[3];                /* l_i(x) l_0(x)^j */
@@ -382,7 +383,7 @@ static void pismall_alloc(void) {
 	s = new params::poly_q[TAU][V];
 	t = new params::poly_q[TAU][R];
 	H = new aex_code_t[TAU][3][V];
-	v = new uint64_t[3][TAU][V][params::poly_q::degree][2];
+	v = new uint64_t[3][TAU][V][2 * params::poly_q::degree];
 	prover_y = new gr_t[TAU + 1];
 	prover_beta = new gr_t[TAU][3];
 	prover_wt = new gr_t[TAU][3];
@@ -420,6 +421,13 @@ static void aex_ntt_setup(const fmpz_mod_ctx_t ctx) {
 		abort();
 	}
 	fmpz_clear(Q);
+	/* The prover hands poly_q residues straight to the transform. */
+	for (size_t cm = 0; cm < params::poly_big::nmoduli; cm++) {
+		if (params::poly_q::get_modulus(cm) != params::poly_big::get_modulus(cm)) {
+			fprintf(stderr, "aex: poly_q and poly_big have different moduli\n");
+			abort();
+		}
+	}
 	aex_poly = new params::poly_big;
 }
 
@@ -442,12 +450,37 @@ static inline void aex_residues(params::poly_big & a, size_t i, const fmpz_t x) 
 
 /* Encode(in0, in1, r): pack the two message blocks and the randomness into the
  * low coefficients, then evaluate at the AEX_COLS roots of unity. */
+/* The transform and the CRT that turn aex_poly's residues into a codeword. */
+static void aex_finish(aex_code_t & out) {
+	const util::crt < params::poly_big > &c = util::crt < params::poly_big >::get();
+	params::poly_big & a = *aex_poly;
+
+	/* Both NFLlib moduli satisfy p = 1 mod 2 * AEX_COLS, so this is a genuine
+	 * length-AEX_COLS transform. Each symbol is recombined from its two
+	 * residues by the CRT, r_0 + p_0 ((r_1 - r_0) p_0^-1 mod p_1), below
+	 * q < 2^128, and written low limb, then high. */
+	a.ntt_pow_phi();
+	for (size_t i = 0; i < AEX_COLS; i++) {
+		const uint64_t r0 = a(0, i), r1 = a(1, i), p1 = c.p1;
+		const uint64_t r0m = util::rns < params::poly_big >::get().red(r0, 1);
+		const uint64_t d = (r1 >= r0m) ? r1 - r0m : r1 + p1 - r0m;
+		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
+		uint64_t t = d * c.w - h * p1;
+		t -= (t >= p1) ? p1 : 0;
+		const __uint128_t x = (__uint128_t) r0 + (__uint128_t) c.p0 * t;
+
+		out.w[2 * i] = (uint64_t) x;
+		out.w[2 * i + 1] = (uint64_t) (x >> 64);
+	}
+}
+
+/* Encode(in0, in1, r): pack the two message blocks and the randomness into the
+ * low coefficients, then evaluate at the AEX_COLS roots of unity. */
 static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 		fmpz_mod_poly_t in1, const fmpz * in, const fmpz_mod_ctx_t ctx) {
 	static_assert(params::poly_big::nmoduli == 2, "a symbol is two residues");
 	const size_t N = params::poly_q::degree;
 	const slong l0 = fmpz_mod_poly_length(in0, ctx), l1 = fmpz_mod_poly_length(in1, ctx);
-	const util::crt < params::poly_big > &c = util::crt < params::poly_big >::get();
 	params::poly_big & a = *aex_poly;
 	fmpz_t zero;
 	size_t i;
@@ -468,24 +501,109 @@ static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 		aex_residues(a, i, zero);
 	}
 	fmpz_clear(zero);
+	aex_finish(out);
+}
 
-	/* Both NFLlib moduli satisfy p = 1 mod 2 * AEX_COLS, so this is a genuine
-	 * length-AEX_COLS transform. Each symbol is recombined from its two
-	 * residues by the CRT, r_0 + p_0 ((r_1 - r_0) p_0^-1 mod p_1), below
-	 * q < 2^128, and written as aex_pack wrote it: low limb, then high. */
-	a.ntt_pow_phi();
-	for (i = 0; i < AEX_COLS; i++) {
-		const uint64_t r0 = a(0, i), r1 = a(1, i), p1 = c.p1;
-		const uint64_t r0m = util::rns < params::poly_big >::get().red(r0, 1);
+/* A polynomial over Z_q as its residues, coefficient l mod p_cm at
+ * r[cm * N + l]: the layout of a poly_q's data() in the coefficient domain,
+ * whose moduli aex_ntt_setup checks are poly_big's. The prover keeps its
+ * sums in this form, rather than in fmpz_mod_poly, and converts once. */
+typedef struct {
+	uint64_t r[2 * params::poly_q::degree];
+} aex_rpoly;
+
+/* Encode as aex_encode does, from residues: in0 and in1 are in aex_rpoly's
+ * layout, or NULL for zero. */
+static void aex_encode_res(aex_code_t & out, const uint64_t *in0,
+		const uint64_t *in1, const fmpz * in) {
+	const size_t N = params::poly_q::degree;
+	params::poly_big & a = *aex_poly;
+	fmpz_t zero;
+	size_t i;
+
+	for (size_t cm = 0; cm < 2; cm++) {
+		for (i = 0; i < N; i++) {
+			a(cm, i) = in0 ? in0[cm * N + i] : 0;
+			a(cm, N + i) = in1 ? in1[cm * N + i] : 0;
+		}
+	}
+	fmpz_init(zero);
+	for (i = 2 * N; i < 2 * N + ETA; i++) {
+		aex_residues(a, i, in + (i - 2 * N));
+	}
+	for (; i < AEX_COLS; i++) {
+		aex_residues(a, i, zero);
+	}
+	fmpz_clear(zero);
+	aex_finish(out);
+}
+
+/* p's residues, which leaves p in the NTT domain it came in. */
+static void rp_from_nfl(aex_rpoly & out, params::poly_q & p) {
+	p.invntt_pow_invphi();
+	memcpy(out.r, p.data(), sizeof(out.r));
+	p.ntt_pow_phi();
+}
+
+/* A scalar of Z_q as its residues, with Shoup's quotients for multiplying by
+ * it. */
+typedef struct {
+	uint64_t s[2], sp[2];
+} aex_rscalar;
+
+static void rs_from_fmpz(aex_rscalar & out, const fmpz_t x) {
+	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
+	ulong w[2] = { 0, 0 };
+
+	fmpz_get_ui_array(w, 2, x);
+	for (size_t cm = 0; cm < 2; cm++) {
+		out.s[cm] = n.red(w[0], w[1], cm);
+		out.sp[cm] = (uint64_t) (((__uint128_t) out.s[cm] << 64) / n.p[cm]);
+	}
+}
+
+/* acc += x s, residue by residue. */
+static void rp_addmul(aex_rpoly & acc, const uint64_t *x, const aex_rscalar & s) {
+	const size_t N = params::poly_q::degree;
+	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
+
+	for (size_t cm = 0; cm < 2; cm++) {
+		const uint64_t p = n.p[cm], w = s.s[cm], wp = s.sp[cm];
+		uint64_t *a = acc.r + cm * N;
+		const uint64_t *b = x + cm * N;
+
+		for (size_t l = 0; l < N; l++) {
+			const uint64_t h = (uint64_t) (((__uint128_t) wp * b[l]) >> 64);
+			uint64_t t = w * b[l] - h * p;
+			t -= (t >= p) ? p : 0;
+			t += a[l];
+			a[l] = t - ((t >= p) ? p : 0);
+		}
+	}
+}
+
+/* out = the polynomial whose residues a holds, by the CRT. */
+static void rp_to_fmpz(fmpz_mod_poly_t out, const aex_rpoly & a,
+		const fmpz_mod_ctx_t ctx) {
+	const size_t N = params::poly_q::degree;
+	const util::crt < params::poly_q > &c = util::crt < params::poly_q >::get();
+	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
+
+	fmpz_mod_poly_fit_length(out, N, ctx);
+	for (size_t l = 0; l < N; l++) {
+		const uint64_t r0 = a.r[l], r1 = a.r[N + l], p1 = c.p1;
+		const uint64_t r0m = n.red(r0, 1);
 		const uint64_t d = (r1 >= r0m) ? r1 - r0m : r1 + p1 - r0m;
 		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
 		uint64_t t = d * c.w - h * p1;
 		t -= (t >= p1) ? p1 : 0;
 		const __uint128_t x = (__uint128_t) r0 + (__uint128_t) c.p0 * t;
+		const ulong o[2] = { (ulong) x, (ulong) (x >> 64) };
 
-		out.w[2 * i] = (uint64_t) x;
-		out.w[2 * i + 1] = (uint64_t) (x >> 64);
+		fmpz_set_ui_array(out->coeffs + l, o, 2);
 	}
+	_fmpz_mod_poly_set_length(out, N);
+	_fmpz_mod_poly_normalise(out);
 }
 
 /* Rows of E, as RowsToMatrix lists them: H, H_0, then H_{i,j} for each k. */
@@ -1628,8 +1746,6 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 			aex_tw_init(TT[j], TAU, wt[j], P[j]);
 			aex_tw_init(T4[j], AEX_N4, w4[j], P[j]);
 		}
-		/* P0^{-1} mod P1, for the CRT recombination */
-		aex_u64 pinv = aex_pow(P[0] % P[1], P[1] - 2, P[1]);
 
 		aex_u64 *sres = new aex_u64[NM * N * TAU];
 		aex_u64 *s0res = new aex_u64[NM * N];
@@ -1669,16 +1785,13 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 							out[j], TT[j], T4[j], buf4, buf4b, buft,
 							aex_set_at(k, l));
 				}
+				/* Kept as residues: the encoder and the sums below work
+				 * modulo each prime. */
 				for (size_t jj = 0; jj < 3; jj++) {
 					for (size_t i = 0; i < TAU; i++) {
-						/* CRT: r0 + P0 * ((r1 - r0) * P0^{-1} mod P1) */
-						aex_u64 r0 = out[0][jj][i], r1 = out[1][jj][i];
-						aex_u64 d = aex_sub(r1 % P[1], r0 % P[1], P[1]);
-						aex_u64 t2 = aex_mul(d, pinv, P[1]);
-						__uint128_t val = (__uint128_t) P[0] * t2 + r0;
-						v[jj][i][k][l][0] =
-								(uint64_t) (val & 0xffffffffffffffffULL);
-						v[jj][i][k][l][1] = (uint64_t) (val >> 64);
+						for (size_t j = 0; j < NM; j++) {
+							v[jj][i][k][j * N + l] = out[j][jj][i];
+						}
 					}
 				}
 			}
@@ -1697,28 +1810,19 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 
 	/* Encode H's as larger NTT. H_{i,j} has one codeword per component k of
 	 * s_i, so it is indexed by k as well; delta_j is 1 only for j = 0. */
+	aex_rpoly *rs = new aex_rpoly;
 	for (size_t k = 0; k < V; k++) {
-		fmpz_mod_poly_zero(zero, ctx);
-		poly_from(poly, s0[k], ctx);
-		aex_encode(H0[k], poly, zero, (const fmpz *) r0, ctx);
+		rp_from_nfl(*rs, s0[k]);
+		aex_encode_res(H0[k], rs->r, NULL, (const fmpz *) r0);
 		gr_comp(rc, rh, 0);
 		aex_encode(_H[k], h[0][k][0], h[1][k][0], rc, ctx);
 		for (size_t i = 0; i < TAU; i++) {
+			rp_from_nfl(*rs, s[i][k]);
 			for (size_t j = 0; j < 3; j++) {
-				for (size_t l = 0; l < params::poly_q::degree; l++) {
-					fmpz_set_ui_array(t, v[j][i][k][l], 2);
-					fmpz_mod_poly_set_coeff_fmpz(poly, l, t, ctx_q);
-				}
-				if (j == 0) {
-					poly_from(zero, s[i][k], ctx_q);
-				} else {
-					fmpz_mod_poly_zero(zero, ctx_q);
-				}
-				aex_encode(H[i][j][k], zero, poly,
-						(const fmpz *) prover_r[i][j], ctx);
+				aex_encode_res(H[i][j][k], (j == 0) ? rs->r : NULL, v[j][i][k],
+						(const fmpz *) prover_r[i][j]);
 			}
 		}
-		fmpz_mod_poly_zero(zero, ctx);
 	}
 
 	/* Steps 5 and 6: commit to the columns and send the root, then draw the
@@ -1739,23 +1843,25 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 		gr_mul(prover_wt[i][1], prover_wt[i][0], prover_y[0], ctx_q);
 		gr_mul(prover_wt[i][2], prover_wt[i][1], prover_y[0], ctx_q);
 	}
-	/* Compute f = s_0 * l_0(x). */
-	for (int i = 0; i < V; i++) {
-		poly_from(poly, s0[i], ctx_q);
+	/* f = f(x) = s_0 l_0(x) + \Sum s_i l_i(x), summed as residues and
+	 * converted once. */
+	aex_rpoly (*acc)[AEX_DEG] = new aex_rpoly[V][AEX_DEG];
+	aex_rscalar sc[AEX_DEG];
+	memset(acc, 0, sizeof(aex_rpoly) * V * AEX_DEG);
+	for (size_t i = 0; i <= TAU; i++) {
 		for (int c = 0; c < AEX_DEG; c++) {
-			scalar_mul(f[i][c], poly,
-					prover_y[0].c[c], ctx_q);
+			rs_from_fmpz(sc[c], prover_y[i].c[c]);
+		}
+		for (int j = 0; j < V; j++) {
+			rp_from_nfl(*rs, (i == 0) ? s0[j] : s[i - 1][j]);
+			for (int c = 0; c < AEX_DEG; c++) {
+				rp_addmul(acc[j][c], rs->r, sc[c]);
+			}
 		}
 	}
-	/* Compute remaining f = f(x) = \Sum s_i * l_i(x). */
-	for (size_t i = 1; i <= TAU; i++) {
-		for (int j = 0; j < V; j++) {
-			poly_from(poly, s[i - 1][j], ctx_q);
-			for (int c = 0; c < AEX_DEG; c++) {
-				scalar_mul(poly2, poly,
-						prover_y[i].c[c], ctx_q);
-				fmpz_mod_poly_add(f[j][c], f[j][c], poly2, ctx_q);
-			}
+	for (int j = 0; j < V; j++) {
+		for (int c = 0; c < AEX_DEG; c++) {
+			rp_to_fmpz(f[j][c], acc[j][c], ctx_q);
 		}
 	}
 
@@ -1777,40 +1883,52 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 		}
 	}
 
-	/* Compute _h = h + s_0 * beta_0 + \sum beta_i,j * (\delta_i * si, v_i,j) */
+	/* _h = h + s_0 beta_0 + \sum beta_i,j (\delta_j s_i, v_i,j), the s parts
+	 * into h[0] and the v parts into h[1], summed as residues and added to
+	 * the masks once. */
+	aex_rpoly (*acc1)[AEX_DEG] = new aex_rpoly[V][AEX_DEG];
+	memset(acc, 0, sizeof(aex_rpoly) * V * AEX_DEG);
+	memset(acc1, 0, sizeof(aex_rpoly) * V * AEX_DEG);
+	for (int c = 0; c < AEX_DEG; c++) {
+		rs_from_fmpz(sc[c], beta0.c[c]);
+	}
 	for (size_t k = 0; k < V; k++) {
-		poly_from(poly, s0[k], ctx);
+		rp_from_nfl(*rs, s0[k]);
 		for (int c = 0; c < AEX_DEG; c++) {
-			scalar_mul(poly2, poly,
-					beta0.c[c], ctx);
-			fmpz_mod_poly_add(h[0][k][c], h[0][k][c], poly2, ctx);
+			rp_addmul(acc[k][c], rs->r, sc[c]);
 		}
-		for (size_t i = 1; i <= TAU; i++) {
-			for (size_t j = 0; j < 3; j++) {
-				const gr_t & b = prover_beta[i - 1][j];
+	}
+	for (size_t i = 1; i <= TAU; i++) {
+		for (size_t j = 0; j < 3; j++) {
+			const gr_t & b = prover_beta[i - 1][j];
+
+			for (int c = 0; c < AEX_DEG; c++) {
+				rs_from_fmpz(sc[c], b.c[c]);
+			}
+			for (size_t k = 0; k < V; k++) {
 				if (j == 0) {
-					/* i runs from 1 to TAU, so this has to be s[i - 1] like
-					 * every other access in this loop; s[i] read one row past
-					 * the end of the matrix on the last iteration. */
-					poly_from(poly, s[i - 1][k], ctx_q);
+					rp_from_nfl(*rs, s[i - 1][k]);
 					for (int c = 0; c < AEX_DEG; c++) {
-						scalar_mul(poly2, poly,
-								b.c[c], ctx_q);
-						fmpz_mod_poly_add(h[0][k][c], h[0][k][c], poly2, ctx);
+						rp_addmul(acc[k][c], rs->r, sc[c]);
 					}
 				}
-				for (size_t l = 0; l < params::poly_q::degree; l++) {
-					fmpz_set_ui_array(t, v[j][i - 1][k][l], 2);
-					fmpz_mod_poly_set_coeff_fmpz(poly, l, t, ctx_q);
-				}
 				for (int c = 0; c < AEX_DEG; c++) {
-					scalar_mul(poly2, poly,
-							b.c[c], ctx_q);
-					fmpz_mod_poly_add(h[1][k][c], h[1][k][c], poly2, ctx);
+					rp_addmul(acc1[k][c], v[j][i - 1][k], sc[c]);
 				}
 			}
 		}
 	}
+	for (size_t k = 0; k < V; k++) {
+		for (int c = 0; c < AEX_DEG; c++) {
+			rp_to_fmpz(poly, acc[k][c], ctx);
+			fmpz_mod_poly_add(h[0][k][c], h[0][k][c], poly, ctx);
+			rp_to_fmpz(poly, acc1[k][c], ctx);
+			fmpz_mod_poly_add(h[1][k][c], h[1][k][c], poly, ctx);
+		}
+	}
+	delete[] acc;
+	delete[] acc1;
+	delete rs;
 
 	/* Steps 10 and 11: the opened columns and their paths. */
 	aex_sample_I(o.I, o.root, f, rf, h, rh, ctx);
@@ -2336,6 +2454,56 @@ static void test(flint_rand_t rand) {
 				ok &= aex_mul(a, b, p) == (aex_u64) ((__uint128_t) a * b % p);
 			}
 		}
+		TEST_ASSERT(ok, end);
+	} TEST_END;
+
+	TEST_ONCE("residue-form encoding and sums agree with FLINT's") {
+		/* aex_encode_res against aex_encode on the same message, and
+		 * rp_addmul summed then rp_to_fmpz against scalar_mul and add. */
+		params::poly_q p0 = nfl::uniform(), p1 = nfl::uniform();
+		aex_rpoly *x0 = new aex_rpoly, *x1 = new aex_rpoly, *acc = new aex_rpoly;
+		fmpz_mod_poly_t a0, a1, u, w;
+		fmpz *rr = _fmpz_vec_init(ETA);
+		fmpz_t Q, k0, k1;
+		aex_rscalar s0, s1;
+		aex_code_t *c0 = new aex_code_t, *c1 = new aex_code_t;
+		int ok = 1;
+
+		fmpz_init(Q); fmpz_init(k0); fmpz_init(k1);
+		fmpz_set_mpz(Q, params::poly_q::moduli_product());
+		fmpz_mod_poly_init(a0, ctx_q); fmpz_mod_poly_init(a1, ctx_q);
+		fmpz_mod_poly_init(u, ctx_q); fmpz_mod_poly_init(w, ctx_q);
+		for (size_t i = 0; i < ETA; i++) fmpz_randm(rr + i, rand, Q);
+		rp_from_nfl(*x0, p0);
+		rp_from_nfl(*x1, p1);
+		poly_from(a0, p0, ctx_q);
+		poly_from(a1, p1, ctx_q);
+		aex_encode(*c0, a0, a1, rr, ctx_q);
+		aex_encode_res(*c1, x0->r, x1->r, rr);
+		ok &= memcmp(c0->w, c1->w, sizeof(c0->w)) == 0;
+		fmpz_mod_poly_zero(u, ctx_q);
+		aex_encode(*c0, u, a1, rr, ctx_q);
+		aex_encode_res(*c1, NULL, x1->r, rr);
+		ok &= memcmp(c0->w, c1->w, sizeof(c0->w)) == 0;
+		/* k0 a0 + k1 a1, at a random scalar and at q - 1. */
+		for (int t = 0; t < 2; t++) {
+			fmpz_randm(k0, rand, Q);
+			if (t) fmpz_sub_ui(k1, Q, 1); else fmpz_randm(k1, rand, Q);
+			rs_from_fmpz(s0, k0);
+			rs_from_fmpz(s1, k1);
+			memset(acc, 0, sizeof(*acc));
+			rp_addmul(*acc, x0->r, s0);
+			rp_addmul(*acc, x1->r, s1);
+			rp_to_fmpz(w, *acc, ctx_q);
+			fmpz_mod_poly_scalar_mul_fmpz(u, a0, k0, ctx_q);
+			fmpz_mod_poly_scalar_addmul_fmpz(u, a1, k1, ctx_q);
+			ok &= fmpz_mod_poly_equal(u, w, ctx_q);
+		}
+		delete x0; delete x1; delete acc; delete c0; delete c1;
+		_fmpz_vec_clear(rr, ETA);
+		fmpz_clear(Q); fmpz_clear(k0); fmpz_clear(k1);
+		fmpz_mod_poly_clear(a0, ctx_q); fmpz_mod_poly_clear(a1, ctx_q);
+		fmpz_mod_poly_clear(u, ctx_q); fmpz_mod_poly_clear(w, ctx_q);
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
