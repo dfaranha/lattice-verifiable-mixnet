@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdlib.h>
+#include <initializer_list>
 
 #include <flint/flint.h>
 #include <flint/fmpz_vec.h>
@@ -1346,6 +1347,11 @@ typedef struct {
 	aex_u64 *iw, *iwp;          /* inverse */
 	aex_u64 ninv, ninvp;
 	size_t n;
+	/* What aex_ntt_tw reads: the bit-reversal permutation, and each stage's
+	 * twiddles stored contiguously, the stage of half-length h at h - 1
+	 * (n - 1 of them), instead of w[k * n / 2h] strided across the table. */
+	size_t *rev;
+	aex_u64 *sw, *swp, *siw, *siwp;
 } aex_tw_t;
 
 static void aex_tw_init(aex_tw_t & t, size_t n, aex_u64 w, aex_u64 p) {
@@ -1364,44 +1370,77 @@ static void aex_tw_init(aex_tw_t & t, size_t n, aex_u64 w, aex_u64 p) {
 	}
 	t.ninv = aex_pow(n % p, p - 2, p);
 	t.ninvp = aex_shoup(t.ninv, p);
+	t.rev = new size_t[n];
+	for (size_t i = 0, j = 0; i < n; i++) {
+		t.rev[i] = j;
+		size_t bit = n >> 1;
+		for (; bit && (j & bit); bit >>= 1) {
+			j ^= bit;
+		}
+		j ^= bit;
+	}
+	t.sw = new aex_u64[n]; t.swp = new aex_u64[n];
+	t.siw = new aex_u64[n]; t.siwp = new aex_u64[n];
+	for (size_t h = 1; h < n; h <<= 1) {
+		const size_t step = n / (2 * h);
+		for (size_t k = 0; k < h; k++) {
+			t.sw[h - 1 + k] = t.w[k * step];
+			t.swp[h - 1 + k] = t.wp[k * step];
+			t.siw[h - 1 + k] = t.iw[k * step];
+			t.siwp[h - 1 + k] = t.iwp[k * step];
+		}
+	}
 }
 
 static void aex_tw_clear(aex_tw_t & t) {
 	delete[]t.w; delete[]t.wp; delete[]t.iw; delete[]t.iwp;
+	delete[]t.rev;
+	delete[]t.sw; delete[]t.swp; delete[]t.siw; delete[]t.siwp;
 }
 
 /* in-place radix-2 NTT over a precomputed twiddle table */
+/* The transform of length t.n, natural order in and out, fully reduced in
+ * and out. Harvey's lazy butterflies keep values in [0, 4p) between stages,
+ * which the 44-bit moduli leave ample room for in 64 bits, so a butterfly
+ * does one conditional subtraction where it did three; the last pass
+ * reduces, and scales by 1/n for the inverse. The permutation and each
+ * stage's twiddles come from tables built once (aex_tw_init). */
 static void aex_ntt_tw(aex_u64 * a, const aex_tw_t & t, int inverse) {
 	const size_t n = t.n;
-	const aex_u64 p = t.p;
-	const aex_u64 *W = inverse ? t.iw : t.w;
-	const aex_u64 *Wp = inverse ? t.iwp : t.wp;
+	const aex_u64 p = t.p, p2 = 2 * p;
+	const aex_u64 *SW = inverse ? t.siw : t.sw;
+	const aex_u64 *SWp = inverse ? t.siwp : t.swp;
 
-	for (size_t i = 1, j = 0; i < n; i++) {
-		size_t bit = n >> 1;
-		for (; j & bit; bit >>= 1) {
-			j ^= bit;
-		}
-		j ^= bit;
+	for (size_t i = 0; i < n; i++) {
+		const size_t j = t.rev[i];
 		if (i < j) {
 			aex_u64 x = a[i]; a[i] = a[j]; a[j] = x;
 		}
 	}
-	for (size_t len = 2; len <= n; len <<= 1) {
-		size_t step = n / len;
-		for (size_t i = 0; i < n; i += len) {
-			for (size_t k = 0; k < len / 2; k++) {
-				size_t idx = k * step;
-				aex_u64 u = a[i + k];
-				aex_u64 v = aex_mul_shoup(a[i + k + len / 2], W[idx], Wp[idx], p);
-				a[i + k] = aex_add(u, v, p);
-				a[i + k + len / 2] = aex_sub(u, v, p);
+	for (size_t h = 1; h < n; h <<= 1) {
+		const aex_u64 *W = SW + h - 1, *Wp = SWp + h - 1;
+		for (size_t i = 0; i < n; i += 2 * h) {
+			aex_u64 *x = a + i, *y = a + i + h;
+			for (size_t k = 0; k < h; k++) {
+				aex_u64 u = x[k];
+				u -= (u >= p2) ? p2 : 0;
+				/* Shoup's product, left in [0, 2p). */
+				const aex_u64 q = (aex_u64) (((__uint128_t) y[k] * Wp[k]) >> 64);
+				const aex_u64 v = y[k] * W[k] - q * p;
+				x[k] = u + v;
+				y[k] = u - v + p2;
 			}
 		}
 	}
 	if (inverse) {
 		for (size_t i = 0; i < n; i++) {
 			a[i] = aex_mul_shoup(a[i], t.ninv, t.ninvp, p);
+		}
+	} else {
+		for (size_t i = 0; i < n; i++) {
+			aex_u64 x = a[i];
+			x -= (x >= p2) ? p2 : 0;
+			a[i] = x - ((x >= p) ? p : 0);
 		}
 	}
 }
@@ -2464,6 +2503,42 @@ static void aex_scalar_test_setup(comkey_t & key, commit_t * P,
 	aex_scalar_wit(r, sigma, TAU);
 }
 
+/* The straightforward transform aex_ntt_tw replaced, for the tests. */
+static void aex_ntt_tw_ref(aex_u64 * a, const aex_tw_t & t, int inverse) {
+	const size_t n = t.n;
+	const aex_u64 p = t.p;
+	const aex_u64 *W = inverse ? t.iw : t.w;
+	const aex_u64 *Wp = inverse ? t.iwp : t.wp;
+
+	for (size_t i = 1, j = 0; i < n; i++) {
+		size_t bit = n >> 1;
+		for (; j & bit; bit >>= 1) {
+			j ^= bit;
+		}
+		j ^= bit;
+		if (i < j) {
+			aex_u64 x = a[i]; a[i] = a[j]; a[j] = x;
+		}
+	}
+	for (size_t len = 2; len <= n; len <<= 1) {
+		size_t step = n / len;
+		for (size_t i = 0; i < n; i += len) {
+			for (size_t k = 0; k < len / 2; k++) {
+				size_t idx = k * step;
+				aex_u64 u = a[i + k];
+				aex_u64 v = aex_mul_shoup(a[i + k + len / 2], W[idx], Wp[idx], p);
+				a[i + k] = aex_add(u, v, p);
+				a[i + k + len / 2] = aex_sub(u, v, p);
+			}
+		}
+	}
+	if (inverse) {
+		for (size_t i = 0; i < n; i++) {
+			a[i] = aex_mul_shoup(a[i], t.ninv, t.ninvp, p);
+		}
+	}
+}
+
 static void test(flint_rand_t rand) {
 	fmpz_t q, a[TAU];
 	gr_t x, rf[ETA], rh[ETA];
@@ -2564,6 +2639,39 @@ static void test(flint_rand_t rand) {
 				ok &= aex_mul(a, b, p) == (aex_u64) ((__uint128_t) a * b % p);
 			}
 		}
+		TEST_ASSERT(ok, end);
+	} TEST_END;
+
+	TEST_ONCE("the lazy NTT agrees with the straightforward one") {
+		/* Both lengths the extraction uses, both directions, both primes, at
+		 * random inputs and at all p - 1. */
+		int ok = 1;
+		aex_u64 *x = new aex_u64[AEX_N4], *y = new aex_u64[AEX_N4];
+
+		for (size_t cm = 0; cm < params::poly_q::nmoduli && ok; cm++) {
+			const aex_u64 p = nfl::params < uint64_t >::P[cm];
+			for (size_t n : { (size_t) TAU, (size_t) AEX_N4 }) {
+				aex_u64 w = 0;
+				aex_tw_t tw;
+				for (ulong g = 2;; g++) {
+					w = aex_pow(g, (p - 1) / n, p);
+					if (aex_pow(w, n / 2, p) != 1) break;
+				}
+				aex_tw_init(tw, n, w, p);
+				for (int rep = 0; rep < 6 && ok; rep++) {
+					for (size_t i = 0; i < n; i++) {
+						x[i] = (rep == 0) ? p - 1 : n_randint(rand, p);
+						y[i] = x[i];
+					}
+					aex_ntt_tw(x, tw, rep & 1);
+					aex_ntt_tw_ref(y, tw, rep & 1);
+					for (size_t i = 0; i < n; i++) ok &= x[i] == y[i];
+				}
+				aex_tw_clear(tw);
+			}
+		}
+		delete[] x;
+		delete[] y;
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
