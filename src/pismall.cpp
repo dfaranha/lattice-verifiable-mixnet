@@ -606,6 +606,55 @@ static void rp_to_fmpz(fmpz_mod_poly_t out, const aex_rpoly & a,
 	_fmpz_mod_poly_normalise(out);
 }
 
+/* a = the residues of in, whose coefficients are reduced mod q. */
+static void rp_from_fmpz(aex_rpoly & a, const fmpz_mod_poly_t in,
+		const fmpz_mod_ctx_t ctx) {
+	const size_t N = params::poly_q::degree;
+	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
+	const slong len = fmpz_mod_poly_length(in, ctx);
+
+	for (size_t l = 0; l < N; l++) {
+		ulong w[2] = { 0, 0 };
+
+		if ((slong) l < len) {
+			fmpz_get_ui_array(w, 2, in->coeffs + l);
+		}
+		for (size_t cm = 0; cm < 2; cm++) {
+			a.r[cm * N + l] = n.red(w[0], w[1], cm);
+		}
+	}
+}
+
+/* p = the polynomial whose residues a holds, in the coefficient domain. */
+static void rp_to_nfl(params::poly_q & p, const aex_rpoly & a) {
+	memcpy(p.data(), a.r, sizeof(a.r));
+}
+
+/* acc -= x, residue by residue. */
+static void rp_sub(aex_rpoly & acc, const uint64_t *x) {
+	const size_t N = params::poly_q::degree;
+	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
+
+	for (size_t cm = 0; cm < 2; cm++) {
+		const uint64_t p = n.p[cm];
+		uint64_t *a = acc.r + cm * N;
+		const uint64_t *b = x + cm * N;
+
+		for (size_t l = 0; l < N; l++) {
+			a[l] = (a[l] >= b[l]) ? a[l] - b[l] : a[l] + p - b[l];
+		}
+	}
+}
+
+static bool rp_is_zero(const aex_rpoly & a) {
+	for (size_t i = 0; i < 2 * params::poly_q::degree; i++) {
+		if (a.r[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /* Rows of E, as RowsToMatrix lists them: H, H_0, then H_{i,j} for each k. */
 #define AEX_ROWS    (V * (2 + 3 * TAU))
 /* How many times the whole proof is run. The algebraic part of Lemma 2 is
@@ -766,17 +815,6 @@ typedef struct {
 static aex_tree_t aex_tree;
 
 /* Symbol of row r inside a serialised column. */
-static void aex_col_sym(fmpz_t out, const uint8_t * col, size_t r) {
-	uint64_t w[2] = { 0, 0 };
-
-	for (size_t m = 0; m < 2; m++) {
-		for (size_t b = 0; b < 8; b++) {
-			w[m] |= ((uint64_t) col[(r * 2 + m) * 8 + b]) << (8 * b);
-		}
-	}
-	fmpz_set_ui_array(out, w, 2);
-}
-
 #define AEX_ROW_H(k)        (k)
 #define AEX_ROW_H0(k)       (V + (k))
 #define AEX_ROW_HIJ(i,j,k)  (2 * V + (((i) * 3 + (j)) * V + (k)))
@@ -977,11 +1015,36 @@ static int aex_lagrange(gr_t * lev, const gr_t & x, const fmpz_mod_ctx_t ctx) {
  *      == l0(x) H0|I + sum_ij li(x) l0(x)^j Hij|I
  *   Encode(hbar, rhbar)|I == H|I + b0 H0|I + sum_ij bij Hij|I
  */
+/* Symbol r of an opened column, and symbol i of a codeword, mod p_cm. */
+static inline uint64_t aex_col_res(const uint8_t *col, size_t r, size_t cm) {
+	uint64_t w[2];
+
+	memcpy(w, col + r * 16, 16);
+	return util::rns < params::poly_q >::get().red(w[0], w[1], cm);
+}
+
+static inline uint64_t aex_code_res(const aex_code_t *c, size_t i, size_t cm) {
+	return util::rns < params::poly_q >::get().red(c->w[2 * i], c->w[2 * i + 1], cm);
+}
+
+/* s y mod p_cm by Shoup's quotient, for y < p_cm; and a sum of two residues. */
+static inline uint64_t rs_mul(const aex_rscalar & s, uint64_t y, size_t cm, uint64_t p) {
+	const uint64_t h = (uint64_t) (((__uint128_t) s.sp[cm] * y) >> 64);
+	const uint64_t t = s.s[cm] * y - h * p;
+
+	return t - ((t >= p) ? p : 0);
+}
+
+static inline uint64_t rs_add(uint64_t a, uint64_t b, uint64_t p) {
+	const uint64_t t = a + b;
+
+	return t - ((t >= p) ? p : 0);
+}
+
 static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 		gr_t rf[ETA], fmpz_mod_poly_t h[2][V][AEX_DEG], gr_t rh[ETA],
 		const gr_t & x, const gr_t & beta0, gr_t beta[TAU][3],
 		fmpz_mod_poly_t lag[TAU + 1], const fmpz_mod_ctx_t ctx) {
-	fmpz_t tmp, sym, accf[AEX_DEG], acch[AEX_DEG];
 	fmpz *rc = _fmpz_vec_init(ETA);
 	gr_t l0, l0inv, one, fv, cub, t;
 	gr_t lpow[3];
@@ -995,11 +1058,6 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 	aex_code_t *lhs_h = new aex_code_t[AEX_DEG * V];
 	int ok = 1;
 
-	fmpz_init(tmp); fmpz_init(sym);
-	for (int i = 0; i < AEX_DEG; i++) {
-		fmpz_init(accf[i]);
-		fmpz_init(acch[i]);
-	}
 	gr_init(l0); gr_init(l0inv); gr_init(one); gr_init(fv);
 	gr_init(cub); gr_init(t);
 	for (int i = 0; i < 3; i++) {
@@ -1079,51 +1137,69 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 		}
 	}
 
-	for (size_t n = 0; n < ETA && ok; n++) {
-		const uint8_t *col = o.col + n * AEX_COLBYTES;
-		for (size_t k = 0; k < V && ok; k++) {
-			/* Both identities and both components read the same H_ij symbol,
-			 * so unpack the column once per row and fan it out over the four
-			 * accumulators instead of fetching it four times. */
-			/* H carries the mask, which is a Z_q value, so it lands in the
-			 * first coordinate and the others start empty. */
-			aex_col_sym(acch[0], col, AEX_ROW_H(k));
-			for (int c = 1; c < AEX_DEG; c++) {
-				fmpz_zero(acch[c]);
+	/* The column checks, in residues: every scalar below is fixed for the
+	 * whole check, so each becomes its residues with Shoup quotients once,
+	 * and each symbol of a column its two residues. 550 columns times
+	 * V (3 TAU + 1) symbols times 8 products was as many fmpz_mod_mul and
+	 * fmpz_mod_add, which at TAU = 1000 is 66 million of each. Two values of
+	 * Z_q are equal exactly when their residues are. */
+	if (ok) {
+		const util::rns < params::poly_q > &nr = util::rns < params::poly_q >::get();
+		aex_rscalar sl0[AEX_DEG], sb0[AEX_DEG];
+		aex_rscalar (*swt)[3][AEX_DEG] = new aex_rscalar[TAU][3][AEX_DEG];
+		aex_rscalar (*sbe)[3][AEX_DEG] = new aex_rscalar[TAU][3][AEX_DEG];
+
+		for (int c = 0; c < AEX_DEG; c++) {
+			rs_from_fmpz(sl0[c], l0.c[c]);
+			rs_from_fmpz(sb0[c], beta0.c[c]);
+		}
+		for (size_t i = 0; i < TAU; i++) {
+			for (size_t j = 0; j < 3; j++) {
+				for (int c = 0; c < AEX_DEG; c++) {
+					rs_from_fmpz(swt[i][j][c], wt[i][j].c[c]);
+					rs_from_fmpz(sbe[i][j][c], beta[i][j].c[c]);
+				}
 			}
-			aex_col_sym(sym, col, AEX_ROW_H0(k));
-			for (int c = 0; c < AEX_DEG; c++) {
-				fmpz_mod_mul(accf[c], l0.c[c], sym, ctx);
-				fmpz_mod_mul(tmp, beta0.c[c], sym, ctx);
-				fmpz_mod_add(acch[c], acch[c], tmp, ctx);
-			}
-			for (size_t i = 0; i < TAU; i++) {
-				for (size_t j = 0; j < 3; j++) {
-					aex_col_sym(sym, col, AEX_ROW_HIJ(i, j, k));
+		}
+		for (size_t n = 0; n < ETA && ok; n++) {
+			const uint8_t *col = o.col + n * AEX_COLBYTES;
+			for (size_t k = 0; k < V && ok; k++) {
+				for (size_t cm = 0; cm < 2 && ok; cm++) {
+					const uint64_t p = nr.p[cm];
+					uint64_t af[AEX_DEG], ah[AEX_DEG], y;
+
+					/* H carries the mask, a Z_q value, so it lands in the
+					 * first coordinate and the others start empty. Both
+					 * identities and all components read each symbol once. */
+					y = aex_col_res(col, AEX_ROW_H(k), cm);
 					for (int c = 0; c < AEX_DEG; c++) {
-						fmpz_mod_mul(tmp, wt[i][j].c[c],
-								sym, ctx);
-						fmpz_mod_add(accf[c], accf[c], tmp, ctx);
-						fmpz_mod_mul(tmp, beta[i][j].c[c],
-								sym, ctx);
-						fmpz_mod_add(acch[c], acch[c], tmp, ctx);
+						ah[c] = (c == 0) ? y : 0;
+					}
+					y = aex_col_res(col, AEX_ROW_H0(k), cm);
+					for (int c = 0; c < AEX_DEG; c++) {
+						af[c] = rs_mul(sl0[c], y, cm, p);
+						ah[c] = rs_add(ah[c], rs_mul(sb0[c], y, cm, p), p);
+					}
+					for (size_t i = 0; i < TAU; i++) {
+						for (size_t j = 0; j < 3; j++) {
+							y = aex_col_res(col, AEX_ROW_HIJ(i, j, k), cm);
+							for (int c = 0; c < AEX_DEG; c++) {
+								af[c] = rs_add(af[c], rs_mul(swt[i][j][c], y, cm, p), p);
+								ah[c] = rs_add(ah[c], rs_mul(sbe[i][j][c], y, cm, p), p);
+							}
+						}
+					}
+					for (int c = 0; c < AEX_DEG; c++) {
+						ok &= af[c] == aex_code_res(lhs_f + k * AEX_DEG + c, o.I[n], cm);
+						ok &= ah[c] == aex_code_res(lhs_h + k * AEX_DEG + c, o.I[n], cm);
 					}
 				}
 			}
-			for (int c = 0; c < AEX_DEG; c++) {
-				aex_unpack(tmp, lhs_f + k * AEX_DEG + c, o.I[n]);
-				ok &= fmpz_equal(accf[c], tmp);
-				aex_unpack(tmp, lhs_h + k * AEX_DEG + c, o.I[n]);
-				ok &= fmpz_equal(acch[c], tmp);
-			}
 		}
+		delete[] swt;
+		delete[] sbe;
 	}
 
-	fmpz_clear(tmp); fmpz_clear(sym);
-	for (int i = 0; i < AEX_DEG; i++) {
-		fmpz_clear(accf[i]);
-		fmpz_clear(acch[i]);
-	}
 	gr_clear(l0); gr_clear(l0inv); gr_clear(one); gr_clear(fv);
 	gr_clear(cub); gr_clear(t);
 	for (int i = 0; i < 3; i++) {
@@ -1561,6 +1637,9 @@ static void poly_to(params::poly_q & out, fmpz_mod_poly_t & in,
 	out.ntt_pow_phi();
 }
 
+#ifdef MAIN
+/* Only the tests convert this way now: the prover and the verifier keep
+ * their sums in residues (aex_rpoly). */
 static void poly_from(fmpz_mod_poly_t & out, params::poly_q & in,
 		const fmpz_mod_ctx_t ctx) {
 	/* in is stored as RNS residues, so recombine them directly rather than
@@ -1597,6 +1676,7 @@ static void poly_from(fmpz_mod_poly_t & out, params::poly_q & in,
 	_fmpz_mod_poly_normalise(out);
 	in.ntt_pow_phi();
 }
+#endif
 
 static void pismall_setup(fmpz_mod_poly_t lag[], fmpz_t a[TAU], fmpz_t & q,
 		flint_rand_t prng, const fmpz_mod_ctx_t ctx) {
@@ -1973,8 +2053,6 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 		vector < params::poly_q > rd, comkey_t & key,
 		fmpz_mod_poly_t lag[TAU + 1], flint_rand_t prng,
 		const fmpz_mod_ctx_t ctx, const aex_open_t & o) {
-	array < mpz_t, params::poly_q::degree > coeffs;
-	fmpz_mod_poly_t poly, poly2, u[AEX_DEG], w, r[R][AEX_DEG];
 	fmpz_mod_ctx_t ctx_q;
 	fmpz_t q, nrb;
 	gr_t x, beta0, l0i;
@@ -2002,44 +2080,41 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 	pismall_hash(x, beta0, beta, q, com, o.root);
 
 	fmpz_mod_ctx_init(ctx_q, q);
-	fmpz_mod_poly_init(poly, ctx_q);
-	fmpz_mod_poly_init(poly2, ctx_q);
-	for (int c = 0; c < AEX_DEG; c++) {
-		fmpz_mod_poly_init(u[c], ctx_q);
-	}
-	fmpz_mod_poly_init(w, ctx_q);
 
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_init2(coeffs[i], (params::poly_q::bits_in_moduli_product() << 2));
-	}
-	for (int i = 0; i < R; i++) {
-		for (int c = 0; c < AEX_DEG; c++) {
-			fmpz_mod_poly_init(r[i][c], ctx_q);
-			fmpz_mod_poly_zero(r[i][c], ctx_q);
-		}
-	}
+	/* The linear check, in residues as the prover's sums are: r = \sum_i
+	 * t_i l_i(x) - A f, then m = r / l_0(x) through the basis table, whose
+	 * coordinates but the first must vanish. */
+	aex_rpoly (*rr)[AEX_DEG] = new aex_rpoly[R][AEX_DEG];
+	aex_rpoly *ru = new aex_rpoly[AEX_DEG];
+	aex_rpoly *rx = new aex_rpoly;
+	aex_rscalar sc[AEX_DEG];
+	params::poly_q pf, pa;
 
+	memset(rr, 0, sizeof(aex_rpoly) * R * AEX_DEG);
 	result = aex_lagrange(vlev, x, ctx_q);
 	if (result) {
 		for (int i = 1; i <= TAU; i++) {
+			for (int c = 0; c < AEX_DEG; c++) {
+				rs_from_fmpz(sc[c], vlev[i].c[c]);
+			}
 			for (int j = 0; j < R; j++) {
-				poly_from(poly, t[i - 1][j], ctx_q);
+				rp_from_nfl(*rx, t[i - 1][j]);
 				for (int c = 0; c < AEX_DEG; c++) {
-					scalar_mul(poly2, poly,
-							vlev[i].c[c], ctx_q);
-					fmpz_mod_poly_add(r[j][c], r[j][c], poly2, ctx_q);
+					rp_addmul(rr[j][c], rx->r, sc[c]);
 				}
 			}
 		}
 
-		/* Compute d = A * _f. */
+		/* d = A * _f, in the NTT domain as before. */
 		for (int j = 0; j < V; j++) {
 			for (int c = 0; c < AEX_DEG; c++) {
+				rp_from_fmpz(*rx, f[j][c], ctx_q);
+				rp_to_nfl(pf, *rx);
+				pf.ntt_pow_phi();
 				for (int i = 0; i < R; i++) {
-					poly_to(one, f[j][c], ctx_q);
-					one = one * A[i][j];
-					poly_from(poly, one, ctx_q);
-					fmpz_mod_poly_sub(r[i][c], r[i][c], poly, ctx_q);
+					pa = pf * A[i][j];
+					rp_from_nfl(*rx, pa);
+					rp_sub(rr[i][c], rx->r);
 				}
 			}
 		}
@@ -2056,9 +2131,7 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 		 * table above. The committed value is a Z_q element, so every
 		 * coordinate of the quotient but the first has to come out zero. */
 		for (int i = 0; i < R; i++) {
-			for (int c = 0; c < AEX_DEG; c++) {
-				fmpz_mod_poly_zero(u[c], ctx_q);
-			}
+			memset(ru, 0, sizeof(aex_rpoly) * AEX_DEG);
 			for (int a = 0; a < AEX_DEG; a++) {
 				for (int b = 0; b < AEX_DEG; b++) {
 					if (aex_basis_nr[a][b]) {
@@ -2066,16 +2139,16 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 					} else {
 						fmpz_set(nrb, l0i.c[b]);
 					}
-					scalar_mul(w, r[i][a], nrb, ctx_q);
-					fmpz_mod_poly_add(u[aex_basis_idx[a][b]],
-							u[aex_basis_idx[a][b]], w, ctx_q);
+					rs_from_fmpz(sc[0], nrb);
+					rp_addmul(ru[aex_basis_idx[a][b]], rr[i][a].r, sc[0]);
 				}
 			}
 			for (int c = 1; c < AEX_DEG; c++) {
-				result &= fmpz_mod_poly_is_zero(u[c], ctx_q);
+				result &= rp_is_zero(ru[c]);
 			}
-			poly_to(m[i], u[0], ctx_q);
-			m[i].invntt_pow_invphi();
+			/* The quotient's first coordinate, in the coefficient domain the
+			 * commitment opens in. */
+			rp_to_nfl(m[i], ru[0]);
 		}
 		one = 1;
 		one.ntt_pow_phi();
@@ -2100,21 +2173,10 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 	gr_clear(x);
 	gr_clear(beta0);
 	gr_clear(l0i);
-	fmpz_mod_poly_clear(poly, ctx_q);
-	fmpz_mod_poly_clear(poly2, ctx_q);
-	for (int c = 0; c < AEX_DEG; c++) {
-		fmpz_mod_poly_clear(u[c], ctx_q);
-	}
-	fmpz_mod_poly_clear(w, ctx_q);
-	for (int i = 0; i < R; i++) {
-		for (int c = 0; c < AEX_DEG; c++) {
-			fmpz_mod_poly_clear(r[i][c], ctx_q);
-		}
-	}
 	fmpz_mod_ctx_clear(ctx_q);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(coeffs[i]);
-	}
+	delete[] rr;
+	delete[] ru;
+	delete rx;
 	for (size_t i = 0; i < TAU; i++) {
 		for (size_t j = 0; j < 3; j++) {
 			gr_clear(beta[i][j]);
