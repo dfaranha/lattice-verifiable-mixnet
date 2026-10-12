@@ -1521,104 +1521,96 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
  * Per coefficient position, f = s_0 * l_0 + sum_i s_i l_i and
  *   (1/l_0) f o (f-1) o (f+1) = sum_j sum_i v_{i,j} l_i l_0^j.
  * With the nodes at the TAU-th roots of unity, l_0 = X^TAU - 1, evaluating at
- * the nodes is a length-TAU NTT, interpolating is its inverse, and dividing by
- * l_0 is an O(TAU) recurrence. The decomposition is unique, so the v_{i,j} are
- * whatever the three extraction rounds produce; no closed form in s_i alone
- * exists, since v_{i,0} involves g'(a_i) and so depends on every s_m.
+ * the nodes is a length-TAU NTT and interpolating is its inverse. The
+ * decomposition is unique, so any way of computing it gives the same v_{i,j};
+ * no closed form in s_i alone exists, since v_{i,0} involves g'(a_i) and so
+ * depends on every s_m, but one in the derivatives of g at the nodes does.
  */
 static_assert((TAU & (TAU - 1)) == 0, "TAU must be a power of two");
 
-#define AEX_N4  (4 * TAU)
-
-/* Exact division by X^TAU - 1 into a separate buffer: Q_{m-TAU} = c_m + Q_m,
- * taken from the top. src and dst must not alias -- computing it in place
- * silently evaluates a different recurrence. */
-static size_t aex_divl0(aex_u64 * dst, const aex_u64 * src, size_t len,
-		aex_u64 p) {
-	for (size_t i = 0; i < len; i++) {
-		dst[i] = 0;
-	}
-	for (size_t m = len; m-- > TAU;) {
-		dst[m - TAU] = aex_add(src[m], dst[m], p);
-	}
-	return len > TAU ? len - TAU : 1;
-}
-
-/* Extract v[j][i] for one coefficient position modulo one prime. */
+/* Extract v[j][i] for one coefficient position modulo one prime: out[j][i] is
+ * G_j at w^i, where P(f) / l_0 = G_0 + l_0 G_1 + l_0^2 G_2 with deg G_j < TAU
+ * and f = a l_0 + g, g the interpolant of b. The top level is a constant, the
+ * leading coefficient a^deg P. The others come from derivatives at the nodes,
+ * with D = X d/dX, which at a node w^i, where X^TAU = 1, has D l_0 = TAU and
+ * D^2 l_0 = TAU^2. From H = P(f) = l_0 F and P(g) vanishing at the nodes:
+ *   F  = DH / TAU,                    DH  = P'(b) Df,  Df = Dg + a TAU,
+ *   DF = (D^2 H - TAU^2 F) / 2 TAU,   D^2 H = P''(b) (Df)^2 + P'(b) D^2 f,
+ *                                     D^2 f = D^2 g + a TAU^2,
+ * and G_0 = F, G_1 = (DF - DG_0) / TAU at the nodes, the latter since
+ * F - G_0 = l_0 (G_1 + l_0 G_2). Dg and D^2 g are transforms of k g_k and
+ * k^2 g_k, DG_0 of k times G_0's coefficients: five transforms of length
+ * TAU for the cubic set, two for the quadratic ones, instead of a product on
+ * 4 TAU points and three rounds of division. buf holds 3 TAU elements. For
+ * AEX_ZERO, P(f) = f with g = 0 is the constant a. */
 static void aex_extract(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
-		const aex_tw_t & TT, const aex_tw_t & T4, aex_u64 * bufA,
-		aex_u64 * bufB, aex_u64 * buft, aex_set_t set) {
+		const aex_tw_t & TT, aex_u64 * buf, aex_set_t set) {
 	const aex_u64 p = TT.p;
-	/* g = interpolant of b at the nodes */
-	for (size_t i = 0; i < TAU; i++) {
-		buft[i] = b[i];
-	}
-	aex_ntt_tw(buft, TT, 1);
-	/* f = a (X^TAU - 1) + g, degree TAU */
-	for (size_t i = 0; i < AEX_N4; i++) {
-		bufA[i] = 0;
-	}
-	for (size_t i = 0; i < TAU; i++) {
-		bufA[i] = buft[i];
-	}
-	bufA[0] = aex_sub(bufA[0], a, p);
-	bufA[TAU] = aex_add(bufA[TAU], a, p);
-	for (size_t i = 0; i <= TAU; i++) {
-		bufB[i] = bufA[i];
-	}
-	/* The pointwise polynomial on 4 TAU points: f^3 - f for the ternary set,
-	 * f^2 - f for the binary one, f^2 - 1 for the signs. The two linear cases
-	 * need no evaluation at all: P(f) = f is already in bufA, and P(f) = 0 is
-	 * the empty constraint. */
-	if (set == AEX_FREE) {
-		for (size_t i = 0; i < AEX_N4; i++) {
-			bufA[i] = 0;
-		}
-	} else if (set != AEX_ZERO) {
-		aex_ntt_tw(bufA, T4, 0);
-		for (size_t i = 0; i < AEX_N4; i++) {
-			aex_u64 fi = bufA[i];
-			aex_u64 sq = aex_mul(fi, fi, p);
-			bufA[i] = (set == AEX_TER) ? aex_mul(sq, fi, p) : sq;
-		}
-		aex_ntt_tw(bufA, T4, 1);
-		if (set == AEX_SGN) {
-			bufA[0] = aex_sub(bufA[0], 1, p);
-		} else {
-			for (size_t i = 0; i <= TAU; i++) {
-				bufA[i] = aex_sub(bufA[i], bufB[i], p);
-			}
-		}
-	}
-	/* Q = P(f) / (X^TAU - 1) */
-	size_t len = aex_divl0(bufB, bufA, AEX_N4, p);
-	aex_u64 *cur = bufB, *oth = bufA;
+	const aex_u64 T = TAU % p, T2 = aex_mul(T, T, p);
+	const aex_u64 Ti = aex_pow(T, p - 2, p), T2i = aex_pow(aex_add(T, T, p), p - 2, p);
+	aex_u64 *g = buf, *dg = buf + TAU, *d2g = buf + 2 * TAU;
 
-	for (int j = 0; j < 3; j++) {
+	if (set == AEX_FREE || set == AEX_ZERO) {
 		for (size_t i = 0; i < TAU; i++) {
-			buft[i] = 0;
+			out[0][i] = (set == AEX_ZERO) ? a : 0;
+			out[1][i] = 0;
+			out[2][i] = 0;
 		}
-		for (size_t m = 0; m < len; m++) {
-			buft[m % TAU] = aex_add(buft[m % TAU], cur[m], p);
-		}
-		aex_ntt_tw(buft, TT, 0);
+		return;
+	}
+	/* g's coefficients, then Dg at the nodes, and D^2 g for the cubic set. */
+	for (size_t i = 0; i < TAU; i++) {
+		g[i] = b[i];
+	}
+	aex_ntt_tw(g, TT, 1);
+	for (size_t k = 0; k < TAU; k++) {
+		dg[k] = aex_mul(g[k], k, p);
+		d2g[k] = aex_mul(dg[k], k, p);
+	}
+	aex_ntt_tw(dg, TT, 0);
+	const aex_u64 aT = aex_mul(a, T, p), a2 = aex_mul(a, a, p);
+	if (set != AEX_TER) {
+		/* P'(b) = 2b - 1 for {0, 1}, 2b for {-1, 1}; G_1 = a^2, G_2 = 0. */
 		for (size_t i = 0; i < TAU; i++) {
-			out[j][i] = buft[i];
+			aex_u64 dp = aex_add(b[i], b[i], p);
+			if (set == AEX_BIN) {
+				dp = aex_sub(dp, 1, p);
+			}
+			out[0][i] = aex_mul(aex_mul(dp, aex_add(dg[i], aT, p), p), Ti, p);
+			out[1][i] = a2;
+			out[2][i] = 0;
 		}
-		if (j == 2) {
-			break;
-		}
-		aex_ntt_tw(buft, TT, 1);
-		for (size_t i = 0; i < TAU && i < len; i++) {
-			cur[i] = aex_sub(cur[i], buft[i], p);
-		}
-		len = aex_divl0(oth, cur, len, p);
-		aex_u64 *sw = cur;
-		cur = oth;
-		oth = sw;
+		return;
+	}
+	aex_ntt_tw(d2g, TT, 0);
+	const aex_u64 aT2 = aex_mul(a, T2, p), a3 = aex_mul(a2, a, p);
+	/* P = X^3 - X: P'(b) = 3b^2 - 1, P''(b) = 6b. g is spent; its space takes
+	 * G_0's coefficients, and dg's DF. */
+	for (size_t i = 0; i < TAU; i++) {
+		const aex_u64 bb = aex_mul(b[i], b[i], p);
+		const aex_u64 p1 = aex_sub(aex_add(aex_add(bb, bb, p), bb, p), 1, p);
+		const aex_u64 b2 = aex_add(b[i], b[i], p);
+		const aex_u64 p2 = aex_add(aex_add(b2, b2, p), b2, p);
+		const aex_u64 df = aex_add(dg[i], aT, p);
+		const aex_u64 d2f = aex_add(d2g[i], aT2, p);
+		const aex_u64 F = aex_mul(aex_mul(p1, df, p), Ti, p);
+		const aex_u64 d2h = aex_add(aex_mul(p2, aex_mul(df, df, p), p),
+				aex_mul(p1, d2f, p), p);
+
+		out[0][i] = F;
+		g[i] = F;
+		dg[i] = aex_mul(aex_sub(d2h, aex_mul(T2, F, p), p), T2i, p);
+		out[2][i] = a3;
+	}
+	aex_ntt_tw(g, TT, 1);
+	for (size_t k = 0; k < TAU; k++) {
+		g[k] = aex_mul(g[k], k, p);
+	}
+	aex_ntt_tw(g, TT, 0);
+	for (size_t i = 0; i < TAU; i++) {
+		out[1][i] = aex_mul(aex_sub(dg[i], g[i], p), Ti, p);
 	}
 }
-
 
 /* Build the rows of the relation proving that the message committed in each
  * P_i is a ring constant. It is the commitment equation itself, so the witness
@@ -1983,27 +1975,20 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 	{
 		const size_t N = params::poly_q::degree;
 		const size_t NM = params::poly_q::nmoduli;
-		aex_u64 P[2], wt[2], w4[2];
-		aex_tw_t TT[2], T4[2];
+		aex_u64 P[2], wt[2];
+		aex_tw_t TT[2];
 		for (size_t j = 0; j < NM; j++) {
 			P[j] = nfl::params < uint64_t >::P[j];
 			for (ulong g = 2;; g++) {
 				wt[j] = aex_pow(g, (P[j] - 1) / TAU, P[j]);
 				if (aex_pow(wt[j], TAU / 2, P[j]) != 1) break;
 			}
-			for (ulong g = 2;; g++) {
-				w4[j] = aex_pow(g, (P[j] - 1) / AEX_N4, P[j]);
-				if (aex_pow(w4[j], AEX_N4 / 2, P[j]) != 1) break;
-			}
 			aex_tw_init(TT[j], TAU, wt[j], P[j]);
-			aex_tw_init(T4[j], AEX_N4, w4[j], P[j]);
 		}
 
 		aex_u64 *sres = new aex_u64[NM * N * TAU];
 		aex_u64 *s0res = new aex_u64[NM * N];
-		aex_u64 *buf4 = new aex_u64[AEX_N4];
-		aex_u64 *buf4b = new aex_u64[AEX_N4];
-		aex_u64 *buft = new aex_u64[TAU];
+		aex_u64 *buf = new aex_u64[3 * TAU];
 		static aex_u64 out[2][3][TAU];
 		mpz_t pz;
 		mpz_init(pz);
@@ -2034,8 +2019,7 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 			for (size_t l = 0; l < N; l++) {
 				for (size_t j = 0; j < NM; j++) {
 					aex_extract(s0res[j * N + l], sres + (j * N + l) * TAU,
-							out[j], TT[j], T4[j], buf4, buf4b, buft,
-							aex_set_at(k, l));
+							out[j], TT[j], buf, aex_set_at(k, l));
 				}
 				/* Kept as residues: the encoder and the sums below work
 				 * modulo each prime. */
@@ -2050,14 +2034,11 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 		}
 		for (size_t j = 0; j < NM; j++) {
 			aex_tw_clear(TT[j]);
-			aex_tw_clear(T4[j]);
 		}
 		mpz_clear(pz);
 		delete[]sres;
 		delete[]s0res;
-		delete[]buf4;
-		delete[]buf4b;
-		delete[]buft;
+		delete[]buf;
 	}
 
 	/* Encode H's as larger NTT. H_{i,j} has one codeword per component k of
@@ -2588,6 +2569,99 @@ static void aex_scalar_test_setup(comkey_t & key, commit_t * P,
 	aex_scalar_wit(r, sigma, TAU);
 }
 
+#define AEX_N4  (4 * TAU)
+
+/* Exact division by X^TAU - 1 into a separate buffer: Q_{m-TAU} = c_m + Q_m,
+ * taken from the top. src and dst must not alias -- computing it in place
+ * silently evaluates a different recurrence. */
+static size_t aex_divl0(aex_u64 * dst, const aex_u64 * src, size_t len,
+		aex_u64 p) {
+	for (size_t i = 0; i < len; i++) {
+		dst[i] = 0;
+	}
+	for (size_t m = len; m-- > TAU;) {
+		dst[m - TAU] = aex_add(src[m], dst[m], p);
+	}
+	return len > TAU ? len - TAU : 1;
+}
+
+/* The extraction aex_extract replaced, through P(f) on 4 TAU points and the
+ * division by X^TAU - 1 level by level, for the tests. */
+static void aex_extract_ref(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
+		const aex_tw_t & TT, const aex_tw_t & T4, aex_u64 * bufA,
+		aex_u64 * bufB, aex_u64 * buft, aex_set_t set) {
+	const aex_u64 p = TT.p;
+	/* g = interpolant of b at the nodes */
+	for (size_t i = 0; i < TAU; i++) {
+		buft[i] = b[i];
+	}
+	aex_ntt_tw(buft, TT, 1);
+	/* f = a (X^TAU - 1) + g, degree TAU */
+	for (size_t i = 0; i < AEX_N4; i++) {
+		bufA[i] = 0;
+	}
+	for (size_t i = 0; i < TAU; i++) {
+		bufA[i] = buft[i];
+	}
+	bufA[0] = aex_sub(bufA[0], a, p);
+	bufA[TAU] = aex_add(bufA[TAU], a, p);
+	for (size_t i = 0; i <= TAU; i++) {
+		bufB[i] = bufA[i];
+	}
+	/* The pointwise polynomial on 4 TAU points: f^3 - f for the ternary set,
+	 * f^2 - f for the binary one, f^2 - 1 for the signs. The two linear cases
+	 * need no evaluation at all: P(f) = f is already in bufA, and P(f) = 0 is
+	 * the empty constraint. */
+	if (set == AEX_FREE) {
+		for (size_t i = 0; i < AEX_N4; i++) {
+			bufA[i] = 0;
+		}
+	} else if (set != AEX_ZERO) {
+		aex_ntt_tw(bufA, T4, 0);
+		for (size_t i = 0; i < AEX_N4; i++) {
+			aex_u64 fi = bufA[i];
+			aex_u64 sq = aex_mul(fi, fi, p);
+			bufA[i] = (set == AEX_TER) ? aex_mul(sq, fi, p) : sq;
+		}
+		aex_ntt_tw(bufA, T4, 1);
+		if (set == AEX_SGN) {
+			bufA[0] = aex_sub(bufA[0], 1, p);
+		} else {
+			for (size_t i = 0; i <= TAU; i++) {
+				bufA[i] = aex_sub(bufA[i], bufB[i], p);
+			}
+		}
+	}
+	/* Q = P(f) / (X^TAU - 1) */
+	size_t len = aex_divl0(bufB, bufA, AEX_N4, p);
+	aex_u64 *cur = bufB, *oth = bufA;
+
+	for (int j = 0; j < 3; j++) {
+		for (size_t i = 0; i < TAU; i++) {
+			buft[i] = 0;
+		}
+		for (size_t m = 0; m < len; m++) {
+			buft[m % TAU] = aex_add(buft[m % TAU], cur[m], p);
+		}
+		aex_ntt_tw(buft, TT, 0);
+		for (size_t i = 0; i < TAU; i++) {
+			out[j][i] = buft[i];
+		}
+		if (j == 2) {
+			break;
+		}
+		aex_ntt_tw(buft, TT, 1);
+		for (size_t i = 0; i < TAU && i < len; i++) {
+			cur[i] = aex_sub(cur[i], buft[i], p);
+		}
+		len = aex_divl0(oth, cur, len, p);
+		aex_u64 *sw = cur;
+		cur = oth;
+		oth = sw;
+	}
+}
+
+
 /* The straightforward transform aex_ntt_tw replaced, for the tests. */
 static void aex_ntt_tw_ref(aex_u64 * a, const aex_tw_t & t, int inverse) {
 	const size_t n = t.n;
@@ -2757,6 +2831,59 @@ static void test(flint_rand_t rand) {
 		}
 		delete[] x;
 		delete[] y;
+		TEST_ASSERT(ok, end);
+	} TEST_END;
+
+	TEST_ONCE("extraction by derivatives agrees with division") {
+		/* aex_extract against aex_extract_ref, for every set, both primes,
+		 * at random a and at a = p - 1, with b in the set as an honest
+		 * witness has it. */
+		aex_u64 *bufA = new aex_u64[AEX_N4], *bufB = new aex_u64[AEX_N4];
+		aex_u64 *buft = new aex_u64[TAU], *buf = new aex_u64[3 * TAU];
+		static aex_u64 o0[3][TAU], o1[3][TAU];
+		aex_u64 b[TAU];
+		int ok = 1;
+
+		for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
+			const aex_u64 p = nfl::params < uint64_t >::P[cm];
+			aex_u64 wt = 0, w4 = 0;
+			aex_tw_t TT, T4;
+			for (ulong g = 2;; g++) {
+				wt = aex_pow(g, (p - 1) / TAU, p);
+				if (aex_pow(wt, TAU / 2, p) != 1) break;
+			}
+			for (ulong g = 2;; g++) {
+				w4 = aex_pow(g, (p - 1) / AEX_N4, p);
+				if (aex_pow(w4, AEX_N4 / 2, p) != 1) break;
+			}
+			aex_tw_init(TT, TAU, wt, p);
+			aex_tw_init(T4, AEX_N4, w4, p);
+			for (aex_set_t set : { AEX_TER, AEX_BIN, AEX_SGN, AEX_ZERO, AEX_FREE }) {
+				for (int rep = 0; rep < 20; rep++) {
+					const aex_u64 a = (rep == 0) ? p - 1 : n_randint(rand, p);
+					for (size_t i = 0; i < TAU; i++) {
+						const aex_u64 v = n_randint(rand, 3);
+						b[i] = (set == AEX_TER) ? (v == 2 ? p - 1 : v) :
+								(set == AEX_BIN) ? (v & 1) :
+								(set == AEX_SGN) ? ((v & 1) ? p - 1 : 1) :
+								(set == AEX_ZERO) ? 0 : n_randint(rand, p);
+					}
+					aex_extract(a, b, o0, TT, buf, set);
+					aex_extract_ref(a, b, o1, TT, T4, bufA, bufB, buft, set);
+					for (size_t j = 0; j < 3; j++) {
+						for (size_t i = 0; i < TAU; i++) {
+							ok &= o0[j][i] == o1[j][i];
+						}
+					}
+				}
+			}
+			aex_tw_clear(TT);
+			aex_tw_clear(T4);
+		}
+		delete[] bufA;
+		delete[] bufB;
+		delete[] buft;
+		delete[] buf;
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
