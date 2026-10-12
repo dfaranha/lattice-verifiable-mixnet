@@ -726,13 +726,35 @@ static void aex_node(uint8_t out[BLAKE3_OUT_LEN], const uint8_t *l,
 	blake3_hasher_finalize(&h, out, BLAKE3_OUT_LEN);
 }
 
+/* Columns are gathered AEX_TREE_BLOCK at a time: each row's symbols for the
+ * block are contiguous in its codeword, so a block costs one sequential read
+ * a row, where gathering column by column read 16 bytes from each of
+ * AEX_ROWS codewords 256 KiB apart, a cache and TLB miss apiece. The bytes
+ * are aex_column's: a symbol's two limbs, low first, each little-endian,
+ * which on a little-endian machine is the limbs' memory as it stands. */
+#define AEX_TREE_BLOCK 32
+static_assert(AEX_COLS % AEX_TREE_BLOCK == 0, "columns come in whole blocks");
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+		"the block gather copies limbs in memory order");
+
 static void aex_tree_build(aex_tree_t & t) {
-	uint8_t *scratch = new uint8_t[AEX_COLBYTES];
+	uint8_t *blk = new uint8_t[AEX_TREE_BLOCK * AEX_COLBYTES];
 	t.node = new uint8_t[aex_tree_nodes() * BLAKE3_OUT_LEN];
-	for (size_t c = 0; c < AEX_COLS; c++) {
-		aex_hash_column(t.node + c * BLAKE3_OUT_LEN, c, scratch);
+	for (size_t c0 = 0; c0 < AEX_COLS; c0 += AEX_TREE_BLOCK) {
+		for (size_t r = 0; r < AEX_ROWS; r++) {
+			const uint64_t *d = aex_row(r).w + 2 * c0;
+			for (size_t b = 0; b < AEX_TREE_BLOCK; b++) {
+				memcpy(blk + b * AEX_COLBYTES + r * 16, d + 2 * b, 16);
+			}
+		}
+		for (size_t b = 0; b < AEX_TREE_BLOCK; b++) {
+			blake3_hasher h;
+			blake3_hasher_init(&h);
+			blake3_hasher_update(&h, blk + b * AEX_COLBYTES, AEX_COLBYTES);
+			blake3_hasher_finalize(&h, t.node + (c0 + b) * BLAKE3_OUT_LEN, BLAKE3_OUT_LEN);
+		}
 	}
-	delete[]scratch;
+	delete[]blk;
 	size_t off = 0, n = AEX_COLS;
 	t.levels = 1;
 	while (n > 1) {
@@ -2933,6 +2955,25 @@ static void test(flint_rand_t rand) {
 			aex_open_clear(o);
 		}
 		TEST_ASSERT(ok == 1, end);
+	} TEST_END;
+
+	TEST_ONCE("the blocked tree hashes the columns aex_column gives") {
+		/* After a proof, the leaves of a rebuilt tree are the hashes of
+		 * aex_column's bytes, column by column. */
+		aex_tree_t tt;
+		uint8_t *scratch = new uint8_t[AEX_COLBYTES], hc[BLAKE3_OUT_LEN];
+		int ok = 1;
+
+		aex_tree_build(tt);
+		for (size_t c = 0; c < AEX_COLS && ok; c += 97) {
+			aex_hash_column(hc, c, scratch);
+			ok &= memcmp(hc, tt.node + c * BLAKE3_OUT_LEN, BLAKE3_OUT_LEN) == 0;
+		}
+		aex_hash_column(hc, AEX_COLS - 1, scratch);
+		ok &= memcmp(hc, tt.node + (AEX_COLS - 1) * BLAKE3_OUT_LEN, BLAKE3_OUT_LEN) == 0;
+		aex_tree_clear(tt);
+		delete[] scratch;
+		TEST_ASSERT(ok, end);
 	} TEST_END;
 
 	TEST_ONCE("challenge really lives in the extension") {
