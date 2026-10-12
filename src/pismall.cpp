@@ -397,9 +397,217 @@ static void pismall_free(void) {
 	delete[]prover_r;
 }
 
+/* --- Modular arithmetic and transforms on the moduli of q ------------- */
+
+typedef unsigned long long aex_u64;
+
+static inline aex_u64 aex_mul(aex_u64 a, aex_u64 b, aex_u64 p) {
+	/* For p below 2^50, as both moduli here are: a b < 2^100 rounds to a
+	 * double within a part in 2^53, so the quotient it gives is off by at most
+	 * one, and the remainder a b - quo p, which is that small, can be taken
+	 * modulo 2^64 and corrected once. A 128-bit % calls __umodti3, which
+	 * costs several times as much. a and b are below p. */
+	if (p < ((aex_u64) 1 << 50)) {
+		const aex_u64 quo = (aex_u64) ((double) a * (double) b / (double) p);
+		int64_t r = (int64_t) (a * b - quo * p);
+
+		r += (r < 0) ? (int64_t) p : 0;
+		r -= (r >= (int64_t) p) ? (int64_t) p : 0;
+		return (aex_u64) r;
+	}
+	return (aex_u64) ((__uint128_t) a * b % p);
+}
+
+static inline aex_u64 aex_add(aex_u64 a, aex_u64 b, aex_u64 p) {
+	aex_u64 s = a + b;
+	return s >= p ? s - p : s;
+}
+
+static inline aex_u64 aex_sub(aex_u64 a, aex_u64 b, aex_u64 p) {
+	return a >= b ? a - b : a + p - b;
+}
+
+static aex_u64 aex_pow(aex_u64 a, aex_u64 e, aex_u64 p) {
+	aex_u64 r = 1;
+	a %= p;
+	while (e) {
+		if (e & 1) {
+			r = aex_mul(r, a, p);
+		}
+		a = aex_mul(a, a, p);
+		e >>= 1;
+	}
+	return r;
+}
+
+/* Shoup multiplication: with wp = floor(w * 2^64 / p) precomputed, a * w mod p
+ * costs two multiplies instead of a 128-bit division. */
+static inline aex_u64 aex_mul_shoup(aex_u64 a, aex_u64 w, aex_u64 wp,
+		aex_u64 p) {
+	aex_u64 hi = (aex_u64) (((__uint128_t) a * wp) >> 64);
+	aex_u64 r = a * w - hi * p;
+	return r >= p ? r - p : r;
+}
+
+static inline aex_u64 aex_shoup(aex_u64 w, aex_u64 p) {
+	return (aex_u64) ((((__uint128_t) w) << 64) / p);
+}
+
+/* Twiddles for one prime: w^k and their Shoup factors, per NTT length. */
+typedef struct {
+	aex_u64 p;
+	aex_u64 *w, *wp;            /* forward, length n/2 */
+	aex_u64 *iw, *iwp;          /* inverse */
+	aex_u64 ninv, ninvp;
+	size_t n;
+	/* What aex_ntt_tw reads: the bit-reversal permutation, and each stage's
+	 * twiddles stored contiguously, the stage of half-length h at h - 1
+	 * (n - 1 of them), instead of w[k * n / 2h] strided across the table. */
+	size_t *rev;
+	aex_u64 *sw, *swp, *siw, *siwp;
+} aex_tw_t;
+
+static void aex_tw_init(aex_tw_t & t, size_t n, aex_u64 w, aex_u64 p) {
+	t.p = p; t.n = n;
+	t.w = new aex_u64[n / 2]; t.wp = new aex_u64[n / 2];
+	t.iw = new aex_u64[n / 2]; t.iwp = new aex_u64[n / 2];
+	aex_u64 iw = aex_pow(w, p - 2, p);
+	t.w[0] = 1; t.iw[0] = 1;
+	for (size_t i = 1; i < n / 2; i++) {
+		t.w[i] = aex_mul(t.w[i - 1], w, p);
+		t.iw[i] = aex_mul(t.iw[i - 1], iw, p);
+	}
+	for (size_t i = 0; i < n / 2; i++) {
+		t.wp[i] = aex_shoup(t.w[i], p);
+		t.iwp[i] = aex_shoup(t.iw[i], p);
+	}
+	t.ninv = aex_pow(n % p, p - 2, p);
+	t.ninvp = aex_shoup(t.ninv, p);
+	t.rev = new size_t[n];
+	for (size_t i = 0, j = 0; i < n; i++) {
+		t.rev[i] = j;
+		size_t bit = n >> 1;
+		for (; bit && (j & bit); bit >>= 1) {
+			j ^= bit;
+		}
+		j ^= bit;
+	}
+	t.sw = new aex_u64[n]; t.swp = new aex_u64[n];
+	t.siw = new aex_u64[n]; t.siwp = new aex_u64[n];
+	for (size_t h = 1; h < n; h <<= 1) {
+		const size_t step = n / (2 * h);
+		for (size_t k = 0; k < h; k++) {
+			t.sw[h - 1 + k] = t.w[k * step];
+			t.swp[h - 1 + k] = t.wp[k * step];
+			t.siw[h - 1 + k] = t.iw[k * step];
+			t.siwp[h - 1 + k] = t.iwp[k * step];
+		}
+	}
+}
+
+static void aex_tw_clear(aex_tw_t & t) {
+	delete[]t.w; delete[]t.wp; delete[]t.iw; delete[]t.iwp;
+	delete[]t.rev;
+	delete[]t.sw; delete[]t.swp; delete[]t.siw; delete[]t.siwp;
+}
+
+/* in-place radix-2 NTT over a precomputed twiddle table */
+/* The transform of length t.n, natural order in and out, fully reduced in
+ * and out. Harvey's lazy butterflies keep values in [0, 4p) between stages,
+ * which the 44-bit moduli leave ample room for in 64 bits, so a butterfly
+ * does one conditional subtraction where it did three; the last pass
+ * reduces, and scales by 1/n for the inverse. The permutation and each
+ * stage's twiddles come from tables built once (aex_tw_init). */
+static void aex_ntt_tw(aex_u64 * a, const aex_tw_t & t, int inverse) {
+	const size_t n = t.n;
+	const aex_u64 p = t.p, p2 = 2 * p;
+	const aex_u64 *SW = inverse ? t.siw : t.sw;
+	const aex_u64 *SWp = inverse ? t.siwp : t.swp;
+
+	for (size_t i = 0; i < n; i++) {
+		const size_t j = t.rev[i];
+		if (i < j) {
+			aex_u64 x = a[i]; a[i] = a[j]; a[j] = x;
+		}
+	}
+	for (size_t h = 1; h < n; h <<= 1) {
+		const aex_u64 *W = SW + h - 1, *Wp = SWp + h - 1;
+		for (size_t i = 0; i < n; i += 2 * h) {
+			aex_u64 *x = a + i, *y = a + i + h;
+			for (size_t k = 0; k < h; k++) {
+				aex_u64 u = x[k];
+				u -= (u >= p2) ? p2 : 0;
+				/* Shoup's product, left in [0, 2p). */
+				const aex_u64 q = (aex_u64) (((__uint128_t) y[k] * Wp[k]) >> 64);
+				const aex_u64 v = y[k] * W[k] - q * p;
+				x[k] = u + v;
+				y[k] = u - v + p2;
+			}
+		}
+	}
+	if (inverse) {
+		for (size_t i = 0; i < n; i++) {
+			a[i] = aex_mul_shoup(a[i], t.ninv, t.ninvp, p);
+		}
+	} else {
+		for (size_t i = 0; i < n; i++) {
+			aex_u64 x = a[i];
+			x -= (x >= p2) ? p2 : 0;
+			a[i] = x - ((x >= p) ? p : 0);
+		}
+	}
+}
+
+
+/* The forward transform of length t.n by decimation in frequency, natural
+ * order in and bit-reversed order out, with no permutation pass: a[c] ends
+ * as the input polynomial at w^rev(c). Gentleman-Sande butterflies, values
+ * lazy in [0, 2p) between stages and reduced at the end. Only a[0, len) may
+ * be nonzero, len > n / 2: in the first stage a butterfly whose lower input
+ * is zero is a single product. The stage of half-length h reads the tables
+ * at h - 1, as aex_ntt_tw does. */
+static void aex_ntt_dif(aex_u64 * a, const aex_tw_t & t, size_t len) {
+	const size_t n = t.n;
+	const aex_u64 p = t.p, p2 = 2 * p;
+
+	for (size_t h = n >> 1; h >= 1; h >>= 1) {
+		const aex_u64 *W = t.sw + h - 1, *Wp = t.swp + h - 1;
+		for (size_t i = 0; i < n; i += 2 * h) {
+			aex_u64 *x = a + i, *y = a + i + h;
+			/* The first stage's butterflies past len - h see y = 0. */
+			const size_t full = (2 * h == n) ? len - h : h;
+			size_t k = 0;
+			for (; k < full; k++) {
+				aex_u64 u = x[k] + y[k];
+				const aex_u64 d = x[k] - y[k] + p2;
+				const aex_u64 q = (aex_u64) (((__uint128_t) d * Wp[k]) >> 64);
+				u -= (u >= p2) ? p2 : 0;
+				x[k] = u;
+				y[k] = d * W[k] - q * p;
+			}
+			for (; k < h; k++) {
+				const aex_u64 q = (aex_u64) (((__uint128_t) x[k] * Wp[k]) >> 64);
+				y[k] = x[k] * W[k] - q * p;
+			}
+		}
+	}
+	for (size_t i = 0; i < n; i++) {
+		a[i] -= (a[i] >= p) ? p : 0;
+	}
+}
+
 /* --- Reed-Solomon encoding over Z_q ------------------------------------- */
 
-static params::poly_big *aex_poly;                     /* NTT working poly */
+/* The code evaluates a message polynomial of length 2N + ETA at the
+ * AEX_COLS-th roots of unity mod each prime of q, by aex_ntt_dif, and
+ * recombines the two evaluations into a symbol of Z_q: column c is the
+ * message at w^rev(c), rev reversing log2(AEX_COLS) bits. Any AEX_COLS
+ * distinct points, in any order, give a Reed-Solomon code of the same length
+ * and distance, which is all Lemma 2 uses; these make the transform a cyclic
+ * one, with no twist and no permutation. aex_buf holds the message's
+ * residues, prime by prime; past 2N + ETA it is never read. */
+static aex_u64 (*aex_buf)[AEX_COLS];
+static aex_tw_t aex_tw[2];
 
 static inline void aex_unpack(fmpz_t x, const aex_code_t * c, size_t i) {
 	fmpz_set_ui_array(x, c->w + 2 * i, 2);
@@ -424,40 +632,62 @@ static void aex_ntt_setup(const fmpz_mod_ctx_t ctx) {
 			abort();
 		}
 	}
-	aex_poly = new params::poly_big;
+	aex_buf = new aex_u64[2][AEX_COLS];
+	for (size_t cm = 0; cm < 2; cm++) {
+		const aex_u64 p = params::poly_big::get_modulus(cm);
+		aex_u64 w = 0;
+
+		/* A primitive AEX_COLS-th root of unity: p = 1 mod 2 AEX_COLS, as the
+		 * negacyclic transform poly_big is built for requires. */
+		if ((p - 1) % AEX_COLS != 0) {
+			fprintf(stderr, "aex: no AEX_COLS-th roots of unity mod p\n");
+			abort();
+		}
+		for (ulong g = 2;; g++) {
+			w = aex_pow(g, (p - 1) / AEX_COLS, p);
+			if (aex_pow(w, AEX_COLS / 2, p) != 1) break;
+		}
+		aex_tw_init(aex_tw[cm], AEX_COLS, w, p);
+	}
 }
 
 static void aex_ntt_clear(void) {
-	delete aex_poly;
+	delete[] aex_buf;
+	for (size_t cm = 0; cm < 2; cm++) {
+		aex_tw_clear(aex_tw[cm]);
+	}
 }
 
 /* A symbol of Z_q, below 2^128, as its residues mod each of poly_big's moduli,
  * which is what mpz2poly computed through an mpz. */
-static inline void aex_residues(params::poly_big & a, size_t i, const fmpz_t x) {
+static inline void aex_residues(size_t i, const fmpz_t x) {
 	ulong w[2] = { 0, 0 };
 
 	const util::rns < params::poly_big > &n = util::rns < params::poly_big >::get();
 
 	fmpz_get_ui_array(w, 2, x);
 	for (size_t cm = 0; cm < params::poly_big::nmoduli; cm++) {
-		a(cm, i) = n.red(w[0], w[1], cm);
+		aex_buf[cm][i] = n.red(w[0], w[1], cm);
 	}
 }
 
-/* Encode(in0, in1, r): pack the two message blocks and the randomness into the
- * low coefficients, then evaluate at the AEX_COLS roots of unity. */
-/* The transform and the CRT that turn aex_poly's residues into a codeword. */
+/* The transform and the CRT that turn aex_buf's residues into a codeword. */
 static void aex_finish(aex_code_t & out) {
 	const util::crt < params::poly_big > &c = util::crt < params::poly_big >::get();
-	params::poly_big & a = *aex_poly;
 
-	/* Both NFLlib moduli satisfy p = 1 mod 2 * AEX_COLS, so this is a genuine
-	 * length-AEX_COLS transform. Each symbol is recombined from its two
-	 * residues by the CRT, r_0 + p_0 ((r_1 - r_0) p_0^-1 mod p_1), below
-	 * q < 2^128, and written low limb, then high. */
-	a.ntt_pow_phi();
+	const size_t len = 2 * params::poly_q::degree + ETA;
+
+	static_assert(2 * params::poly_q::degree + ETA > AEX_COLS / 2,
+			"aex_ntt_dif takes a message past half the code length");
+	static_assert(2 * params::poly_q::degree + ETA <= AEX_COLS,
+			"the message fits the code");
+	aex_ntt_dif(aex_buf[0], aex_tw[0], len);
+	aex_ntt_dif(aex_buf[1], aex_tw[1], len);
+	/* Each symbol is recombined from its two residues by the CRT,
+	 * r_0 + p_0 ((r_1 - r_0) p_0^-1 mod p_1), below q < 2^128, and written
+	 * low limb, then high. */
 	for (size_t i = 0; i < AEX_COLS; i++) {
-		const uint64_t r0 = a(0, i), r1 = a(1, i), p1 = c.p1;
+		const uint64_t r0 = aex_buf[0][i], r1 = aex_buf[1][i], p1 = c.p1;
 		const uint64_t r0m = util::rns < params::poly_big >::get().red(r0, 1);
 		const uint64_t d = (r1 >= r0m) ? r1 - r0m : r1 + p1 - r0m;
 		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
@@ -477,7 +707,6 @@ static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 	static_assert(params::poly_big::nmoduli == 2, "a symbol is two residues");
 	const size_t N = params::poly_q::degree;
 	const slong l0 = fmpz_mod_poly_length(in0, ctx), l1 = fmpz_mod_poly_length(in1, ctx);
-	params::poly_big & a = *aex_poly;
 	fmpz_t zero;
 	size_t i;
 
@@ -485,16 +714,13 @@ static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 	 * zero. */
 	fmpz_init(zero);
 	for (i = 0; i < N; i++) {
-		aex_residues(a, i, ((slong) i < l0) ? in0->coeffs + i : zero);
+		aex_residues(i, ((slong) i < l0) ? in0->coeffs + i : zero);
 	}
 	for (; i < 2 * N; i++) {
-		aex_residues(a, i, ((slong) (i - N) < l1) ? in1->coeffs + (i - N) : zero);
+		aex_residues(i, ((slong) (i - N) < l1) ? in1->coeffs + (i - N) : zero);
 	}
 	for (; i < 2 * N + ETA; i++) {
-		aex_residues(a, i, in + (i - 2 * N));
-	}
-	for (; i < AEX_COLS; i++) {
-		aex_residues(a, i, zero);
+		aex_residues(i, in + (i - 2 * N));
 	}
 	fmpz_clear(zero);
 	aex_finish(out);
@@ -513,24 +739,17 @@ typedef struct {
 static void aex_encode_res(aex_code_t & out, const uint64_t *in0,
 		const uint64_t *in1, const fmpz * in) {
 	const size_t N = params::poly_q::degree;
-	params::poly_big & a = *aex_poly;
-	fmpz_t zero;
 	size_t i;
 
 	for (size_t cm = 0; cm < 2; cm++) {
 		for (i = 0; i < N; i++) {
-			a(cm, i) = in0 ? in0[cm * N + i] : 0;
-			a(cm, N + i) = in1 ? in1[cm * N + i] : 0;
+			aex_buf[cm][i] = in0 ? in0[cm * N + i] : 0;
+			aex_buf[cm][N + i] = in1 ? in1[cm * N + i] : 0;
 		}
 	}
-	fmpz_init(zero);
 	for (i = 2 * N; i < 2 * N + ETA; i++) {
-		aex_residues(a, i, in + (i - 2 * N));
+		aex_residues(i, in + (i - 2 * N));
 	}
-	for (; i < AEX_COLS; i++) {
-		aex_residues(a, i, zero);
-	}
-	fmpz_clear(zero);
 	aex_finish(out);
 }
 
@@ -1310,165 +1529,6 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 static_assert((TAU & (TAU - 1)) == 0, "TAU must be a power of two");
 
 #define AEX_N4  (4 * TAU)
-
-typedef unsigned long long aex_u64;
-
-static inline aex_u64 aex_mul(aex_u64 a, aex_u64 b, aex_u64 p) {
-	/* For p below 2^50, as both moduli here are: a b < 2^100 rounds to a
-	 * double within a part in 2^53, so the quotient it gives is off by at most
-	 * one, and the remainder a b - quo p, which is that small, can be taken
-	 * modulo 2^64 and corrected once. A 128-bit % calls __umodti3, which
-	 * costs several times as much. a and b are below p. */
-	if (p < ((aex_u64) 1 << 50)) {
-		const aex_u64 quo = (aex_u64) ((double) a * (double) b / (double) p);
-		int64_t r = (int64_t) (a * b - quo * p);
-
-		r += (r < 0) ? (int64_t) p : 0;
-		r -= (r >= (int64_t) p) ? (int64_t) p : 0;
-		return (aex_u64) r;
-	}
-	return (aex_u64) ((__uint128_t) a * b % p);
-}
-
-static inline aex_u64 aex_add(aex_u64 a, aex_u64 b, aex_u64 p) {
-	aex_u64 s = a + b;
-	return s >= p ? s - p : s;
-}
-
-static inline aex_u64 aex_sub(aex_u64 a, aex_u64 b, aex_u64 p) {
-	return a >= b ? a - b : a + p - b;
-}
-
-static aex_u64 aex_pow(aex_u64 a, aex_u64 e, aex_u64 p) {
-	aex_u64 r = 1;
-	a %= p;
-	while (e) {
-		if (e & 1) {
-			r = aex_mul(r, a, p);
-		}
-		a = aex_mul(a, a, p);
-		e >>= 1;
-	}
-	return r;
-}
-
-/* Shoup multiplication: with wp = floor(w * 2^64 / p) precomputed, a * w mod p
- * costs two multiplies instead of a 128-bit division. */
-static inline aex_u64 aex_mul_shoup(aex_u64 a, aex_u64 w, aex_u64 wp,
-		aex_u64 p) {
-	aex_u64 hi = (aex_u64) (((__uint128_t) a * wp) >> 64);
-	aex_u64 r = a * w - hi * p;
-	return r >= p ? r - p : r;
-}
-
-static inline aex_u64 aex_shoup(aex_u64 w, aex_u64 p) {
-	return (aex_u64) ((((__uint128_t) w) << 64) / p);
-}
-
-/* Twiddles for one prime: w^k and their Shoup factors, per NTT length. */
-typedef struct {
-	aex_u64 p;
-	aex_u64 *w, *wp;            /* forward, length n/2 */
-	aex_u64 *iw, *iwp;          /* inverse */
-	aex_u64 ninv, ninvp;
-	size_t n;
-	/* What aex_ntt_tw reads: the bit-reversal permutation, and each stage's
-	 * twiddles stored contiguously, the stage of half-length h at h - 1
-	 * (n - 1 of them), instead of w[k * n / 2h] strided across the table. */
-	size_t *rev;
-	aex_u64 *sw, *swp, *siw, *siwp;
-} aex_tw_t;
-
-static void aex_tw_init(aex_tw_t & t, size_t n, aex_u64 w, aex_u64 p) {
-	t.p = p; t.n = n;
-	t.w = new aex_u64[n / 2]; t.wp = new aex_u64[n / 2];
-	t.iw = new aex_u64[n / 2]; t.iwp = new aex_u64[n / 2];
-	aex_u64 iw = aex_pow(w, p - 2, p);
-	t.w[0] = 1; t.iw[0] = 1;
-	for (size_t i = 1; i < n / 2; i++) {
-		t.w[i] = aex_mul(t.w[i - 1], w, p);
-		t.iw[i] = aex_mul(t.iw[i - 1], iw, p);
-	}
-	for (size_t i = 0; i < n / 2; i++) {
-		t.wp[i] = aex_shoup(t.w[i], p);
-		t.iwp[i] = aex_shoup(t.iw[i], p);
-	}
-	t.ninv = aex_pow(n % p, p - 2, p);
-	t.ninvp = aex_shoup(t.ninv, p);
-	t.rev = new size_t[n];
-	for (size_t i = 0, j = 0; i < n; i++) {
-		t.rev[i] = j;
-		size_t bit = n >> 1;
-		for (; bit && (j & bit); bit >>= 1) {
-			j ^= bit;
-		}
-		j ^= bit;
-	}
-	t.sw = new aex_u64[n]; t.swp = new aex_u64[n];
-	t.siw = new aex_u64[n]; t.siwp = new aex_u64[n];
-	for (size_t h = 1; h < n; h <<= 1) {
-		const size_t step = n / (2 * h);
-		for (size_t k = 0; k < h; k++) {
-			t.sw[h - 1 + k] = t.w[k * step];
-			t.swp[h - 1 + k] = t.wp[k * step];
-			t.siw[h - 1 + k] = t.iw[k * step];
-			t.siwp[h - 1 + k] = t.iwp[k * step];
-		}
-	}
-}
-
-static void aex_tw_clear(aex_tw_t & t) {
-	delete[]t.w; delete[]t.wp; delete[]t.iw; delete[]t.iwp;
-	delete[]t.rev;
-	delete[]t.sw; delete[]t.swp; delete[]t.siw; delete[]t.siwp;
-}
-
-/* in-place radix-2 NTT over a precomputed twiddle table */
-/* The transform of length t.n, natural order in and out, fully reduced in
- * and out. Harvey's lazy butterflies keep values in [0, 4p) between stages,
- * which the 44-bit moduli leave ample room for in 64 bits, so a butterfly
- * does one conditional subtraction where it did three; the last pass
- * reduces, and scales by 1/n for the inverse. The permutation and each
- * stage's twiddles come from tables built once (aex_tw_init). */
-static void aex_ntt_tw(aex_u64 * a, const aex_tw_t & t, int inverse) {
-	const size_t n = t.n;
-	const aex_u64 p = t.p, p2 = 2 * p;
-	const aex_u64 *SW = inverse ? t.siw : t.sw;
-	const aex_u64 *SWp = inverse ? t.siwp : t.swp;
-
-	for (size_t i = 0; i < n; i++) {
-		const size_t j = t.rev[i];
-		if (i < j) {
-			aex_u64 x = a[i]; a[i] = a[j]; a[j] = x;
-		}
-	}
-	for (size_t h = 1; h < n; h <<= 1) {
-		const aex_u64 *W = SW + h - 1, *Wp = SWp + h - 1;
-		for (size_t i = 0; i < n; i += 2 * h) {
-			aex_u64 *x = a + i, *y = a + i + h;
-			for (size_t k = 0; k < h; k++) {
-				aex_u64 u = x[k];
-				u -= (u >= p2) ? p2 : 0;
-				/* Shoup's product, left in [0, 2p). */
-				const aex_u64 q = (aex_u64) (((__uint128_t) y[k] * Wp[k]) >> 64);
-				const aex_u64 v = y[k] * W[k] - q * p;
-				x[k] = u + v;
-				y[k] = u - v + p2;
-			}
-		}
-	}
-	if (inverse) {
-		for (size_t i = 0; i < n; i++) {
-			a[i] = aex_mul_shoup(a[i], t.ninv, t.ninvp, p);
-		}
-	} else {
-		for (size_t i = 0; i < n; i++) {
-			aex_u64 x = a[i];
-			x -= (x >= p2) ? p2 : 0;
-			a[i] = x - ((x >= p) ? p : 0);
-		}
-	}
-}
 
 /* Exact division by X^TAU - 1 into a separate buffer: Q_{m-TAU} = c_m + Q_m,
  * taken from the top. src and dst must not alias -- computing it in place
@@ -2700,6 +2760,33 @@ static void test(flint_rand_t rand) {
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
+	TEST_ONCE("the pruned DIF transform is the NTT in bit-reversed order") {
+		/* aex_ntt_dif on the encoder's tables against the straightforward
+		 * transform, with x zero past the message length, at random inputs
+		 * and at all p - 1. */
+		const size_t len = 2 * params::poly_q::degree + ETA;
+		aex_u64 *x = new aex_u64[AEX_COLS], *y = new aex_u64[AEX_COLS];
+		int ok = 1;
+
+		for (size_t cm = 0; cm < 2; cm++) {
+			const aex_u64 p = aex_tw[cm].p;
+			for (int rep = 0; rep < 2; rep++) {
+				for (size_t i = 0; i < AEX_COLS; i++) {
+					x[i] = (i >= len) ? 0 : (rep == 0) ? p - 1 : n_randint(rand, p);
+					y[i] = x[i];
+				}
+				aex_ntt_dif(x, aex_tw[cm], len);
+				aex_ntt_tw_ref(y, aex_tw[cm], 0);
+				for (size_t c = 0; c < AEX_COLS; c++) {
+					ok &= x[c] == y[aex_tw[cm].rev[c]];
+				}
+			}
+		}
+		delete[] x;
+		delete[] y;
+		TEST_ASSERT(ok, end);
+	} TEST_END;
+
 	TEST_ONCE("GR multiplication per prime agrees with gr_mul") {
 		/* grq_mul on each prime's residues against gr_mul over Z_q, at
 		 * random elements and at ones whose coordinates are all q - 1. */
@@ -2852,6 +2939,52 @@ static void test(flint_rand_t rand) {
 
 	bdlop_keygen(key);
 	bdlop_sample_rand(rd);
+
+	TEST_ONCE("a codeword is the message evaluated at the roots of unity") {
+		/* Symbol c of Encode(m0, m1, r), mod each prime p, is the message
+		 * polynomial (m0, m1, r, then zeros) evaluated at w^rev(c), with w the
+		 * primitive AEX_COLS-th root aex_ntt_setup took: checked by Horner
+		 * at a few columns, the first and the last among them. */
+		aex_code_t *cw = new aex_code_t;
+		fmpz_mod_poly_t m0, m1;
+		fmpz_t r[ETA], cf;
+		int ok = 1;
+
+		fmpz_mod_poly_init(m0, ctx); fmpz_mod_poly_init(m1, ctx);
+		fmpz_init(cf);
+		fmpz_mod_poly_randtest(m0, rand, params::poly_q::degree, ctx);
+		fmpz_mod_poly_randtest(m1, rand, params::poly_q::degree, ctx);
+		for (size_t i = 0; i < ETA; i++) {
+			fmpz_init(r[i]);
+			fmpz_randm(r[i], rand, q);
+		}
+		aex_encode(*cw, m0, m1, (const fmpz *) r, ctx);
+		const size_t N = params::poly_q::degree, cols[4] = { 0, 1, 5000, AEX_COLS - 1 };
+		for (size_t cm = 0; cm < 2; cm++) {
+			const aex_u64 p = aex_tw[cm].p, w = aex_tw[cm].w[1];
+			for (size_t t = 0; t < 4; t++) {
+				const aex_u64 x = aex_pow(w, aex_tw[cm].rev[cols[t]], p);
+				aex_u64 acc = 0;
+				/* Horner from the top coefficient, 2N + ETA - 1, down. */
+				for (size_t i = 2 * N + ETA; i-- > 0;) {
+					if (i < N) fmpz_mod_poly_get_coeff_fmpz(cf, m0, i, ctx);
+					else if (i < 2 * N) fmpz_mod_poly_get_coeff_fmpz(cf, m1, i - N, ctx);
+					else fmpz_set(cf, r[i - 2 * N]);
+					ulong lw[2] = { 0, 0 };
+					fmpz_get_ui_array(lw, 2, cf);
+					const aex_u64 ci = (aex_u64) ((((__uint128_t) lw[1] << 64) | lw[0]) % p);
+					acc = aex_add(aex_mul(acc, x, p), ci, p);
+				}
+				const __uint128_t sym = ((__uint128_t) cw->w[2 * cols[t] + 1] << 64) | cw->w[2 * cols[t]];
+				ok &= (aex_u64) (sym % p) == acc;
+			}
+		}
+		for (size_t i = 0; i < ETA; i++) fmpz_clear(r[i]);
+		fmpz_clear(cf);
+		fmpz_mod_poly_clear(m0, ctx); fmpz_mod_poly_clear(m1, ctx);
+		delete cw;
+		TEST_ASSERT(ok, end);
+	} TEST_END;
 
 	TEST_ONCE("encoding is linear in message and randomness") {
 		aex_code_t *ca = new aex_code_t, *cb = new aex_code_t;
