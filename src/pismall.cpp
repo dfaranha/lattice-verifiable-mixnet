@@ -151,11 +151,6 @@ static void gr_add(gr_t & r, const gr_t & a, const gr_t & b,
 	for (int i = 0; i < AEX_DEG; i++) fmpz_mod_add(r.c[i], a.c[i], b.c[i], ctx);
 }
 
-static void gr_sub(gr_t & r, const gr_t & a, const gr_t & b,
-		const fmpz_mod_ctx_t ctx) {
-	for (int i = 0; i < AEX_DEG; i++) fmpz_mod_sub(r.c[i], a.c[i], b.c[i], ctx);
-}
-
 /* --- the quadratic base, on pairs of Z_q coordinates ---------------------
  * (a0 + a1 Z)(b0 + b1 Z) = (a0 b0 + NR a1 b1) + (a0 b1 + a1 b0) Z, by
  * Karatsuba so three Z_q multiplies instead of four. Safe to alias. */
@@ -1041,25 +1036,61 @@ static inline uint64_t rs_add(uint64_t a, uint64_t b, uint64_t p) {
 	return t - ((t >= p) ? p : 0);
 }
 
+/* a b mod p for a, b < p < 2^50, as aex_mul below: the quotient from a
+ * double is off by at most one, and the remainder is corrected once. */
+static inline uint64_t rq_mul(uint64_t a, uint64_t b, uint64_t p) {
+	const uint64_t quo = (uint64_t) ((double) a * (double) b / (double) p);
+	int64_t r = (int64_t) (a * b - quo * p);
+
+	r += (r < 0) ? (int64_t) p : 0;
+	r -= (r >= (int64_t) p) ? (int64_t) p : 0;
+	return (uint64_t) r;
+}
+
+static inline uint64_t rq_sub(uint64_t a, uint64_t b, uint64_t p) {
+	return (a >= b) ? a - b : a + p - b;
+}
+
+/* r = a b in GR(p, AEX_DEG) for one prime p of q, in the tower basis
+ * (1, Z, Y, ZY): each product of basis elements lands where aex_basis_idx
+ * says, times AEX_NR where aex_basis_nr says. r may be a or b. */
+static void grq_mul(uint64_t r[AEX_DEG], const uint64_t a[AEX_DEG],
+		const uint64_t b[AEX_DEG], uint64_t p) {
+	uint64_t t[AEX_DEG] = { 0 };
+	const uint64_t nr = AEX_NR % p;
+
+	for (int i = 0; i < AEX_DEG; i++) {
+		for (int j = 0; j < AEX_DEG; j++) {
+			uint64_t x = rq_mul(a[i], b[j], p);
+
+			if (aex_basis_nr[i][j]) {
+				x = rq_mul(x, nr, p);
+			}
+			t[aex_basis_idx[i][j]] = rs_add(t[aex_basis_idx[i][j]], x, p);
+		}
+	}
+	for (int i = 0; i < AEX_DEG; i++) {
+		r[i] = t[i];
+	}
+}
+
 static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 		gr_t rf[ETA], fmpz_mod_poly_t h[2][V][AEX_DEG], gr_t rh[ETA],
 		const gr_t & x, const gr_t & beta0, gr_t beta[TAU][3],
 		fmpz_mod_poly_t lag[TAU + 1], const fmpz_mod_ctx_t ctx) {
 	fmpz *rc = _fmpz_vec_init(ETA);
-	gr_t l0, l0inv, one, fv, cub, t;
+	gr_t l0, l0inv;
 	gr_t lpow[3];
 	gr_t *lev = new gr_t[TAU + 1];
 	/* l_i(x) l_0(x)^j does not depend on the column or the component, but used
 	 * to be recomputed inside both loops; hoisting it out pays for most of the
 	 * extra work the extension costs here. */
 	gr_t (*wt)[3] = new gr_t[TAU][3];
-	fmpz_mod_poly_t g[AEX_DEG];
 	aex_code_t *lhs_f = new aex_code_t[AEX_DEG * V];
 	aex_code_t *lhs_h = new aex_code_t[AEX_DEG * V];
 	int ok = 1;
 
-	gr_init(l0); gr_init(l0inv); gr_init(one); gr_init(fv);
-	gr_init(cub); gr_init(t);
+	gr_init(l0); gr_init(l0inv);
 	for (int i = 0; i < 3; i++) {
 		gr_init(lpow[i]);
 	}
@@ -1071,10 +1102,6 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 			gr_init(wt[i][j]);
 		}
 	}
-	for (int i = 0; i < AEX_DEG; i++) {
-		fmpz_mod_poly_init(g[i], ctx);
-	}
-	gr_one(one);
 
 	/* A challenge whose l_0(x) is a zero divisor is not usable; at deg/p^2 it
 	 * never happens in practice, and rejecting beats aborting. */
@@ -1093,48 +1120,73 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 			}
 		}
 
-		/* left-hand sides, one codeword per component and per k */
-		for (size_t k = 0; k < V; k++) {
-			for (size_t l = 0; l < params::poly_q::degree; l++) {
-				aex_set_t set = aex_set_at(k, l);
+		/* Left-hand sides, one codeword per component and per k, in
+		 * residues: f's once per polynomial, the identity polynomial per
+		 * coefficient and prime by grq_mul, then encoded from residues. The
+		 * same arithmetic as gr_mul in fmpz, and a test checks the two. */
+		const size_t N = params::poly_q::degree;
+		const util::rns < params::poly_q > &nr = util::rns < params::poly_q >::get();
+		aex_rpoly *fr = new aex_rpoly[AEX_DEG], *gres = new aex_rpoly[AEX_DEG];
+		uint64_t li[2][AEX_DEG];
+		aex_rscalar sl;
 
-				for (int i = 0; i < AEX_DEG; i++) {
-					fmpz_mod_poly_get_coeff_fmpz(fv.c[i], f[k][i], l, ctx);
-				}
-				if (set == AEX_FREE) {
-					/* 0 */
+		for (int c = 0; c < AEX_DEG; c++) {
+			rs_from_fmpz(sl, l0inv.c[c]);
+			li[0][c] = sl.s[0];
+			li[1][c] = sl.s[1];
+		}
+		for (size_t k = 0; k < V; k++) {
+			for (int c = 0; c < AEX_DEG; c++) {
+				rp_from_fmpz(fr[c], f[k][c], ctx);
+			}
+			for (size_t l = 0; l < N; l++) {
+				const aex_set_t set = aex_set_at(k, l);
+
+				for (size_t cm = 0; cm < 2; cm++) {
+					const uint64_t p = nr.p[cm];
+					uint64_t fv[AEX_DEG], cub[AEX_DEG], t[AEX_DEG];
+
 					for (int i = 0; i < AEX_DEG; i++) {
-						fmpz_zero(cub.c[i]);
+						fv[i] = fr[i].r[cm * N + l];
 					}
-				} else if (set == AEX_ZERO) {
-					/* f */
-					gr_set(cub, fv);
-				} else if (set == AEX_SGN) {
-					/* (f - 1)(f + 1) */
-					gr_sub(cub, fv, one, ctx);
-					gr_add(t, fv, one, ctx);
-					gr_mul(cub, cub, t, ctx);
-				} else {
-					/* f (f - 1), and one more factor for the ternary set */
-					gr_sub(cub, fv, one, ctx);
-					gr_mul(cub, cub, fv, ctx);
-					if (set == AEX_TER) {
-						gr_add(t, fv, one, ctx);
-						gr_mul(cub, cub, t, ctx);
+					if (set == AEX_FREE) {
+						/* 0 */
+						for (int i = 0; i < AEX_DEG; i++) cub[i] = 0;
+					} else if (set == AEX_ZERO) {
+						/* f */
+						for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i];
+					} else if (set == AEX_SGN) {
+						/* (f - 1)(f + 1) */
+						for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i], t[i] = fv[i];
+						cub[0] = rq_sub(cub[0], 1, p);
+						t[0] = rs_add(t[0], 1, p);
+						grq_mul(cub, cub, t, p);
+					} else {
+						/* f (f - 1), and one more factor for the ternary set */
+						for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i];
+						cub[0] = rq_sub(cub[0], 1, p);
+						grq_mul(cub, cub, fv, p);
+						if (set == AEX_TER) {
+							for (int i = 0; i < AEX_DEG; i++) t[i] = fv[i];
+							t[0] = rs_add(t[0], 1, p);
+							grq_mul(cub, cub, t, p);
+						}
 					}
-				}
-				gr_mul(cub, cub, l0inv, ctx);
-				for (int i = 0; i < AEX_DEG; i++) {
-					fmpz_mod_poly_set_coeff_fmpz(g[i], l, cub.c[i], ctx);
+					grq_mul(cub, cub, li[cm], p);
+					for (int i = 0; i < AEX_DEG; i++) {
+						gres[i].r[cm * N + l] = cub[i];
+					}
 				}
 			}
 			for (int c = 0; c < AEX_DEG; c++) {
 				gr_comp(rc, rf, c);
-				aex_encode(lhs_f[k * AEX_DEG + c], f[k][c], g[c], rc, ctx);
+				aex_encode_res(lhs_f[k * AEX_DEG + c], fr[c].r, gres[c].r, rc);
 				gr_comp(rc, rh, c);
 				aex_encode(lhs_h[k * AEX_DEG + c], h[0][k][c], h[1][k][c], rc, ctx);
 			}
 		}
+		delete[] fr;
+		delete[] gres;
 	}
 
 	/* The column checks, in residues: every scalar below is fixed for the
@@ -1200,8 +1252,7 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 		delete[] sbe;
 	}
 
-	gr_clear(l0); gr_clear(l0inv); gr_clear(one); gr_clear(fv);
-	gr_clear(cub); gr_clear(t);
+	gr_clear(l0); gr_clear(l0inv);
 	for (int i = 0; i < 3; i++) {
 		gr_clear(lpow[i]);
 	}
@@ -1212,9 +1263,6 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 		for (size_t j = 0; j < 3; j++) {
 			gr_clear(wt[i][j]);
 		}
-	}
-	for (int i = 0; i < AEX_DEG; i++) {
-		fmpz_mod_poly_clear(g[i], ctx);
 	}
 	_fmpz_vec_clear(rc, ETA);
 	delete[]lev;
@@ -2516,6 +2564,48 @@ static void test(flint_rand_t rand) {
 				ok &= aex_mul(a, b, p) == (aex_u64) ((__uint128_t) a * b % p);
 			}
 		}
+		TEST_ASSERT(ok, end);
+	} TEST_END;
+
+	TEST_ONCE("GR multiplication per prime agrees with gr_mul") {
+		/* grq_mul on each prime's residues against gr_mul over Z_q, at
+		 * random elements and at ones whose coordinates are all q - 1. */
+		gr_t ga, gb, gc;
+		fmpz_t Q;
+		aex_rscalar sc;
+		int ok = 1;
+
+		gr_init(ga); gr_init(gb); gr_init(gc);
+		fmpz_init(Q);
+		fmpz_set_mpz(Q, params::poly_q::moduli_product());
+		for (int k = 0; k < 200 && ok; k++) {
+			for (int i = 0; i < AEX_DEG; i++) {
+				if (k == 0) {
+					fmpz_sub_ui(ga.c[i], Q, 1);
+					fmpz_sub_ui(gb.c[i], Q, 1);
+				} else {
+					fmpz_randm(ga.c[i], rand, Q);
+					fmpz_randm(gb.c[i], rand, Q);
+				}
+			}
+			gr_mul(gc, ga, gb, ctx_q);
+			for (size_t cm = 0; cm < 2; cm++) {
+				uint64_t ra[AEX_DEG], rb[AEX_DEG], rc_[AEX_DEG];
+				const uint64_t p = params::poly_q::get_modulus(cm);
+
+				for (int i = 0; i < AEX_DEG; i++) {
+					rs_from_fmpz(sc, ga.c[i]); ra[i] = sc.s[cm];
+					rs_from_fmpz(sc, gb.c[i]); rb[i] = sc.s[cm];
+				}
+				grq_mul(rc_, ra, rb, p);
+				for (int i = 0; i < AEX_DEG; i++) {
+					rs_from_fmpz(sc, gc.c[i]);
+					ok &= rc_[i] == sc.s[cm];
+				}
+			}
+		}
+		gr_clear(ga); gr_clear(gb); gr_clear(gc);
+		fmpz_clear(Q);
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
