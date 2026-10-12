@@ -145,6 +145,32 @@ static inline int64_t cosac_comp(const unsigned char *r, const __float128 x)
 	return (res == COSAC_FLOAT128_ONE) || ((r_mantissa < res_mantissa) && (r_exponent < (1ULL << res_exponent)));
 }
 
+/* The sampler's randomness, drawn from fastrandombytes() 8 KiB at a time and
+ * handed out from there: a sample takes two or three draws of 13 to 42 bytes,
+ * and a draw that small costs several times as much a byte as a large one,
+ * the AES stream doing a block of work per call however few bytes it returns.
+ * The bytes are the same stream's, in the same order. The buffer is refilled
+ * only from inside sample_z(), after its check that the stream is not keyed
+ * with a public seed, so it never holds public bytes. */
+#define SAMPLER_BUF 8192
+static unsigned char sampler_buf[SAMPLER_BUF];
+static size_t sampler_pos = SAMPLER_BUF;
+
+static inline void sampler_bytes(unsigned char *out, size_t n)
+{
+	if (n > SAMPLER_BUF - sampler_pos) {
+		size_t k = SAMPLER_BUF - sampler_pos;
+
+		memcpy(out, sampler_buf + sampler_pos, k);
+		out += k;
+		n -= k;
+		fastrandombytes(sampler_buf, SAMPLER_BUF);
+		sampler_pos = 0;
+	}
+	memcpy(out, sampler_buf + sampler_pos, n);
+	sampler_pos += n;
+}
+
 /* New COSAC sampler.
  * This is the sampling algorithm from:
  * Shuo Sun, Yongbin Zhou, Yunfeng Ji, Rui Zhang, & Yang Tao. (2021). Generic, Efficient and Isochronous Gaussian Sampling over the Integers.
@@ -190,7 +216,7 @@ __int128 sample_z(const __float128 center, const __float128 sigma)
 		abort();
 	}
 
-	fastrandombytes(r, COMP_ENTRY_SIZE);
+	sampler_bytes(r, COMP_ENTRY_SIZE);
 
 	if (cosac_comp(r, rc))
 	{
@@ -199,7 +225,7 @@ __int128 sample_z(const __float128 center, const __float128 sigma)
 
 	while (1)
 	{
-		fastrandombytes(r, DISCRETE_BYTES);
+		sampler_bytes(r, DISCRETE_BYTES);
 
 		for (i = 0; i < 2; i++, head++)
 		{
@@ -207,7 +233,7 @@ __int128 sample_z(const __float128 center, const __float128 sigma)
 			{
 				head = 0;
 
-				fastrandombytes((unsigned char *)r_bm, BOX_MULLER_BYTES);
+				sampler_bytes((unsigned char *)r_bm, BOX_MULLER_BYTES);
 
 				/* From r_bm, drawn for this purpose; reading r reused the
 				 * acceptance tests' coins (see sample_z_small.c). */
