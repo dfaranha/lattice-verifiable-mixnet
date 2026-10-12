@@ -534,11 +534,14 @@ static void aex_encode_res(aex_code_t & out, const uint64_t *in0,
 	aex_finish(out);
 }
 
-/* p's residues, which leaves p in the NTT domain it came in. */
-static void rp_from_nfl(aex_rpoly & out, params::poly_q & p) {
-	p.invntt_pow_invphi();
-	memcpy(out.r, p.data(), sizeof(out.r));
-	p.ntt_pow_phi();
+/* p's residues in the coefficient domain, p being in the NTT domain: from
+ * a copy, which spares transforming p back afterwards. */
+static void rp_from_nfl(aex_rpoly & out, const params::poly_q & p) {
+	static params::poly_q t;
+
+	t = p;
+	t.invntt_pow_invphi();
+	memcpy(out.r, t.data(), sizeof(out.r));
 }
 
 /* A scalar of Z_q as its residues, with Shoup's quotients for multiplying by
