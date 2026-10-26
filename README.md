@@ -100,8 +100,11 @@ also checks that a mix server that changes an output, or replaces a ballot with
 one of its own, is rejected. What this branch does not implement is not in it:
 the voters' ballot proofs, the proof that each re-encryption adds an encryption
 of zero with short randomness, and the trustees' proofs of correct decryption.
-Build it at a small `MSGS`, for example `make CONFIG=-DMSGS=4 voting`; at 4 it
-takes about half a minute.
+The election size is the build-time `MSGS`: `make CONFIG=-DMSGS=25 voting` runs
+the same election as the `voting` of lattice-voting-ctrsa21, 25 voters and 8
+candidates, in about two and a quarter minutes and half a GiB; at `MSGS = 4` it
+takes about half a minute. `-DNCAND=<n>` sets the number of candidates and
+`-DMIXERS=<n>` the number of mix servers.
 
 ### Memory requirements
 

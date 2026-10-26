@@ -47,7 +47,9 @@ void bgv_comb(params::poly_p & m, bgvenc_t & c, params::poly_q t[],
 #define MIXERS 		4
 #endif
 /* Candidates: a vote for candidate j is X^j. */
-#define NCAND 		8
+#ifndef NCAND
+#define NCAND 	8
+#endif
 
 /* A uniform integer in [0, n), from the operating system. */
 static uint32_t uniform_below(uint32_t n) {
