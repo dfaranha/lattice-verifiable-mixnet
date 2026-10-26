@@ -5,6 +5,7 @@ bgv
 shuffle
 pismall
 pibnd
+voting
 *.o
 *.d
 

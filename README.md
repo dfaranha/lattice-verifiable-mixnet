@@ -85,9 +85,23 @@ $ make test
 
 ### Building and running the code
 
-For building the actual code, run `make` inside the source directory. This will build the binaries for `bdlop`, `bgv`, `pismall`, `pibnd` and `shuffle` to test and benchmark different modules of the code.
+For building the actual code, run `make` inside the source directory. This will build the binaries for `bdlop`, `bgv`, `pismall`, `pibnd` and `shuffle` to test and benchmark different modules of the code, and `voting`, which runs the mix-net end to end.
 
 The binaries respectively implement the BDLOP commitment scheme, the distributed BGV cryptosystem, the two zero-knowledge proofs and the shuffle itself. Tests and benchmarks are included for each of them, such that they can be used independently. Each binary exits non-zero if any of its tests failed, so a run can be checked without reading the output.
+
+`voting` puts them together, with `MSGS` voters, 4 mix servers and `PARTIES`
+trustees: the trustees share a BGV key; each voter encrypts a vote for one of 8
+candidates; each mix server in turn re-encrypts every ciphertext with a fresh
+encryption of zero, commits to that encryption of zero and adds the input into
+the commitment, which makes it a commitment to the re-encryption, and publishes
+the re-encryptions permuted with a proof of shuffle over those commitments; and
+the trustees' partial decryptions of the last list are combined and tallied. It
+also checks that a mix server that changes an output, or replaces a ballot with
+one of its own, is rejected. What this branch does not implement is not in it:
+the voters' ballot proofs, the proof that each re-encryption adds an encryption
+of zero with short randomness, and the trustees' proofs of correct decryption.
+Build it at a small `MSGS`, for example `make CONFIG=-DMSGS=4 voting`; at 4 it
+takes about half a minute.
 
 ### Memory requirements
 
@@ -135,7 +149,7 @@ Leave `CONFIG` empty to build the sizes used for the paper's benchmarks.
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` builds every binary and runs its tests on each push and pull request, at reduced parameters so that a run fits in a runner: `TAU = 8` for the proofs, `MSGS = 4` and `MSGS = 5` for the shuffle, the latter to cover the odd-`MSGS` branch in the prover. A second, non-blocking job repeats the smaller binaries and the shuffle under AddressSanitizer and UBSan.
+`.github/workflows/ci.yml` builds every binary and runs its tests on each push and pull request, at reduced parameters so that a run fits in a runner: `TAU = 8` for the proofs, `MSGS = 4` and `MSGS = 5` for the shuffle and `voting`, the latter to cover the odd-`MSGS` branch in the prover. A second, non-blocking job repeats the smaller binaries and the shuffle under AddressSanitizer and UBSan.
 
 The workflow builds FLINT from source and caches it, rather than installing it from `apt`: no current runner image ships a new enough version, since Ubuntu 22.04 packages FLINT 2.8.4 and 24.04 packages 3.0.1, both below the 3.1 this code requires.
 

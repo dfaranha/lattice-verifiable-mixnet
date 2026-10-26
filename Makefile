@@ -26,7 +26,7 @@ LIBS     = deps/libnfllib_static.a -lgmp -lmpfr -lquadmath
 FLINT    = -L deps/ -lflint
 
 OBJ      = obj
-BIN      = bdlop bgv shuffle pismall pibnd
+BIN      = bdlop bgv shuffle pismall pibnd voting
 
 # The objects bake MSGS, SIZE and the amortization parameters in, and make has
 # no way to notice that CONFIG changed since they were built: it compares
@@ -110,6 +110,16 @@ shuffle: src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/pismall-const.o \
 		$(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o $(OBJ)/sample_z_large.o \
 		$(COMMON) $(BLAKE3) $(STAMP)
 	$(CPP) $(CFLAGS) -DMAIN src/shuffle.cpp $(OBJ)/bdlop.o \
+		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
+		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
+
+# The mix-net end to end: voters, mix servers and trustees. It includes
+# src/shuffle.cpp, without MAIN, for the proof of shuffle, so it links what
+# shuffle links plus the distributed BGV of src/bgv.cpp.
+voting: src/voting.cpp src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/bgv.o \
+		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
+		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) $(STAMP)
+	$(CPP) $(CFLAGS) src/voting.cpp $(OBJ)/bdlop.o $(OBJ)/bgv.o \
 		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
 		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
 
