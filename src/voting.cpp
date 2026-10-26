@@ -176,24 +176,36 @@ static void test() {
 	vector < params::poly_q > sigma(MSGS);
 	int votes[MSGS], tally[MSGS], count[NCAND] = { };
 	int commit_ok = 1, shuffle_ok = 1, valid = 1;
+	/* Wall-clock times of the phases, reported at the end; the attack tests
+	 * below run the shuffle again and are not counted. */
+	double t0, t_key, t_vote, t_mix = 0, t_prove, t_verify, t_shared, t_dec;
 
+	t0 = shuffle_now();
 	bdlop_keygen(key);
 	bgv_keygen(pk, sk);
 	bgv_keyshare(share, PARTIES, sk);
+	t_key = shuffle_now() - t0;
 
 	/* Voting. The votes are the test oracle, kept apart from what the mix
 	 * servers and the trustees use. */
+	t0 = shuffle_now();
 	for (int i = 0; i < MSGS; i++) {
 		votes[i] = uniform_below(NCAND);
 		make_vote(vote[i], votes[i]);
 		bgv_encrypt(list[0][i], pk, vote[i]);
 	}
+	t_vote = shuffle_now() - t0;
 
 	/* Mixing: server s takes list[s] and publishes list[s + 1]. */
 	for (int s = 0; s < MIXERS; s++) {
+		t0 = shuffle_now();
 		commit_ok &= mix(list[s + 1], list[s], m, _m, sigma, pk, key);
+		t_mix += shuffle_now() - t0;
 		shuffle_ok &= run(m, _m, sigma, key);
 	}
+	t_prove = shuffle_t_prove;
+	t_verify = shuffle_t_verify;
+	t_shared = shuffle_t_shared;
 
 	TEST_ONCE("every commitment to a re-encryption is the homomorphic one") {
 		TEST_ASSERT(commit_ok, end);
@@ -204,6 +216,7 @@ static void test() {
 	} TEST_END;
 
 	/* Decryption: the trustees' partial decryptions, combined. */
+	t0 = shuffle_now();
 	for (int i = 0; i < MSGS; i++) {
 		for (int j = 0; j < PARTIES; j++) {
 			bgv_distdec(t[j], list[MIXERS][i], share[j]);
@@ -212,6 +225,7 @@ static void test() {
 		tally[i] = candidate(plain[i]);
 		valid &= tally[i] >= 0;
 	}
+	t_dec = shuffle_now() - t0;
 
 	TEST_ONCE("the decrypted ballots are valid votes") {
 		TEST_ASSERT(valid, end);
@@ -260,6 +274,14 @@ static void test() {
 		printf(" %d", count[j]);
 	}
 	printf("\n");
+	printf("    timing, wall clock: key generation %.2f s; voting %.2f s, "
+			"%.2f ms per ballot\n", t_key, t_vote, 1e3 * t_vote / MSGS);
+	printf("    timing, per mix server: re-encryption and commitments %.2f s, "
+			"prove %.2f s, verify %.2f s, both (compression) %.2f s\n",
+			t_mix / MIXERS, t_prove / MIXERS, t_verify / MIXERS,
+			t_shared / MIXERS);
+	printf("    timing: decryption %.2f s, %.2f ms per ballot (%d trustees)\n",
+			t_dec, 1e3 * t_dec / MSGS, PARTIES);
 
   end:
 	return;

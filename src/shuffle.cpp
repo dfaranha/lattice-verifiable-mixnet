@@ -10,6 +10,19 @@
 #include "pismall.h"
 #include "serial.h"
 #include "pibnd.h"
+#include <time.h>
+
+/* Wall-clock time run() spends proving, verifying, and on what both parties
+ * compute (each pass's rho-compression), summed over its calls; voting.cpp
+ * reports them per mix server. */
+static double shuffle_t_prove, shuffle_t_verify, shuffle_t_shared;
+
+static double shuffle_now(void) {
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec + t.tv_nsec / 1e9;
+}
 
 /*============================================================================*/
 /* Private definitions                                                        */
@@ -996,6 +1009,7 @@ static int shuffle_respond_verify(params::poly_q y[LIN_REPS][WIDTH],
 		comkey_t & key, comkey_t & pkey, int rep) {
 	params::poly_q coef[3], vcoef[3], th[2], vtau, vmu;
 	int complete = 1;
+	double t0 = shuffle_now(), t1;
 
 	shuffle_factors(ms, _ms, tau, mu);
 	if (!simul_inverse(inv, fb)) {
@@ -1013,10 +1027,14 @@ static int shuffle_respond_verify(params::poly_q y[LIN_REPS][WIDTH],
 		s[i] = s[i] * inv[i];
 	}
 
+	t1 = shuffle_now();
+	shuffle_t_prove += t1 - t0;
 	/* The verifier's own challenges, from the transcript rather than from the
 	 * prover: the sub-proofs about the P_i are not checked here, run() checks
 	 * them once for every pass. */
 	shuffle_chal_hash(vtau, vmu, c, p, _ms, rho, rep);
+	t0 = shuffle_now();
+	shuffle_t_verify += t0 - t1;
 
 	/* Now run \Prod_LIN instances, one for each commitment. */
 	for (size_t l = 0; l < MSGS; l++) {
@@ -1024,9 +1042,13 @@ static int shuffle_respond_verify(params::poly_q y[LIN_REPS][WIDTH],
 		shuffle_commit_rand(_rtmp, seed, l);
 		complete &= lin_prover(y, w, _y, lh[l], c[l], p[l], d[l], coef,
 				key, pkey, r[l], pr[l], _rtmp);
+		t1 = shuffle_now();
+		shuffle_t_prove += t1 - t0;
 		shuffle_coeffs(vcoef, l, s, _ms, vbeta, vtau, vmu);
 		complete &= lin_verifier(y, w, _y, lh[l], c[l], p[l], d[l], vcoef,
 				key, pkey);
+		t0 = shuffle_now();
+		shuffle_t_verify += t0 - t1;
 	}
 
 	return complete;
@@ -1099,6 +1121,7 @@ static int run(vector < vector < params::poly_q >> &m,
 	static params::poly_q beta[SHUFFLE_REPS], vbeta[SHUFFLE_REPS];
 	comkey_t _key;
 	int result = 1, ready, tries = 0;
+	double t0 = shuffle_now(), t1;
 
 	/* The commitments to the sigma_i and the two sub-proofs that place them in D
 	 * are the prover's first message, and they are sent once. Every pass's
@@ -1135,16 +1158,26 @@ static int run(vector < vector < params::poly_q >> &m,
 		}
 	} while (!ready && ++tries < SHUFFLE_TRIES);
 	result &= ready;
+	t1 = shuffle_now();
+	shuffle_t_prove += t1 - t0;
 	result &= pismall_const_verify(cst, key, pcom, MSGS);
 	result &= pibnd_short_verify(bnd, key, pcom, MSGS);
+	t0 = shuffle_now();
+	shuffle_t_verify += t0 - t1;
 
 	/* Twice, because the verifier derives its challenges from the transcript
 	 * rather than taking the prover's word for them; the two must agree. */
 	shuffle_beta_hash(beta, com, _m, pcom, d, tau, mu, rho);
+	t1 = shuffle_now();
+	shuffle_t_prove += t1 - t0;
 	shuffle_beta_hash(vbeta, com, _m, pcom, d, tau, mu, rho);
+	t0 = shuffle_now();
+	shuffle_t_verify += t0 - t1;
 
 	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
+		t0 = shuffle_now();
 		shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
+		shuffle_t_shared += shuffle_now() - t0;
 		result &= shuffle_respond_verify(y, w, _y, lh, &d[rep * MSGS], pcom,
 				pr, rseed[rep], s, cs, ms, _ms, r, beta[rep], vbeta[rep],
 				tau[rep], mu[rep], rho[rep], _key, key, rep);
