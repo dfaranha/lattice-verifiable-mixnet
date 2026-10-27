@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <nfl.hpp>
+#include "zq.hpp"
 
 namespace util {
 /// Helper functions for messages conversion
@@ -56,6 +57,8 @@ template <class P> inline bool is_zero(P const &a) {
 	return true;
 }
 
+/* NFLlib's poly_p below; poly_q and poly_big are zq's, with their own
+ * centred and set_signed further down. */
 /* Centred coefficients without GMP. A coefficient of R_q is stored as one
  * residue per modulus; with one or two moduli below 2^63 its value mod q fits
  * 128 bits, and the CRT that recombines two residues needs one multiplication
@@ -153,6 +156,24 @@ template <class P> inline void centred(__int128 out[], P const &a) {
 			x += (__int128) c.p0 * t;
 		}
 		out[i] = (x > c.half) ? x - c.Q : x;
+	}
+}
+
+/* The same for one prime: a coefficient is its value mod q. */
+template <size_t D> inline void centred(__int128 out[], zq::poly<D> const &a) {
+	for (size_t i = 0; i < D; i++) {
+		const zq::u128 x = a(0, i);
+		out[i] = (x > zq::MODULUS / 2) ? (__int128) x - (__int128) zq::MODULUS : (__int128) x;
+	}
+}
+
+template <size_t D> inline void set_signed(zq::poly<D> &a, const __int128 v[]) {
+	for (size_t i = 0; i < D; i++) {
+		__int128 x = v[i];
+		if (x >= (__int128) zq::MODULUS || x <= -(__int128) zq::MODULUS) {
+			x %= (__int128) zq::MODULUS;
+		}
+		a(0, i) = (zq::u128) (x < 0 ? x + (__int128) zq::MODULUS : x);
 	}
 }
 

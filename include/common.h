@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <nfl.hpp>
+#include "zq.hpp"
 
 #include "bench.h"
 #include <sys/random.h>
@@ -18,11 +19,12 @@ using namespace std;
 /* Weight of each of the two ternary vectors a challenge is the difference of.
  * The paper takes 36, which is what its sigma_C is priced from. Nothing here
  * needs it that large: SOUNDNESS.md section 7 shows the linear proof is worth
- * 1 / p_min whatever the challenge set is, since the differences can be zero
- * divisors, so the set only has to be too big to guess -- at 9 it still has
- * about 2^88 elements against the 2^44 that would matter. What the weight does
- * buy is the size of what the masking has to cover, ||beta r|| growing as its
- * square root, and so SIGMA_C and every published response with it. */
+ * about 1 / q whatever the challenge set is, since nothing makes the
+ * differences invertible in a fully split ring, so the set only has to be too
+ * big to guess -- at 9 it has more than 2^98 elements against the 2^87 that
+ * would matter. What the weight does buy is the size of what the masking has
+ * to cover, ||beta r|| growing as its square root, and so SIGMA_C and every
+ * published response with it. */
 #define NONZERO     9
 /* Security level to attain. */
 #define LEVEL       128
@@ -44,12 +46,12 @@ using namespace std;
 #ifndef MSGS
 #define MSGS        2
 #endif
-/* Large modulus. Not named here: it is the product of the RNS basis below,
- * params::poly_q::moduli_product(). Composite (two 44-bit primes), 88 bits,
- * with each factor = 1 mod 2N as Table 1 requires and 2^14 | p-1, so Z_q
- * supports the length-16384 NTT the AEx encoding needs. Each factor is also
- * 2 mod 3, which keeps Y^2 - 3 irreducible modulo both and so lets pismall
- * draw its challenges from the quadratic extension; see AEX_NR there. */
+/* Large modulus. Not named here: it is params::poly_q::moduli_product(), the
+ * prime q = 2^88 - 25 2^16 + 1 of include/zq.hpp. q = 1 mod 2^16, so it is
+ * 1 mod 2N as Table 1 requires and Z_q supports the length-16384 NTT the AEx
+ * encoding needs. 5 is a non-residue, which keeps Y^2 - 5 irreducible and so
+ * lets pismall draw its challenges from the quadratic extension; see AEX_NR
+ * there. */
 /* Small modulus. */
 #define PRIMEP      2
 /* Degree of the irreducible polynomial. */
@@ -73,20 +75,22 @@ using namespace std;
 
 namespace params {
     using poly_p = nfl::poly_from_modulus<uint32_t, DEGREE, 30>;
-    /* Two 44-bit RNS moduli, so q is 88 bits. The paper analyses 78, but its
-     * bound on the slack of Pi_BND drops a factor that proof's own correctness
-     * analysis requires, and with it restored 2^78 is about five bits short of
-     * B_Dec + B_DDec < q/2; see SOUNDNESS.md section 8. Two moduli still, so a
-     * ring element is the same 64 KiB it was. */
-    using poly_q = nfl::poly_from_modulus<uint64_t, DEGREE, 88>;
-    using poly_big = nfl::poly_from_modulus<uint64_t, 4 * DEGREE, 88>;
+    /* One 88-bit prime, q = 2^88 - 25 * 2^16 + 1 (include/zq.hpp), so R_q
+     * has no zero divisors from a split modulus. The paper analyses 78, but
+     * its bound on the slack of Pi_BND drops a factor that proof's own
+     * correctness analysis requires, and with it restored 2^78 is about five
+     * bits short of B_Dec + B_DDec < q/2; see SOUNDNESS.md section 8. A
+     * coefficient is 16 bytes, so a ring element is the same 64 KiB it was. */
+    using poly_q = zq::poly<DEGREE>;
+    using poly_big = zq::poly<4 * DEGREE>;
 }
 
 /* The hashes in shuffle.cpp, pismall.cpp and pibnd.cpp absorb a ring element as
- * 16 * DEGREE bytes, at 38 call sites. That is the whole element only
- * while it is two 64-bit residues a coefficient; with another number of moduli
- * every challenge would leave part of each element out, which is the bug
- * ntru_voting_impl's SOUNDNESS.md records three times. */
+ * 16 * DEGREE bytes, at 38 call sites. That is the whole element only while a
+ * coefficient is 16 bytes, two 64-bit residues under NFLlib and one
+ * unsigned __int128 under zq; with any other layout every challenge would
+ * leave part of each element out, which is the bug ntru_voting_impl's
+ * SOUNDNESS.md records three times. */
 static_assert(16 * DEGREE == sizeof(params::poly_q::value_type) *
               params::poly_q::nmoduli * params::poly_q::degree,
               "the hashes absorb 16 * DEGREE bytes a ring element");

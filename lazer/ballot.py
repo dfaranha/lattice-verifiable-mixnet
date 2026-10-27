@@ -1,8 +1,8 @@
 from math import sqrt
 vname = "lvm_ballot"
 # The voter's proof of a well-formed ballot (src/ballot.c), for LaZer's
-# lin-codegen.sage. The statement over R_q, q the BGV modulus (two 44-bit
-# primes) and degree 4096, with p = 2:
+# lin-codegen.sage. The statement over R_q, q the BGV modulus (the prime
+# 2^88 - 25 2^16 + 1) and degree 4096, with p = 2:
 #
 #   u = a r + 2 e1
 #   v = b r + 2 e2 + m
@@ -11,7 +11,7 @@ vname = "lvm_ballot"
 # with witness w = (r, e1, e2, m, u'): (r, e1, e2) short, m binary and
 # ||u'|| <= 1, so that m is X^j or 0, a vote for one candidate or none.
 deg   = 4096
-mod   = 309483570976529976228052993
+mod   = 309485009821345068723142657
 dim   = (3, 5)
 wpart = [[0, 1, 2], [3], [4]]
 # ZO_dist: each coefficient of r, e1, e2 is +-1 with probability 1/2, so

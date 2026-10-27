@@ -100,21 +100,20 @@ static double shuffle_now(void) {
  */
 
 /* Differences of distinct g(i) are non-zero integers below MSGS, and they have
- * to stay coprime to q for Lemma 5, so MSGS must not reach the smaller prime of
- * the basis. That is a far weaker bound than the ring degree, which is what the
- * monomial encoding was limited by. */
-static_assert((unsigned long long) MSGS <
-		(nfl::params < uint64_t >::P[0] < nfl::params < uint64_t >::P[1] ?
-		 nfl::params < uint64_t >::P[0] : nfl::params < uint64_t >::P[1]),
-		"MSGS reaches the smallest prime of the basis, so g(i) - g(j) can be a zero divisor");
+ * to stay coprime to q for Lemma 5, so MSGS must stay below the prime q. That
+ * is a far weaker bound than the ring degree, which is what the monomial
+ * encoding was limited by. */
+static_assert((zq::u128) MSGS < zq::MODULUS,
+		"MSGS reaches q, so g(i) - g(j) can be a zero divisor");
 
-/* One pass of the product argument has soundness error at most MSGS / p_min.
+/* One pass of the product argument has soundness error at most MSGS / q.
  * The challenges are uniform over R_q, which in a ring this split has to be
  * analysed slot by slot: if the identity fails in some slot, the check passes
  * only if the challenge hits a root of a degree-MSGS polynomial in that slot.
- * That is about 2^-34 at MSGS = 1000, far short of the LEVEL bits the
- * parameters are otherwise chosen for, so the argument is repeated with
- * independent challenges and the verifier requires every pass.
+ * That is about 2^-77 at MSGS = 1000. With two 44-bit primes it was 2^-34, the
+ * smaller prime's; now it is still short of the LEVEL bits the parameters are
+ * otherwise chosen for, so the argument is repeated with independent
+ * challenges and the verifier requires every pass.
  *
  * Those errors multiply only if a prover who fails a pass has to start over.
  * tau and mu are hashed from the P_i, which run() sends once for every pass,
@@ -125,31 +124,34 @@ static constexpr int shuffle_ilog2(unsigned long long x) {
 	return x <= 1 ? 0 : 1 + shuffle_ilog2(x >> 1);
 }
 
-/* The smaller prime of the RNS basis. A challenge is a uniform element of R_q
- * and the ring is fully split, so what a false statement needs is a challenge
- * vanishing in one slot, which is 1 / p_min. */
-static constexpr unsigned long long P_MIN =
-		nfl::params < uint64_t >::P[0] < nfl::params < uint64_t >::P[1] ?
-		nfl::params < uint64_t >::P[0] : nfl::params < uint64_t >::P[1];
+/* floor(log2(q)). A challenge is a uniform element of R_q and the ring is
+ * fully split into N copies of Z_q, so what a false statement needs is a
+ * challenge vanishing in one slot, which is 1 / q. */
+static constexpr int Q_LOG2 = 87;
+static_assert(((zq::u128) 1 << Q_LOG2) <= zq::MODULUS && zq::MODULUS < ((zq::u128) 1 << (Q_LOG2 + 1)),
+		"Q_LOG2 is floor(log2(q))");
 
-/* Bits gained per pass, floor(log2(p_min)) - ceil(log2(MSGS)). */
+/* Bits gained per pass, floor(log2(q)) - ceil(log2(MSGS)). */
 static constexpr int SHUFFLE_BITS =
-		shuffle_ilog2(P_MIN) - shuffle_ilog2(2 * (unsigned long long) MSGS - 1);
-static_assert(SHUFFLE_BITS > 0, "MSGS is too large for the RNS basis");
+		Q_LOG2 - shuffle_ilog2(2 * (unsigned long long) MSGS - 1);
+static_assert(SHUFFLE_BITS > 0, "MSGS is too large for q");
 static constexpr int SHUFFLE_REPS = (LEVEL + SHUFFLE_BITS - 1) / SHUFFLE_BITS;
 
-/* How many times each linear proof is run. Its challenge beta is uniform over
- * R_q and its final check reduces to beta L = 0 for the residual L of the
- * relation, so a prover whose committed messages violate it passes exactly when
- * beta vanishes in a slot where L does not: 1 / p_min, and no more, because the
- * challenge set has zero divisors -- see SOUNDNESS.md section 7. The LIN_REPS
+/* How many times each linear proof is run. Its final check reduces to
+ * beta L = 0 for the residual L of the relation, so a prover whose committed
+ * messages violate it passes exactly when beta vanishes in a slot where L does
+ * not. beta is a sparse ternary difference, not uniform, and in a fully split
+ * ring nothing proves such differences invertible -- see SOUNDNESS.md section
+ * 7 -- so the 1 / q a slot is a heuristic: no zero divisor of that shape is
+ * known modulo this q, where finding one by meet-in-the-middle costs about
+ * 2^44, against seconds modulo the 44-bit primes it replaced. The LIN_REPS
  * challenges come from one hash of all LIN_REPS first messages, so re-rolling
  * any of them re-rolls all, and a forged relation has to survive every one of
- * them at once: (1 / p_min)^LIN_REPS, which is what makes the repetitions
+ * them at once: (1 / q)^LIN_REPS, which is what makes the repetitions
  * multiply where those of the pass do not. See section 8.1. */
-static constexpr int LIN_REPS =
-		(LEVEL + shuffle_ilog2(P_MIN) - 1) / shuffle_ilog2(P_MIN);
+static constexpr int LIN_REPS = (LEVEL + Q_LOG2 - 1) / Q_LOG2;
 static_assert(LIN_REPS > 1, "one linear proof cannot reach LEVEL on its own");
+static_assert(SHUFFLE_REPS == 2 && LIN_REPS == 2, "two of each at q = 2^88 - 25 2^16 + 1");
 
 /* A params::poly_q is 64 KiB, so anything dimensioned by MSGS is far too large
  * to be a local variable: at MSGS = 1000 the buffers below add up to several
@@ -342,10 +344,9 @@ static void lin_hash(uint8_t hash[BLAKE3_OUT_LEN], comkey_t & key,
 	blake3_hasher_finalize(&hasher, hash, BLAKE3_OUT_LEN);
 }
 
-/* The LIN_REPS challenges the hash above commits to. The challenge set is not
- * free of zero divisors in this ring -- the test "KNOWN GAP: a challenge
- * difference can be a zero divisor" exhibits one -- so one of them is worth
- * only about 1 / p_min, and it is the repetitions that carry the proof to
+/* The LIN_REPS challenges the hash above commits to. Nothing makes the
+ * challenge set free of zero divisors in this ring, so one of them is worth
+ * about 1 / q at best, and it is the repetitions that carry the proof to
  * LEVEL. See SOUNDNESS.md, sections 7 and 7.1. */
 static void lin_chal(params::poly_q beta[LIN_REPS],
 		const uint8_t hash[BLAKE3_OUT_LEN]) {
@@ -356,58 +357,34 @@ static void lin_chal(params::poly_q beta[LIN_REPS],
 	nfl::fastrandombytes_reseed();
 }
 
-/* a^-1 mod pm, by the extended Euclidean algorithm. Every modulus of the basis
- * is 39 bits, so the Bezout coefficients stay well inside int64_t. */
-static uint64_t residue_inverse(uint64_t a, uint64_t pm) {
-	int64_t t = 0, t1 = 1, r = (int64_t) pm, r1 = (int64_t) a, quo, tmp;
-
-	while (r1 != 0) {
-		quo = r / r1;
-		tmp = t - quo * t1;
-		t = t1;
-		t1 = tmp;
-		tmp = r - quo * r1;
-		r = r1;
-		r1 = tmp;
-	}
-	return (uint64_t) (t < 0 ? t + (int64_t) pm : t);
-}
-
-/* Inverse in R_q. In the NTT domain R_q is a product of N * nmoduli copies of
- * Z_{p_cm}, so this is just a residue-wise inversion. Both arguments are in
- * that domain and may alias. Each p_cm is prime, so p is invertible exactly
- * when no residue is zero; otherwise return 0 and leave inv alone. */
+/* Inverse in R_q. In the NTT domain R_q is a product of N copies of Z_q, so
+ * this is just a slot-wise inversion. Both arguments are in that domain and
+ * may alias. q is prime, so p is invertible exactly when no slot is zero;
+ * otherwise return 0 and leave inv alone. */
 static int poly_inverse(params::poly_q & inv, const params::poly_q & p) {
-	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-		for (size_t i = 0; i < params::poly_q::degree; i++) {
-			if (p(cm, i) == 0) {
-				return 0;
-			}
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		if (p(0, i) == 0) {
+			return 0;
 		}
 	}
 
-	/* Montgomery's trick, modulus by modulus: the prefix products of the
-	 * residues, one inversion of their product, and a pass back that peels
-	 * off one residue at a time. Three multiplications a residue and one
-	 * extended Euclid, where there was a Euclid per residue. Each residue of
-	 * p is read before inv's is written, so the two may alias. */
-	nfl::ops::mulmod < uint64_t, nfl::simd::serial > mulmod;
-	uint64_t pre[params::poly_q::degree];
+	/* Montgomery's trick: the prefix products of the slots, one inversion of
+	 * their product, and a pass back that peels off one slot at a time. Three
+	 * multiplications a slot and one exponentiation. Each slot of p is read
+	 * before inv's is written, so the two may alias. */
+	static zq::u128 pre[params::poly_q::degree];
+	zq::u128 acc = 1, r;
 
-	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-		uint64_t pm = nfl::params < uint64_t >::P[cm], acc = 1, r;
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		pre[i] = acc;
+		acc = zq::mul(acc, p(0, i));
+	}
+	r = zq::inv(acc);
+	for (size_t i = params::poly_q::degree; i-- > 0;) {
+		const zq::u128 pi = p(0, i);
 
-		for (size_t i = 0; i < params::poly_q::degree; i++) {
-			pre[i] = acc;
-			acc = mulmod(acc, p(cm, i), cm);
-		}
-		r = residue_inverse(acc, pm);
-		for (size_t i = params::poly_q::degree; i-- > 0;) {
-			const uint64_t pi = p(cm, i);
-
-			inv(cm, i) = mulmod(r, pre[i], cm);
-			r = mulmod(r, pi, cm);
-		}
+		inv(0, i) = zq::mul(r, pre[i]);
+		r = zq::mul(r, pi);
 	}
 	return 1;
 }
@@ -426,9 +403,9 @@ static int simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
 
 	w = inv[MSGS - 1];
 	/* The b_i behave like uniform elements of R_q, so this fails when one of
-	 * the 2N NTT residues of their product is zero: about 2N MSGS / p_min,
-	 * which is 2^-21 a pass at MSGS = 1000 and 2^-19 a shuffle. The event
-	 * depends on the sigma_i, so stopping on it would tell an observer
+	 * the N NTT slots of their product is zero: about N MSGS / q, which is
+	 * 2^-66 a pass at MSGS = 1000, where two 44-bit primes made it 2^-21. The
+	 * event depends on the sigma_i, so stopping on it would tell an observer
 	 * something about the permutation. The caller restarts instead, which moves
 	 * tau and mu and so moves the event. See SOUNDNESS.md section 4.2. */
 	ok = poly_inverse(w, w);
@@ -1188,16 +1165,18 @@ static int run(vector < vector < params::poly_q >> &m,
 
 #ifdef MAIN
 /**
- * Swap the residues of the first RNS modulus of two ring elements, leaving the
- * residues of the second untouched. Both elements are in the NTT domain.
+ * Swap the first half of the NTT slots of two ring elements, leaving the other
+ * half untouched. Both elements are in the NTT domain. q is prime, but R_q
+ * still splits into N copies of Z_q, so this is the same mixing the two RNS
+ * moduli made easy.
  *
  * @param[in,out] a			- the first element.
  * @param[in,out] b			- the second element.
  */
 static void crt_swap(params::poly_q & a, params::poly_q & b) {
-	uint64_t t;
+	params::poly_q::value_type t;
 
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
+	for (size_t i = 0; i < params::poly_q::degree / 2; i++) {
 		t = a(0, i);
 		a(0, i) = b(0, i);
 		b(0, i) = t;
@@ -1350,13 +1329,13 @@ static void test() {
 				mpz_mul_2exp(tmp, tmp, 64);
 				mpz_add_ui(tmp, tmp, (uint64_t) m);
 				if (x < 0) mpz_neg(tmp, tmp);
-				for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-					mpz_t r;
-					mpz_init(r);
-					mpz_fdiv_r_ui(r, tmp, params::poly_q::get_modulus(cm));
-					ok &= mpz_cmp_ui(r, c(cm, z)) == 0;
-					mpz_clear(r);
-				}
+				mpz_t r, cz;
+				const uint64_t wz[2] = { (uint64_t) c(0, z), (uint64_t) (c(0, z) >> 64) };
+				mpz_inits(r, cz, nullptr);
+				mpz_fdiv_r(r, tmp, params::poly_q::moduli_product());
+				mpz_import(cz, 2, -1, sizeof(uint64_t), 0, 0, wz);
+				ok &= mpz_cmp(r, cz) == 0;
+				mpz_clears(r, cz, nullptr);
 			}
 		}
 		for (size_t i = 0; i < params::poly_q::degree; i++) {
@@ -1420,17 +1399,18 @@ static void test() {
 		TEST_ASSERT(poly_inverse(t0, ga) == 1, end);
 	} TEST_END;
 
-	TEST_ONCE("a short polynomial can be a zero divisor") {
+	TEST_ONCE("the short zero divisor modulo p_1 is invertible modulo q") {
 		/* The reason D cannot be a ball of small norm here, unlike in a ring
 		 * splitting into few factors. The pattern below is a 0/1 polynomial of
-		 * Hamming weight 19 whose value in one of the NTT slots is zero;
-		 * it was found by meet-in-the-middle over subset sums of the powers of
-		 * one primitive 2N-th root of unity modulo the first RNS prime, which
-		 * costs seconds. Its l_infinity norm is 1, so no norm bound separates
-		 * it from the short elements a ball of small norm would contain, yet it
-		 * is a zero divisor and multiplying by it loses information in that
-		 * slot. A constant of the same norm is a small integer and cannot do
-		 * this, which is what makes g(i) = i work where a ball does not. */
+		 * Hamming weight 19 whose value in one of the NTT slots modulo the
+		 * first of the two 44-bit primes q used to be was zero; it was found
+		 * by meet-in-the-middle over subset sums of the powers of a primitive
+		 * 2N-th root of unity modulo that prime, in seconds. Modulo the single
+		 * prime it is invertible, but R_q still splits into N slots, so such
+		 * elements still exist; the same search costs about 2^44 modulo an
+		 * 88-bit prime. A constant of the same norm is a small integer and
+		 * cannot be one, which is what makes g(i) = i work where a ball does
+		 * not. */
 		const char *bits = "010011110110000101000001110000110001100100010001";
 		array < mpz_t, params::poly_q::degree > coeffs;
 		params::poly_q e, t0;
@@ -1452,27 +1432,22 @@ static void test() {
 			mpz_clear(coeffs[i]);
 		}
 		TEST_ASSERT(weight == 19, end);
-		TEST_ASSERT(poly_inverse(t0, e) == 0, end);
+		TEST_ASSERT(poly_inverse(t0, e) == 1, end);
 	} TEST_END;
 
-	TEST_ONCE("the norm bound leaves room for the CRT argument") {
-		/* Section 6.4 of SOUNDNESS.md concludes that sigma_i is the same
-		 * constant in both CRT components by reading two congruences, one
-		 * modulo each prime of the basis, as equalities over the integers.
-		 * That step needs every quantity in them to stay below p_min / 2:
-		 * twice the norm bound, because extraction compares two transcripts
-		 * whose challenges differ by one, plus the slack of a challenge
-		 * difference times an index g(j). */
+	TEST_ONCE("the norm bound leaves room for the integer argument") {
+		/* Section 6.4 of SOUNDNESS.md reads a congruence modulo q as an
+		 * equality over the integers. That step needs every quantity in it to
+		 * stay below q / 2: twice the norm bound, because extraction compares
+		 * two transcripts whose challenges differ by one, plus the slack of a
+		 * challenge difference times an index g(j). With two primes it was
+		 * each prime, and so p_min / 2. */
 		double slack = 2.0 * pibnd_short_bound() + 2.0 * DEGREE;
-		double pmin = nfl::params < uint64_t >::P[0]
-				< nfl::params < uint64_t >::P[1]
-				? nfl::params < uint64_t >::P[0]
-				: nfl::params < uint64_t >::P[1];
 
-		TEST_ASSERT(slack < pmin / 2.0, end);
+		TEST_ASSERT(slack < (double) zq::MODULUS / 2.0, end);
 	} TEST_END;
 
-	TEST_ONCE("KNOWN GAP: a challenge difference can be a zero divisor") {
+	TEST_ONCE("the challenge zero divisor modulo p_1 is invertible modulo q") {
 		/* The linear proof draws beta with bdlop_sample_chal, the difference of
 		 * two weight-NONZERO ternary vectors, and every argument about it --
 		 * the 2-special-soundness extraction, and the final check, which passes
@@ -1483,10 +1458,11 @@ static void test() {
 		 * The pattern below has 9 coefficients +1 and 9 coefficients -1, so it
 		 * is one of those differences: the +1 positions are one side and the
 		 * -1 positions the other, each of Hamming weight exactly NONZERO, with
-		 * no shared positions needed. It vanishes in one of the NTT
-		 * slots. Found by meet-in-the-middle over subset sums of the powers of
-		 * one primitive 2N-th root modulo the first RNS prime, in seconds, the
-		 * same way as the short zero divisor above. Asserting the bug. */
+		 * no shared positions needed. It vanished in one of the NTT slots
+		 * modulo the first of the two 44-bit primes, found the same way as the
+		 * short zero divisor above. Modulo q it is invertible; that no
+		 * challenge difference is a zero divisor is still not proven, only
+		 * about 2^44 harder to refute. */
 		const char *pat = "000+++++0+00+000+00000+00000--0-00-000-0-00--00-";
 		array < mpz_t, params::poly_q::degree > coeffs;
 		params::poly_q e, t0;
@@ -1514,7 +1490,7 @@ static void test() {
 		/* a legal difference of two weight-NONZERO vectors */
 		TEST_ASSERT(pos == 9 && neg == 9, end);
 		TEST_ASSERT((pos + neg) % 2 == 0 && (pos + neg) / 2 <= NONZERO, end);
-		TEST_ASSERT(poly_inverse(t0, e) == 0, end);
+		TEST_ASSERT(poly_inverse(t0, e) == 1, end);
 	} TEST_END;
 
 	TEST_ONCE("shuffle proof is consistent") {

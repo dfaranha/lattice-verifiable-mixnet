@@ -37,7 +37,7 @@
 static const uint8_t ppseed[32] = "lvm ballot proof, LaZer v1";
 
 static __int128 modulus(void) {
-	return (__int128) BALLOT_Q0 * BALLOT_Q1;
+	return BALLOT_Q;
 }
 
 static __int128 centre(__int128 x) {

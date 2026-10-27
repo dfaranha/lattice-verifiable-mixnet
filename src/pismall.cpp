@@ -47,22 +47,18 @@
 #endif
 
 /* --- GR(q, AEX_DEG), the challenge domain ---------------------------------
- * q is a product of two 44-bit primes, so a challenge drawn from Z_q is only
- * worth deg/p_min: an adversary can make the identity vanish modulo one prime
- * and gamble on the other alone. Drawing it from the quadratic Galois
- * extension restores deg/p_min^AEX_DEG, because AEX_NR is a non-residue modulo
- * both primes and so Y^AEX_DEG - AEX_NR stays irreducible in each CRT
- * component. See the tower below, and SOUNDNESS.md section 5.5 for why the
- * degree is 4 and not 2.
+ * A challenge drawn from Z_q is worth deg/q, which at q = 2^88 is not enough
+ * for one pass; drawing it from the Galois extension of degree AEX_DEG makes
+ * it deg/q^AEX_DEG. Y^AEX_DEG - AEX_NR is irreducible because AEX_NR is a
+ * non-residue modulo q and q = 1 mod 4. See the tower below, and SOUNDNESS.md
+ * section 5.5.
  *
- * 3 is the smallest usable constant, and the RNS basis is picked for it: the
- * NTT needs p = 1 mod 2^21, which forces p = 1 mod 8 and so makes both -1 and
- * 2 squares modulo every candidate prime, leaving Y^2+1 and Y^2-2 reducible.
- * Every modulus in the basis is 2 mod 3, which is what makes 3 a non-residue;
- * the test at the bottom of this file checks that rather than assuming it.
- * Being 3, multiplying by it is two modular additions instead of a multiply
- * and a reduction. */
-#define AEX_NR      3
+ * q = 2^88 - 25 2^16 + 1 is 1 mod 2^16, so -1 and 2 are squares, and 1 mod 3,
+ * which makes 3 a square too. 5 is the smallest non-residue; the test at the
+ * bottom of this file checks that rather than assuming it. Being 5,
+ * multiplying by it is three modular additions instead of a multiply and a
+ * reduction. */
+#define AEX_NR      5
 
 /* Coefficient sets a witness component can be proven to live in. The pointwise
  * identity is the product of (f - v) over the set, so its degree is the size
@@ -100,32 +96,35 @@ static inline aex_set_t aex_set_at(size_t k, size_t l) {
 }
 
 /* r <- AEX_NR * a, by addition. Must double into a temporary: gr_inv calls
- * this in place, and accumulating into r would square the doubling and give
- * 4a instead of 3a. */
+ * this in place, and accumulating into r would compound the doubling. */
 static void gr_mul_nr(fmpz_t r, const fmpz_t a, const fmpz_mod_ctx_t ctx) {
 	fmpz_t d;
 
 	fmpz_init(d);
 	fmpz_mod_add(d, a, a, ctx);
+	fmpz_mod_add(d, d, d, ctx);
 	fmpz_mod_add(r, d, a, ctx);
 	fmpz_clear(d);
 }
 
-/* Degree of the challenge extension over Z_q. Section 6.5: the algebraic term
- * of Lemma 2 is 18 TAU / p_min^AEX_DEG, since an adversary works modulo one
- * prime of the basis and the challenge's slot lives in GR(p, AEX_DEG). At
- * degree 2 that is 2^-74 and a proof needs two passes, which Fiat-Shamir then
- * has to bind; at degree 4 it is 2^-162 and one pass carries the whole thing,
- * which is smaller, faster, and leaves nothing to bind. */
-#define AEX_DEG     4
+/* Degree of the challenge extension over Z_q, 2 or 4. Section 6.5: the
+ * algebraic term of Lemma 2 is 18 TAU / q^AEX_DEG. With q two 44-bit primes it
+ * was 18 TAU / p_min^AEX_DEG, since an adversary worked modulo one of them,
+ * and degree 2 gave only 2^-74, so it was 4. With q prime, degree 2 is
+ * 2^-160 and one pass carries the whole thing; 4 is kept as an option. */
+#ifndef AEX_DEG
+#define AEX_DEG     2
+#endif
+static_assert(AEX_DEG == 2 || AEX_DEG == 4, "the extension is quadratic or quartic");
 
-/* GR(q, AEX_DEG) as a tower: c[0] + c[1] Z over Z_q, and u + v Y over that,
- * with Z^2 = AEX_NR and Y^2 = Z. So Y^4 = AEX_NR, and X^4 - AEX_NR is
- * irreducible modulo every prime of the basis exactly when AEX_NR is a
- * non-residue there and p = 1 mod 4, both of which the test at the bottom of
- * this file checks rather than assumes. The coordinates are in tower order,
- * (1, Z, Y, ZY), which is a basis like any other: everything outside this
- * block is Z_q-linear in them and does not care which. */
+/* GR(q, AEX_DEG) as a tower: c[0] + c[1] Z over Z_q, with Z^2 = AEX_NR, and
+ * at degree 4 u + v Y over that, with Y^2 = Z. So Z^2 = AEX_NR, or Y^4 =
+ * AEX_NR, and X^AEX_DEG - AEX_NR is irreducible modulo q exactly when
+ * AEX_NR is a non-residue and, at degree 4, q = 1 mod 4, both of which the
+ * test at the bottom of this file checks rather than assumes. The coordinates
+ * are in tower order, (1, Z, Y, ZY), which is a basis like any other:
+ * everything outside this block is Z_q-linear in them and does not care
+ * which. */
 typedef struct {
 	fmpz_t c[AEX_DEG];
 } gr_t;
@@ -189,6 +188,10 @@ static void gq_mul_z(fmpz_t r0, fmpz_t r1, const fmpz_t a0, const fmpz_t a1,
  * again: three base multiplies. Safe to alias. */
 static void gr_mul(gr_t & r, const gr_t & a, const gr_t & b,
 		const fmpz_mod_ctx_t ctx) {
+	if (AEX_DEG == 2) {
+		gq_mul(r.c[0], r.c[1], a.c[0], a.c[1], b.c[0], b.c[1], ctx);
+		return;
+	}
 	fmpz_t p0, p1, q0, q1, s0, s1, t0, t1;
 
 	fmpz_init(p0); fmpz_init(p1); fmpz_init(q0); fmpz_init(q1);
@@ -221,18 +224,21 @@ static void gr_mul(gr_t & r, const gr_t & a, const gr_t & b,
  * e1 e1 = NR e0, e1 e2 = e3, e1 e3 = NR e2, e2 e2 = e1, e2 e3 = NR e0 and
  * e3 e3 = NR e1. idx says which basis element the product lands on and nr
  * whether it carries a factor of NR. */
-static const int aex_basis_idx[AEX_DEG][AEX_DEG] = {
+static const int aex_basis_idx4[4][4] = {
 	{0, 1, 2, 3},
 	{1, 0, 3, 2},
 	{2, 3, 1, 0},
 	{3, 2, 0, 1},
 };
-static const int aex_basis_nr[AEX_DEG][AEX_DEG] = {
+static const int aex_basis_nr4[4][4] = {
 	{0, 0, 0, 0},
 	{0, 1, 0, 1},
 	{0, 0, 0, 1},
 	{0, 1, 1, 1},
 };
+/* At degree 2, the top-left corner: the basis is (1, Z). */
+#define aex_basis_idx(i, j) 	(aex_basis_idx4[i][j])
+#define aex_basis_nr(i, j) 		(aex_basis_nr4[i][j])
 
 /* GR times a plain Z_q scalar: AEX_DEG multiplies. This is the common case,
  * since every witness stays in Z_q and only the challenge is extended. */
@@ -254,11 +260,17 @@ static int gr_inv(gr_t & r, const gr_t & a, const fmpz_mod_ctx_t ctx) {
 	fmpz_init(n0); fmpz_init(n1); fmpz_init(m0); fmpz_init(m1);
 	fmpz_init(g); fmpz_init(t);
 
-	gq_mul(n0, n1, a.c[0], a.c[1], a.c[0], a.c[1], ctx);      /* u^2 */
-	gq_mul(m0, m1, a.c[2], a.c[3], a.c[2], a.c[3], ctx);      /* v^2 */
-	gq_mul_z(m0, m1, m0, m1, ctx);                            /* Z v^2 */
-	fmpz_mod_sub(n0, n0, m0, ctx);
-	fmpz_mod_sub(n1, n1, m1, ctx);
+	if (AEX_DEG == 2) {
+		/* a is in the base already. */
+		fmpz_set(n0, a.c[0]);
+		fmpz_set(n1, a.c[1]);
+	} else {
+		gq_mul(n0, n1, a.c[0], a.c[1], a.c[0], a.c[1], ctx);  /* u^2 */
+		gq_mul(m0, m1, a.c[2], a.c[3], a.c[2], a.c[3], ctx);  /* v^2 */
+		gq_mul_z(m0, m1, m0, m1, ctx);                        /* Z v^2 */
+		fmpz_mod_sub(n0, n0, m0, ctx);
+		fmpz_mod_sub(n1, n1, m1, ctx);
+	}
 
 	/* Invert n0 + n1 Z in the base. */
 	fmpz_mod_mul(m0, n0, n0, ctx);
@@ -270,15 +282,20 @@ static int gr_inv(gr_t & r, const gr_t & a, const fmpz_mod_ctx_t ctx) {
 		fmpz_mod_mul(m0, n0, g, ctx);
 		fmpz_mod_neg(m1, n1, ctx);
 		fmpz_mod_mul(m1, m1, g, ctx);
-		/* r = (u - v Y) * (m0 + m1 Z). */
-		gq_mul(n0, n1, a.c[0], a.c[1], m0, m1, ctx);
-		fmpz_mod_neg(t, a.c[2], ctx);
-		fmpz_mod_neg(g, a.c[3], ctx);
-		gq_mul(t, g, t, g, m0, m1, ctx);
-		fmpz_set(r.c[0], n0);
-		fmpz_set(r.c[1], n1);
-		fmpz_set(r.c[2], t);
-		fmpz_set(r.c[3], g);
+		if (AEX_DEG == 2) {
+			fmpz_set(r.c[0], m0);
+			fmpz_set(r.c[1], m1);
+		} else {
+			/* r = (u - v Y) * (m0 + m1 Z). */
+			gq_mul(n0, n1, a.c[0], a.c[1], m0, m1, ctx);
+			fmpz_mod_neg(t, a.c[2], ctx);
+			fmpz_mod_neg(g, a.c[3], ctx);
+			gq_mul(t, g, t, g, m0, m1, ctx);
+			fmpz_set(r.c[0], n0);
+			fmpz_set(r.c[1], n1);
+			fmpz_set(r.c[AEX_DEG - 2], t);
+			fmpz_set(r.c[AEX_DEG - 1], g);
+		}
 	}
 
 	fmpz_clear(n0); fmpz_clear(n1); fmpz_clear(m0); fmpz_clear(m1);
@@ -355,8 +372,8 @@ static params::poly_q (*s)[V], (*t)[R];
  * two limbs the value already is rather than as mpz_t: an initialised mpz_t
  * costs its struct, its limbs and a malloc header, which is five times the 16
  * bytes of the value and 3.7 GiB of the difference at TAU = 1024. */
-/* v[j][i][k] in aex_rpoly's layout: coefficient l mod p_cm at cm * N + l. */
-static uint64_t (*v)[TAU][V][2 * params::poly_q::degree];
+/* v[j][i][k] in aex_rpoly's layout: coefficient l at l. */
+static zq::u128 (*v)[TAU][V][params::poly_q::degree];
 static gr_t *prover_y;                      /* prover_y[i] = l_i(x) */
 static gr_t (*prover_beta)[3];
 static gr_t (*prover_wt)[3];                /* l_i(x) l_0(x)^j */
@@ -379,7 +396,7 @@ static void pismall_alloc(void) {
 	s = new params::poly_q[TAU][V];
 	t = new params::poly_q[TAU][R];
 	H = new aex_code_t[TAU][3][V];
-	v = new uint64_t[3][TAU][V][2 * params::poly_q::degree];
+	v = new zq::u128[3][TAU][V][params::poly_q::degree];
 	prover_y = new gr_t[TAU + 1];
 	prover_beta = new gr_t[TAU][3];
 	prover_wt = new gr_t[TAU][3];
@@ -397,92 +414,78 @@ static void pismall_free(void) {
 	delete[]prover_r;
 }
 
-/* --- Modular arithmetic and transforms on the moduli of q ------------- */
+/* --- Arithmetic and transforms modulo q ------------------------------- */
 
-typedef unsigned long long aex_u64;
+/* A value of Z_q. q is one 88-bit prime (include/zq.hpp), so a value is one
+ * unsigned __int128 and the arithmetic is zq's. */
+typedef zq::u128 aex_w;
 
-static inline aex_u64 aex_mul(aex_u64 a, aex_u64 b, aex_u64 p) {
-	/* For p below 2^50, as both moduli here are: a b < 2^100 rounds to a
-	 * double within a part in 2^53, so the quotient it gives is off by at most
-	 * one, and the remainder a b - quo p, which is that small, can be taken
-	 * modulo 2^64 and corrected once. A 128-bit % calls __umodti3, which
-	 * costs several times as much. a and b are below p. */
-	if (p < ((aex_u64) 1 << 50)) {
-		const aex_u64 quo = (aex_u64) ((double) a * (double) b / (double) p);
-		int64_t r = (int64_t) (a * b - quo * p);
-
-		r += (r < 0) ? (int64_t) p : 0;
-		r -= (r >= (int64_t) p) ? (int64_t) p : 0;
-		return (aex_u64) r;
-	}
-	return (aex_u64) ((__uint128_t) a * b % p);
+static inline aex_w aex_mul(aex_w a, aex_w b) {
+	return zq::mul(a, b);
 }
 
-static inline aex_u64 aex_add(aex_u64 a, aex_u64 b, aex_u64 p) {
-	aex_u64 s = a + b;
-	return s >= p ? s - p : s;
+static inline aex_w aex_add(aex_w a, aex_w b) {
+	return zq::add(a, b);
 }
 
-static inline aex_u64 aex_sub(aex_u64 a, aex_u64 b, aex_u64 p) {
-	return a >= b ? a - b : a + p - b;
+static inline aex_w aex_sub(aex_w a, aex_w b) {
+	return zq::sub(a, b);
 }
 
-static aex_u64 aex_pow(aex_u64 a, aex_u64 e, aex_u64 p) {
-	aex_u64 r = 1;
-	a %= p;
-	while (e) {
-		if (e & 1) {
-			r = aex_mul(r, a, p);
+static aex_w aex_pow(aex_w a, aex_w e) {
+	return zq::pow(a % zq::MODULUS, e);
+}
+
+/* A value of Z_q from an fmpz in [0, q), and back. */
+static inline aex_w aex_from_fmpz(const fmpz_t x) {
+	ulong w[2] = { 0, 0 };
+
+	fmpz_get_ui_array(w, 2, x);
+	return (aex_w) w[0] | ((aex_w) w[1] << 64);
+}
+
+static inline void aex_to_fmpz(fmpz_t r, aex_w x) {
+	const ulong w[2] = { (ulong) x, (ulong) (x >> 64) };
+
+	fmpz_set_ui_array(r, w, 2);
+}
+
+/* A primitive n-th root of unity mod q, for n a power of two dividing q - 1:
+ * the first g^((q - 1) / n) whose n/2-th power is not 1. */
+static aex_w aex_root(size_t n) {
+	for (aex_w g = 2;; g++) {
+		const aex_w w = aex_pow(g, (zq::MODULUS - 1) / n);
+
+		if (aex_pow(w, n / 2) != 1) {
+			return w;
 		}
-		a = aex_mul(a, a, p);
-		e >>= 1;
 	}
-	return r;
 }
 
-/* Shoup multiplication: with wp = floor(w * 2^64 / p) precomputed, a * w mod p
- * costs two multiplies instead of a 128-bit division. */
-static inline aex_u64 aex_mul_shoup(aex_u64 a, aex_u64 w, aex_u64 wp,
-		aex_u64 p) {
-	aex_u64 hi = (aex_u64) (((__uint128_t) a * wp) >> 64);
-	aex_u64 r = a * w - hi * p;
-	return r >= p ? r - p : r;
-}
-
-static inline aex_u64 aex_shoup(aex_u64 w, aex_u64 p) {
-	return (aex_u64) ((((__uint128_t) w) << 64) / p);
-}
-
-/* Twiddles for one prime: w^k and their Shoup factors, per NTT length. */
+/* Twiddles of a transform of length n: w^k, per NTT length. */
 typedef struct {
-	aex_u64 p;
-	aex_u64 *w, *wp;            /* forward, length n/2 */
-	aex_u64 *iw, *iwp;          /* inverse */
-	aex_u64 ninv, ninvp;
+	aex_w *w;                   /* forward, length n/2 */
+	aex_w *iw;                  /* inverse */
+	aex_w ninv;
 	size_t n;
 	/* What aex_ntt_tw reads: the bit-reversal permutation, and each stage's
 	 * twiddles stored contiguously, the stage of half-length h at h - 1
 	 * (n - 1 of them), instead of w[k * n / 2h] strided across the table. */
 	size_t *rev;
-	aex_u64 *sw, *swp, *siw, *siwp;
+	aex_w *sw, *siw;
 } aex_tw_t;
 
-static void aex_tw_init(aex_tw_t & t, size_t n, aex_u64 w, aex_u64 p) {
-	t.p = p; t.n = n;
-	t.w = new aex_u64[n / 2]; t.wp = new aex_u64[n / 2];
-	t.iw = new aex_u64[n / 2]; t.iwp = new aex_u64[n / 2];
-	aex_u64 iw = aex_pow(w, p - 2, p);
+static void aex_tw_init(aex_tw_t & t, size_t n, aex_w w) {
+	t.n = n;
+	t.w = new aex_w[n / 2];
+	t.iw = new aex_w[n / 2];
+	aex_w iw = zq::inv(w);
 	t.w[0] = 1; t.iw[0] = 1;
 	for (size_t i = 1; i < n / 2; i++) {
-		t.w[i] = aex_mul(t.w[i - 1], w, p);
-		t.iw[i] = aex_mul(t.iw[i - 1], iw, p);
+		t.w[i] = aex_mul(t.w[i - 1], w);
+		t.iw[i] = aex_mul(t.iw[i - 1], iw);
 	}
-	for (size_t i = 0; i < n / 2; i++) {
-		t.wp[i] = aex_shoup(t.w[i], p);
-		t.iwp[i] = aex_shoup(t.iw[i], p);
-	}
-	t.ninv = aex_pow(n % p, p - 2, p);
-	t.ninvp = aex_shoup(t.ninv, p);
+	t.ninv = zq::inv((aex_w) n);
 	t.rev = new size_t[n];
 	for (size_t i = 0, j = 0; i < n; i++) {
 		t.rev[i] = j;
@@ -492,122 +495,93 @@ static void aex_tw_init(aex_tw_t & t, size_t n, aex_u64 w, aex_u64 p) {
 		}
 		j ^= bit;
 	}
-	t.sw = new aex_u64[n]; t.swp = new aex_u64[n];
-	t.siw = new aex_u64[n]; t.siwp = new aex_u64[n];
+	t.sw = new aex_w[n];
+	t.siw = new aex_w[n];
 	for (size_t h = 1; h < n; h <<= 1) {
 		const size_t step = n / (2 * h);
 		for (size_t k = 0; k < h; k++) {
 			t.sw[h - 1 + k] = t.w[k * step];
-			t.swp[h - 1 + k] = t.wp[k * step];
 			t.siw[h - 1 + k] = t.iw[k * step];
-			t.siwp[h - 1 + k] = t.iwp[k * step];
 		}
 	}
 }
 
 static void aex_tw_clear(aex_tw_t & t) {
-	delete[]t.w; delete[]t.wp; delete[]t.iw; delete[]t.iwp;
+	delete[]t.w; delete[]t.iw;
 	delete[]t.rev;
-	delete[]t.sw; delete[]t.swp; delete[]t.siw; delete[]t.siwp;
+	delete[]t.sw; delete[]t.siw;
 }
 
-/* in-place radix-2 NTT over a precomputed twiddle table */
 /* The transform of length t.n, natural order in and out, fully reduced in
- * and out. Harvey's lazy butterflies keep values in [0, 4p) between stages,
- * which the 44-bit moduli leave ample room for in 64 bits, so a butterfly
- * does one conditional subtraction where it did three; the last pass
- * reduces, and scales by 1/n for the inverse. The permutation and each
+ * and out, radix 2; the inverse scales by 1/n. The permutation and each
  * stage's twiddles come from tables built once (aex_tw_init). */
-static void aex_ntt_tw(aex_u64 * a, const aex_tw_t & t, int inverse) {
+static void aex_ntt_tw(aex_w * a, const aex_tw_t & t, int inverse) {
 	const size_t n = t.n;
-	const aex_u64 p = t.p, p2 = 2 * p;
-	const aex_u64 *SW = inverse ? t.siw : t.sw;
-	const aex_u64 *SWp = inverse ? t.siwp : t.swp;
+	const aex_w *SW = inverse ? t.siw : t.sw;
 
 	for (size_t i = 0; i < n; i++) {
 		const size_t j = t.rev[i];
 		if (i < j) {
-			aex_u64 x = a[i]; a[i] = a[j]; a[j] = x;
+			aex_w x = a[i]; a[i] = a[j]; a[j] = x;
 		}
 	}
 	for (size_t h = 1; h < n; h <<= 1) {
-		const aex_u64 *W = SW + h - 1, *Wp = SWp + h - 1;
+		const aex_w *W = SW + h - 1;
 		for (size_t i = 0; i < n; i += 2 * h) {
-			aex_u64 *x = a + i, *y = a + i + h;
+			aex_w *x = a + i, *y = a + i + h;
 			for (size_t k = 0; k < h; k++) {
-				aex_u64 u = x[k];
-				u -= (u >= p2) ? p2 : 0;
-				/* Shoup's product, left in [0, 2p). */
-				const aex_u64 q = (aex_u64) (((__uint128_t) y[k] * Wp[k]) >> 64);
-				const aex_u64 v = y[k] * W[k] - q * p;
-				x[k] = u + v;
-				y[k] = u - v + p2;
+				const aex_w u = x[k], v = aex_mul(y[k], W[k]);
+				x[k] = aex_add(u, v);
+				y[k] = aex_sub(u, v);
 			}
 		}
 	}
 	if (inverse) {
 		for (size_t i = 0; i < n; i++) {
-			a[i] = aex_mul_shoup(a[i], t.ninv, t.ninvp, p);
-		}
-	} else {
-		for (size_t i = 0; i < n; i++) {
-			aex_u64 x = a[i];
-			x -= (x >= p2) ? p2 : 0;
-			a[i] = x - ((x >= p) ? p : 0);
+			a[i] = aex_mul(a[i], t.ninv);
 		}
 	}
 }
 
-
 /* The forward transform of length t.n by decimation in frequency, natural
  * order in and bit-reversed order out, with no permutation pass: a[c] ends
- * as the input polynomial at w^rev(c). Gentleman-Sande butterflies, values
- * lazy in [0, 2p) between stages and reduced at the end. Only a[0, len) may
- * be nonzero, len > n / 2: in the first stage a butterfly whose lower input
- * is zero is a single product. The stage of half-length h reads the tables
- * at h - 1, as aex_ntt_tw does. */
-static void aex_ntt_dif(aex_u64 * a, const aex_tw_t & t, size_t len) {
+ * as the input polynomial at w^rev(c). Gentleman-Sande butterflies. Only
+ * a[0, len) may be nonzero, len > n / 2: in the first stage a butterfly whose
+ * lower input is zero is a single product. The stage of half-length h reads
+ * the tables at h - 1, as aex_ntt_tw does. */
+static void aex_ntt_dif(aex_w * a, const aex_tw_t & t, size_t len) {
 	const size_t n = t.n;
-	const aex_u64 p = t.p, p2 = 2 * p;
 
 	for (size_t h = n >> 1; h >= 1; h >>= 1) {
-		const aex_u64 *W = t.sw + h - 1, *Wp = t.swp + h - 1;
+		const aex_w *W = t.sw + h - 1;
 		for (size_t i = 0; i < n; i += 2 * h) {
-			aex_u64 *x = a + i, *y = a + i + h;
+			aex_w *x = a + i, *y = a + i + h;
 			/* The first stage's butterflies past len - h see y = 0. */
 			const size_t full = (2 * h == n) ? len - h : h;
 			size_t k = 0;
 			for (; k < full; k++) {
-				aex_u64 u = x[k] + y[k];
-				const aex_u64 d = x[k] - y[k] + p2;
-				const aex_u64 q = (aex_u64) (((__uint128_t) d * Wp[k]) >> 64);
-				u -= (u >= p2) ? p2 : 0;
-				x[k] = u;
-				y[k] = d * W[k] - q * p;
+				const aex_w d = aex_sub(x[k], y[k]);
+				x[k] = aex_add(x[k], y[k]);
+				y[k] = aex_mul(d, W[k]);
 			}
 			for (; k < h; k++) {
-				const aex_u64 q = (aex_u64) (((__uint128_t) x[k] * Wp[k]) >> 64);
-				y[k] = x[k] * W[k] - q * p;
+				y[k] = aex_mul(x[k], W[k]);
 			}
 		}
-	}
-	for (size_t i = 0; i < n; i++) {
-		a[i] -= (a[i] >= p) ? p : 0;
 	}
 }
 
 /* --- Reed-Solomon encoding over Z_q ------------------------------------- */
 
 /* The code evaluates a message polynomial of length 2N + ETA at the
- * AEX_COLS-th roots of unity mod each prime of q, by aex_ntt_dif, and
- * recombines the two evaluations into a symbol of Z_q: column c is the
- * message at w^rev(c), rev reversing log2(AEX_COLS) bits. Any AEX_COLS
- * distinct points, in any order, give a Reed-Solomon code of the same length
- * and distance, which is all Lemma 2 uses; these make the transform a cyclic
- * one, with no twist and no permutation. aex_buf holds the message's
- * residues, prime by prime; past 2N + ETA it is never read. */
-static aex_u64 (*aex_buf)[AEX_COLS];
-static aex_tw_t aex_tw[2];
+ * AEX_COLS-th roots of unity mod q, by aex_ntt_dif: column c is the message
+ * at w^rev(c), rev reversing log2(AEX_COLS) bits. Any AEX_COLS distinct
+ * points, in any order, give a Reed-Solomon code of the same length and
+ * distance, which is all Lemma 2 uses; these make the transform a cyclic
+ * one, with no twist and no permutation. aex_buf holds the message; past
+ * 2N + ETA it is never read. */
+static aex_w *aex_buf;
+static aex_tw_t aex_tw;
 
 static inline void aex_unpack(fmpz_t x, const aex_code_t * c, size_t i) {
 	fmpz_set_ui_array(x, c->w + 2 * i, 2);
@@ -615,8 +589,8 @@ static inline void aex_unpack(fmpz_t x, const aex_code_t * c, size_t i) {
 
 
 static void aex_ntt_setup(const fmpz_mod_ctx_t ctx) {
-	/* The symbols are reduced mod q by the context and taken apart into
-	 * poly_big's residues by aex_residues; the two must be the same q. */
+	/* The symbols are reduced mod q by the context and read as values of
+	 * Z_q by aex_load; the two must be the same q. */
 	fmpz_t Q;
 	fmpz_init(Q);
 	fmpz_set_mpz(Q, params::poly_big::moduli_product());
@@ -625,78 +599,34 @@ static void aex_ntt_setup(const fmpz_mod_ctx_t ctx) {
 		abort();
 	}
 	fmpz_clear(Q);
-	/* The prover hands poly_q residues straight to the transform. */
-	for (size_t cm = 0; cm < params::poly_big::nmoduli; cm++) {
-		if (params::poly_q::get_modulus(cm) != params::poly_big::get_modulus(cm)) {
-			fprintf(stderr, "aex: poly_q and poly_big have different moduli\n");
-			abort();
-		}
-	}
-	aex_buf = new aex_u64[2][AEX_COLS];
-	for (size_t cm = 0; cm < 2; cm++) {
-		const aex_u64 p = params::poly_big::get_modulus(cm);
-		aex_u64 w = 0;
-
-		/* A primitive AEX_COLS-th root of unity: p = 1 mod 2 AEX_COLS, as the
-		 * negacyclic transform poly_big is built for requires. */
-		if ((p - 1) % AEX_COLS != 0) {
-			fprintf(stderr, "aex: no AEX_COLS-th roots of unity mod p\n");
-			abort();
-		}
-		for (ulong g = 2;; g++) {
-			w = aex_pow(g, (p - 1) / AEX_COLS, p);
-			if (aex_pow(w, AEX_COLS / 2, p) != 1) break;
-		}
-		aex_tw_init(aex_tw[cm], AEX_COLS, w, p);
-	}
+	static_assert((zq::MODULUS - 1) % AEX_COLS == 0, "no AEX_COLS-th roots of unity mod q");
+	aex_buf = new aex_w[AEX_COLS];
+	aex_tw_init(aex_tw, AEX_COLS, aex_root(AEX_COLS));
 }
 
 static void aex_ntt_clear(void) {
 	delete[] aex_buf;
-	for (size_t cm = 0; cm < 2; cm++) {
-		aex_tw_clear(aex_tw[cm]);
-	}
+	aex_tw_clear(aex_tw);
 }
 
-/* A symbol of Z_q, below 2^128, as its residues mod each of poly_big's moduli,
- * which is what mpz2poly computed through an mpz. */
-static inline void aex_residues(size_t i, const fmpz_t x) {
-	ulong w[2] = { 0, 0 };
-
-	const util::rns < params::poly_big > &n = util::rns < params::poly_big >::get();
-
-	fmpz_get_ui_array(w, 2, x);
-	for (size_t cm = 0; cm < params::poly_big::nmoduli; cm++) {
-		aex_buf[cm][i] = n.red(w[0], w[1], cm);
-	}
+/* A symbol of Z_q, reduced, into the message. */
+static inline void aex_load(size_t i, const fmpz_t x) {
+	aex_buf[i] = aex_from_fmpz(x);
 }
 
-/* The transform and the CRT that turn aex_buf's residues into a codeword. */
+/* The transform that turns aex_buf into a codeword, each symbol written low
+ * limb, then high. */
 static void aex_finish(aex_code_t & out) {
-	const util::crt < params::poly_big > &c = util::crt < params::poly_big >::get();
-
 	const size_t len = 2 * params::poly_q::degree + ETA;
 
 	static_assert(2 * params::poly_q::degree + ETA > AEX_COLS / 2,
 			"aex_ntt_dif takes a message past half the code length");
 	static_assert(2 * params::poly_q::degree + ETA <= AEX_COLS,
 			"the message fits the code");
-	aex_ntt_dif(aex_buf[0], aex_tw[0], len);
-	aex_ntt_dif(aex_buf[1], aex_tw[1], len);
-	/* Each symbol is recombined from its two residues by the CRT,
-	 * r_0 + p_0 ((r_1 - r_0) p_0^-1 mod p_1), below q < 2^128, and written
-	 * low limb, then high. */
+	aex_ntt_dif(aex_buf, aex_tw, len);
 	for (size_t i = 0; i < AEX_COLS; i++) {
-		const uint64_t r0 = aex_buf[0][i], r1 = aex_buf[1][i], p1 = c.p1;
-		const uint64_t r0m = util::rns < params::poly_big >::get().red(r0, 1);
-		const uint64_t d = (r1 >= r0m) ? r1 - r0m : r1 + p1 - r0m;
-		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
-		uint64_t t = d * c.w - h * p1;
-		t -= (t >= p1) ? p1 : 0;
-		const __uint128_t x = (__uint128_t) r0 + (__uint128_t) c.p0 * t;
-
-		out.w[2 * i] = (uint64_t) x;
-		out.w[2 * i + 1] = (uint64_t) (x >> 64);
+		out.w[2 * i] = (uint64_t) aex_buf[i];
+		out.w[2 * i + 1] = (uint64_t) (aex_buf[i] >> 64);
 	}
 }
 
@@ -704,7 +634,6 @@ static void aex_finish(aex_code_t & out) {
  * low coefficients, then evaluate at the AEX_COLS roots of unity. */
 static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 		fmpz_mod_poly_t in1, const fmpz * in, const fmpz_mod_ctx_t ctx) {
-	static_assert(params::poly_big::nmoduli == 2, "a symbol is two residues");
 	const size_t N = params::poly_q::degree;
 	const slong l0 = fmpz_mod_poly_length(in0, ctx), l1 = fmpz_mod_poly_length(in1, ctx);
 	fmpz_t zero;
@@ -714,47 +643,44 @@ static void aex_encode(aex_code_t & out, fmpz_mod_poly_t in0,
 	 * zero. */
 	fmpz_init(zero);
 	for (i = 0; i < N; i++) {
-		aex_residues(i, ((slong) i < l0) ? in0->coeffs + i : zero);
+		aex_load(i, ((slong) i < l0) ? in0->coeffs + i : zero);
 	}
 	for (; i < 2 * N; i++) {
-		aex_residues(i, ((slong) (i - N) < l1) ? in1->coeffs + (i - N) : zero);
+		aex_load(i, ((slong) (i - N) < l1) ? in1->coeffs + (i - N) : zero);
 	}
 	for (; i < 2 * N + ETA; i++) {
-		aex_residues(i, in + (i - 2 * N));
+		aex_load(i, in + (i - 2 * N));
 	}
 	fmpz_clear(zero);
 	aex_finish(out);
 }
 
-/* A polynomial over Z_q as its residues, coefficient l mod p_cm at
- * r[cm * N + l]: the layout of a poly_q's data() in the coefficient domain,
- * whose moduli aex_ntt_setup checks are poly_big's. The prover keeps its
- * sums in this form, rather than in fmpz_mod_poly, and converts once. */
+/* A polynomial over Z_q as its coefficients, l at r[l]: the layout of a
+ * poly_q's data() in the coefficient domain. The prover keeps its sums in
+ * this form, rather than in fmpz_mod_poly, and converts once. */
 typedef struct {
-	uint64_t r[2 * params::poly_q::degree];
+	aex_w r[params::poly_q::degree];
 } aex_rpoly;
 
-/* Encode as aex_encode does, from residues: in0 and in1 are in aex_rpoly's
- * layout, or NULL for zero. */
-static void aex_encode_res(aex_code_t & out, const uint64_t *in0,
-		const uint64_t *in1, const fmpz * in) {
+/* Encode as aex_encode does, from coefficients: in0 and in1 are in
+ * aex_rpoly's layout, or NULL for zero. */
+static void aex_encode_res(aex_code_t & out, const aex_w *in0,
+		const aex_w *in1, const fmpz * in) {
 	const size_t N = params::poly_q::degree;
 	size_t i;
 
-	for (size_t cm = 0; cm < 2; cm++) {
-		for (i = 0; i < N; i++) {
-			aex_buf[cm][i] = in0 ? in0[cm * N + i] : 0;
-			aex_buf[cm][N + i] = in1 ? in1[cm * N + i] : 0;
-		}
+	for (i = 0; i < N; i++) {
+		aex_buf[i] = in0 ? in0[i] : 0;
+		aex_buf[N + i] = in1 ? in1[i] : 0;
 	}
 	for (i = 2 * N; i < 2 * N + ETA; i++) {
-		aex_residues(i, in + (i - 2 * N));
+		aex_load(i, in + (i - 2 * N));
 	}
 	aex_finish(out);
 }
 
-/* p's residues in the coefficient domain, p being in the NTT domain: from
- * a copy, which spares transforming p back afterwards. */
+/* p's coefficients, p being in the NTT domain: from a copy, which spares
+ * transforming p back afterwards. */
 static void rp_from_nfl(aex_rpoly & out, const params::poly_q & p) {
 	static params::poly_q t;
 
@@ -763,109 +689,59 @@ static void rp_from_nfl(aex_rpoly & out, const params::poly_q & p) {
 	memcpy(out.r, t.data(), sizeof(out.r));
 }
 
-/* A scalar of Z_q as its residues, with Shoup's quotients for multiplying by
- * it. */
+/* A scalar of Z_q. */
 typedef struct {
-	uint64_t s[2], sp[2];
+	aex_w s;
 } aex_rscalar;
 
 static void rs_from_fmpz(aex_rscalar & out, const fmpz_t x) {
-	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
-	ulong w[2] = { 0, 0 };
+	out.s = aex_from_fmpz(x) % zq::MODULUS;
+}
 
-	fmpz_get_ui_array(w, 2, x);
-	for (size_t cm = 0; cm < 2; cm++) {
-		out.s[cm] = n.red(w[0], w[1], cm);
-		out.sp[cm] = (uint64_t) (((__uint128_t) out.s[cm] << 64) / n.p[cm]);
+/* acc += x s. */
+static void rp_addmul(aex_rpoly & acc, const aex_w *x, const aex_rscalar & s) {
+	for (size_t l = 0; l < params::poly_q::degree; l++) {
+		acc.r[l] = aex_add(acc.r[l], aex_mul(s.s, x[l]));
 	}
 }
 
-/* acc += x s, residue by residue. */
-static void rp_addmul(aex_rpoly & acc, const uint64_t *x, const aex_rscalar & s) {
-	const size_t N = params::poly_q::degree;
-	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
-
-	for (size_t cm = 0; cm < 2; cm++) {
-		const uint64_t p = n.p[cm], w = s.s[cm], wp = s.sp[cm];
-		uint64_t *a = acc.r + cm * N;
-		const uint64_t *b = x + cm * N;
-
-		for (size_t l = 0; l < N; l++) {
-			const uint64_t h = (uint64_t) (((__uint128_t) wp * b[l]) >> 64);
-			uint64_t t = w * b[l] - h * p;
-			t -= (t >= p) ? p : 0;
-			t += a[l];
-			a[l] = t - ((t >= p) ? p : 0);
-		}
-	}
-}
-
-/* out = the polynomial whose residues a holds, by the CRT. */
+/* out = the polynomial a holds. */
 static void rp_to_fmpz(fmpz_mod_poly_t out, const aex_rpoly & a,
 		const fmpz_mod_ctx_t ctx) {
 	const size_t N = params::poly_q::degree;
-	const util::crt < params::poly_q > &c = util::crt < params::poly_q >::get();
-	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
 
 	fmpz_mod_poly_fit_length(out, N, ctx);
 	for (size_t l = 0; l < N; l++) {
-		const uint64_t r0 = a.r[l], r1 = a.r[N + l], p1 = c.p1;
-		const uint64_t r0m = n.red(r0, 1);
-		const uint64_t d = (r1 >= r0m) ? r1 - r0m : r1 + p1 - r0m;
-		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
-		uint64_t t = d * c.w - h * p1;
-		t -= (t >= p1) ? p1 : 0;
-		const __uint128_t x = (__uint128_t) r0 + (__uint128_t) c.p0 * t;
-		const ulong o[2] = { (ulong) x, (ulong) (x >> 64) };
-
-		fmpz_set_ui_array(out->coeffs + l, o, 2);
+		aex_to_fmpz(out->coeffs + l, a.r[l]);
 	}
 	_fmpz_mod_poly_set_length(out, N);
 	_fmpz_mod_poly_normalise(out);
 }
 
-/* a = the residues of in, whose coefficients are reduced mod q. */
+/* a = in, whose coefficients are reduced mod q. */
 static void rp_from_fmpz(aex_rpoly & a, const fmpz_mod_poly_t in,
 		const fmpz_mod_ctx_t ctx) {
-	const size_t N = params::poly_q::degree;
-	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
 	const slong len = fmpz_mod_poly_length(in, ctx);
 
-	for (size_t l = 0; l < N; l++) {
-		ulong w[2] = { 0, 0 };
-
-		if ((slong) l < len) {
-			fmpz_get_ui_array(w, 2, in->coeffs + l);
-		}
-		for (size_t cm = 0; cm < 2; cm++) {
-			a.r[cm * N + l] = n.red(w[0], w[1], cm);
-		}
+	for (size_t l = 0; l < params::poly_q::degree; l++) {
+		a.r[l] = ((slong) l < len) ? aex_from_fmpz(in->coeffs + l) : 0;
 	}
 }
 
-/* p = the polynomial whose residues a holds, in the coefficient domain. */
+/* p = the polynomial a holds, in the coefficient domain. */
 static void rp_to_nfl(params::poly_q & p, const aex_rpoly & a) {
 	memcpy(p.data(), a.r, sizeof(a.r));
 }
 
-/* acc -= x, residue by residue. */
-static void rp_sub(aex_rpoly & acc, const uint64_t *x) {
-	const size_t N = params::poly_q::degree;
-	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
-
-	for (size_t cm = 0; cm < 2; cm++) {
-		const uint64_t p = n.p[cm];
-		uint64_t *a = acc.r + cm * N;
-		const uint64_t *b = x + cm * N;
-
-		for (size_t l = 0; l < N; l++) {
-			a[l] = (a[l] >= b[l]) ? a[l] - b[l] : a[l] + p - b[l];
-		}
+/* acc -= x. */
+static void rp_sub(aex_rpoly & acc, const aex_w *x) {
+	for (size_t l = 0; l < params::poly_q::degree; l++) {
+		acc.r[l] = aex_sub(acc.r[l], x[l]);
 	}
 }
 
 static bool rp_is_zero(const aex_rpoly & a) {
-	for (size_t i = 0; i < 2 * params::poly_q::degree; i++) {
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		if (a.r[i] != 0) {
 			return false;
 		}
@@ -1134,39 +1010,16 @@ static void aex_open_clear(aex_open_t & o) {
 	o.path = NULL;
 }
 
-/* A primitive TAU-th root of unity modulo the NFLlib moduli product: one of
- * order TAU per prime, recombined by CRT. TAU must be a power of two, which
- * both primes support (p - 1 is divisible by 2^24). */
+/* A primitive TAU-th root of unity modulo q, the one the prover's transforms
+ * of length TAU use. TAU must be a power of two dividing q - 1. */
 static void aex_root_tau(fmpz_t w, const fmpz_mod_ctx_t ctx) {
-	fmpz_t acc, pj, wj, e, t, m;
+	static_assert((zq::MODULUS - 1) % TAU == 0, "no TAU-th roots of unity mod q");
+	fmpz_t t;
 
-	fmpz_init(acc); fmpz_init(pj); fmpz_init(wj);
-	fmpz_init(e); fmpz_init(t); fmpz_init(m);
-	fmpz_one(m);
-	fmpz_zero(acc);
-	for (size_t j = 0; j < params::poly_q::nmoduli; j++) {
-		fmpz_set_ui(pj, nfl::params < uint64_t >::P[j]);
-		fmpz_sub_ui(e, pj, 1);
-		fmpz_divexact_ui(e, e, TAU);
-		for (ulong g = 2;; g++) {
-			fmpz_set_ui(t, g);
-			fmpz_powm(wj, t, e, pj);
-			fmpz_powm_ui(t, wj, TAU / 2, pj);
-			if (!fmpz_is_one(t) && !fmpz_is_zero(wj)) {
-				break;
-			}
-		}
-		if (j == 0) {
-			fmpz_set(acc, wj);
-			fmpz_set(m, pj);
-		} else {
-			fmpz_CRT(acc, acc, m, wj, pj, 0);
-			fmpz_mul(m, m, pj);
-		}
-	}
-	fmpz_mod_set_fmpz(w, acc, ctx);
-	fmpz_clear(acc); fmpz_clear(pj); fmpz_clear(wj);
-	fmpz_clear(e); fmpz_clear(t); fmpz_clear(m);
+	fmpz_init(t);
+	aex_to_fmpz(t, aex_root(TAU));
+	fmpz_mod_set_fmpz(w, t, ctx);
+	fmpz_clear(t);
 }
 
 /* l_i(x) for i = 0..TAU in closed form. With the nodes at the TAU-th roots of
@@ -1255,63 +1108,37 @@ static int aex_lagrange(gr_t * lev, const gr_t & x, const fmpz_mod_ctx_t ctx) {
  *      == l0(x) H0|I + sum_ij li(x) l0(x)^j Hij|I
  *   Encode(hbar, rhbar)|I == H|I + b0 H0|I + sum_ij bij Hij|I
  */
-/* Symbol r of an opened column, and symbol i of a codeword, mod p_cm. */
-static inline uint64_t aex_col_res(const uint8_t *col, size_t r, size_t cm) {
+/* Symbol r of an opened column, and symbol i of a codeword. */
+static inline aex_w aex_col_sym(const uint8_t *col, size_t r) {
 	uint64_t w[2];
 
 	memcpy(w, col + r * 16, 16);
-	return util::rns < params::poly_q >::get().red(w[0], w[1], cm);
+	return (aex_w) w[0] | ((aex_w) w[1] << 64);
 }
 
-static inline uint64_t aex_code_res(const aex_code_t *c, size_t i, size_t cm) {
-	return util::rns < params::poly_q >::get().red(c->w[2 * i], c->w[2 * i + 1], cm);
+static inline aex_w aex_code_sym(const aex_code_t *c, size_t i) {
+	return (aex_w) c->w[2 * i] | ((aex_w) c->w[2 * i + 1] << 64);
 }
 
-/* s y mod p_cm by Shoup's quotient, for y < p_cm; and a sum of two residues. */
-static inline uint64_t rs_mul(const aex_rscalar & s, uint64_t y, size_t cm, uint64_t p) {
-	const uint64_t h = (uint64_t) (((__uint128_t) s.sp[cm] * y) >> 64);
-	const uint64_t t = s.s[cm] * y - h * p;
-
-	return t - ((t >= p) ? p : 0);
+static inline aex_w rs_mul(const aex_rscalar & s, aex_w y) {
+	return aex_mul(s.s, y);
 }
 
-static inline uint64_t rs_add(uint64_t a, uint64_t b, uint64_t p) {
-	const uint64_t t = a + b;
-
-	return t - ((t >= p) ? p : 0);
-}
-
-/* a b mod p for a, b < p < 2^50, as aex_mul below: the quotient from a
- * double is off by at most one, and the remainder is corrected once. */
-static inline uint64_t rq_mul(uint64_t a, uint64_t b, uint64_t p) {
-	const uint64_t quo = (uint64_t) ((double) a * (double) b / (double) p);
-	int64_t r = (int64_t) (a * b - quo * p);
-
-	r += (r < 0) ? (int64_t) p : 0;
-	r -= (r >= (int64_t) p) ? (int64_t) p : 0;
-	return (uint64_t) r;
-}
-
-static inline uint64_t rq_sub(uint64_t a, uint64_t b, uint64_t p) {
-	return (a >= b) ? a - b : a + p - b;
-}
-
-/* r = a b in GR(p, AEX_DEG) for one prime p of q, in the tower basis
- * (1, Z, Y, ZY): each product of basis elements lands where aex_basis_idx
- * says, times AEX_NR where aex_basis_nr says. r may be a or b. */
-static void grq_mul(uint64_t r[AEX_DEG], const uint64_t a[AEX_DEG],
-		const uint64_t b[AEX_DEG], uint64_t p) {
-	uint64_t t[AEX_DEG] = { 0 };
-	const uint64_t nr = AEX_NR % p;
+/* r = a b in GR(q, AEX_DEG), in the tower basis (1, Z, Y, ZY): each product
+ * of basis elements lands where aex_basis_idx says, times AEX_NR where
+ * aex_basis_nr says. r may be a or b. */
+static void grq_mul(aex_w r[AEX_DEG], const aex_w a[AEX_DEG],
+		const aex_w b[AEX_DEG]) {
+	aex_w t[AEX_DEG] = { 0 };
 
 	for (int i = 0; i < AEX_DEG; i++) {
 		for (int j = 0; j < AEX_DEG; j++) {
-			uint64_t x = rq_mul(a[i], b[j], p);
+			aex_w x = aex_mul(a[i], b[j]);
 
-			if (aex_basis_nr[i][j]) {
-				x = rq_mul(x, nr, p);
+			if (aex_basis_nr(i, j)) {
+				x = aex_mul(x, AEX_NR);
 			}
-			t[aex_basis_idx[i][j]] = rs_add(t[aex_basis_idx[i][j]], x, p);
+			t[aex_basis_idx(i, j)] = aex_add(t[aex_basis_idx(i, j)], x);
 		}
 	}
 	for (int i = 0; i < AEX_DEG; i++) {
@@ -1365,20 +1192,18 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 			}
 		}
 
-		/* Left-hand sides, one codeword per component and per k, in
-		 * residues: f's once per polynomial, the identity polynomial per
-		 * coefficient and prime by grq_mul, then encoded from residues. The
-		 * same arithmetic as gr_mul in fmpz, and a test checks the two. */
+		/* Left-hand sides, one codeword per component and per k, on
+		 * values of Z_q: f's once per polynomial, the identity polynomial per
+		 * coefficient by grq_mul, then encoded. The same arithmetic as gr_mul
+		 * in fmpz, and a test checks the two. */
 		const size_t N = params::poly_q::degree;
-		const util::rns < params::poly_q > &nr = util::rns < params::poly_q >::get();
 		aex_rpoly *fr = new aex_rpoly[AEX_DEG], *gres = new aex_rpoly[AEX_DEG];
-		uint64_t li[2][AEX_DEG];
+		aex_w li[AEX_DEG];
 		aex_rscalar sl;
 
 		for (int c = 0; c < AEX_DEG; c++) {
 			rs_from_fmpz(sl, l0inv.c[c]);
-			li[0][c] = sl.s[0];
-			li[1][c] = sl.s[1];
+			li[c] = sl.s;
 		}
 		for (size_t k = 0; k < V; k++) {
 			for (int c = 0; c < AEX_DEG; c++) {
@@ -1386,41 +1211,37 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 			}
 			for (size_t l = 0; l < N; l++) {
 				const aex_set_t set = aex_set_at(k, l);
+				aex_w fv[AEX_DEG], cub[AEX_DEG], t[AEX_DEG];
 
-				for (size_t cm = 0; cm < 2; cm++) {
-					const uint64_t p = nr.p[cm];
-					uint64_t fv[AEX_DEG], cub[AEX_DEG], t[AEX_DEG];
-
-					for (int i = 0; i < AEX_DEG; i++) {
-						fv[i] = fr[i].r[cm * N + l];
+				for (int i = 0; i < AEX_DEG; i++) {
+					fv[i] = fr[i].r[l];
+				}
+				if (set == AEX_FREE) {
+					/* 0 */
+					for (int i = 0; i < AEX_DEG; i++) cub[i] = 0;
+				} else if (set == AEX_ZERO) {
+					/* f */
+					for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i];
+				} else if (set == AEX_SGN) {
+					/* (f - 1)(f + 1) */
+					for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i], t[i] = fv[i];
+					cub[0] = aex_sub(cub[0], 1);
+					t[0] = aex_add(t[0], 1);
+					grq_mul(cub, cub, t);
+				} else {
+					/* f (f - 1), and one more factor for the ternary set */
+					for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i];
+					cub[0] = aex_sub(cub[0], 1);
+					grq_mul(cub, cub, fv);
+					if (set == AEX_TER) {
+						for (int i = 0; i < AEX_DEG; i++) t[i] = fv[i];
+						t[0] = aex_add(t[0], 1);
+						grq_mul(cub, cub, t);
 					}
-					if (set == AEX_FREE) {
-						/* 0 */
-						for (int i = 0; i < AEX_DEG; i++) cub[i] = 0;
-					} else if (set == AEX_ZERO) {
-						/* f */
-						for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i];
-					} else if (set == AEX_SGN) {
-						/* (f - 1)(f + 1) */
-						for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i], t[i] = fv[i];
-						cub[0] = rq_sub(cub[0], 1, p);
-						t[0] = rs_add(t[0], 1, p);
-						grq_mul(cub, cub, t, p);
-					} else {
-						/* f (f - 1), and one more factor for the ternary set */
-						for (int i = 0; i < AEX_DEG; i++) cub[i] = fv[i];
-						cub[0] = rq_sub(cub[0], 1, p);
-						grq_mul(cub, cub, fv, p);
-						if (set == AEX_TER) {
-							for (int i = 0; i < AEX_DEG; i++) t[i] = fv[i];
-							t[0] = rs_add(t[0], 1, p);
-							grq_mul(cub, cub, t, p);
-						}
-					}
-					grq_mul(cub, cub, li[cm], p);
-					for (int i = 0; i < AEX_DEG; i++) {
-						gres[i].r[cm * N + l] = cub[i];
-					}
+				}
+				grq_mul(cub, cub, li);
+				for (int i = 0; i < AEX_DEG; i++) {
+					gres[i].r[l] = cub[i];
 				}
 			}
 			for (int c = 0; c < AEX_DEG; c++) {
@@ -1434,14 +1255,12 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 		delete[] gres;
 	}
 
-	/* The column checks, in residues: every scalar below is fixed for the
-	 * whole check, so each becomes its residues with Shoup quotients once,
-	 * and each symbol of a column its two residues. 550 columns times
-	 * V (3 TAU + 1) symbols times 8 products was as many fmpz_mod_mul and
-	 * fmpz_mod_add, which at TAU = 1000 is 66 million of each. Two values of
-	 * Z_q are equal exactly when their residues are. */
+	/* The column checks: every scalar below is fixed for the whole check, so
+	 * each becomes an aex_w once, and each symbol of a column one too. 550
+	 * columns times V (3 TAU + 1) symbols times 8 products was as many
+	 * fmpz_mod_mul and fmpz_mod_add, which at TAU = 1000 is 66 million of
+	 * each. */
 	if (ok) {
-		const util::rns < params::poly_q > &nr = util::rns < params::poly_q >::get();
 		aex_rscalar sl0[AEX_DEG], sb0[AEX_DEG];
 		aex_rscalar (*swt)[3][AEX_DEG] = new aex_rscalar[TAU][3][AEX_DEG];
 		aex_rscalar (*sbe)[3][AEX_DEG] = new aex_rscalar[TAU][3][AEX_DEG];
@@ -1461,35 +1280,32 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
 		for (size_t n = 0; n < ETA && ok; n++) {
 			const uint8_t *col = o.col + n * AEX_COLBYTES;
 			for (size_t k = 0; k < V && ok; k++) {
-				for (size_t cm = 0; cm < 2 && ok; cm++) {
-					const uint64_t p = nr.p[cm];
-					uint64_t af[AEX_DEG], ah[AEX_DEG], y;
+				aex_w af[AEX_DEG], ah[AEX_DEG], y;
 
-					/* H carries the mask, a Z_q value, so it lands in the
-					 * first coordinate and the others start empty. Both
-					 * identities and all components read each symbol once. */
-					y = aex_col_res(col, AEX_ROW_H(k), cm);
-					for (int c = 0; c < AEX_DEG; c++) {
-						ah[c] = (c == 0) ? y : 0;
-					}
-					y = aex_col_res(col, AEX_ROW_H0(k), cm);
-					for (int c = 0; c < AEX_DEG; c++) {
-						af[c] = rs_mul(sl0[c], y, cm, p);
-						ah[c] = rs_add(ah[c], rs_mul(sb0[c], y, cm, p), p);
-					}
-					for (size_t i = 0; i < TAU; i++) {
-						for (size_t j = 0; j < 3; j++) {
-							y = aex_col_res(col, AEX_ROW_HIJ(i, j, k), cm);
-							for (int c = 0; c < AEX_DEG; c++) {
-								af[c] = rs_add(af[c], rs_mul(swt[i][j][c], y, cm, p), p);
-								ah[c] = rs_add(ah[c], rs_mul(sbe[i][j][c], y, cm, p), p);
-							}
+				/* H carries the mask, a Z_q value, so it lands in the first
+				 * coordinate and the others start empty. Both identities and
+				 * all components read each symbol once. */
+				y = aex_col_sym(col, AEX_ROW_H(k));
+				for (int c = 0; c < AEX_DEG; c++) {
+					ah[c] = (c == 0) ? y : 0;
+				}
+				y = aex_col_sym(col, AEX_ROW_H0(k));
+				for (int c = 0; c < AEX_DEG; c++) {
+					af[c] = rs_mul(sl0[c], y);
+					ah[c] = aex_add(ah[c], rs_mul(sb0[c], y));
+				}
+				for (size_t i = 0; i < TAU; i++) {
+					for (size_t j = 0; j < 3; j++) {
+						y = aex_col_sym(col, AEX_ROW_HIJ(i, j, k));
+						for (int c = 0; c < AEX_DEG; c++) {
+							af[c] = aex_add(af[c], rs_mul(swt[i][j][c], y));
+							ah[c] = aex_add(ah[c], rs_mul(sbe[i][j][c], y));
 						}
 					}
-					for (int c = 0; c < AEX_DEG; c++) {
-						ok &= af[c] == aex_code_res(lhs_f + k * AEX_DEG + c, o.I[n], cm);
-						ok &= ah[c] == aex_code_res(lhs_h + k * AEX_DEG + c, o.I[n], cm);
-					}
+				}
+				for (int c = 0; c < AEX_DEG; c++) {
+					ok &= af[c] == aex_code_sym(lhs_f + k * AEX_DEG + c, o.I[n]);
+					ok &= ah[c] == aex_code_sym(lhs_h + k * AEX_DEG + c, o.I[n]);
 				}
 			}
 		}
@@ -1528,7 +1344,7 @@ static int aex_identities(const aex_open_t & o, fmpz_mod_poly_t f[V][AEX_DEG],
  */
 static_assert((TAU & (TAU - 1)) == 0, "TAU must be a power of two");
 
-/* Extract v[j][i] for one coefficient position modulo one prime: out[j][i] is
+/* Extract v[j][i] for one coefficient position: out[j][i] is
  * G_j at w^i, where P(f) / l_0 = G_0 + l_0 G_1 + l_0^2 G_2 with deg G_j < TAU
  * and f = a l_0 + g, g the interpolant of b. The top level is a constant, the
  * leading coefficient a^deg P. The others come from derivatives at the nodes,
@@ -1543,12 +1359,11 @@ static_assert((TAU & (TAU - 1)) == 0, "TAU must be a power of two");
  * TAU for the cubic set, two for the quadratic ones, instead of a product on
  * 4 TAU points and three rounds of division. buf holds 3 TAU elements. For
  * AEX_ZERO, P(f) = f with g = 0 is the constant a. */
-static void aex_extract(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
-		const aex_tw_t & TT, aex_u64 * buf, aex_set_t set) {
-	const aex_u64 p = TT.p;
-	const aex_u64 T = TAU % p, T2 = aex_mul(T, T, p);
-	const aex_u64 Ti = aex_pow(T, p - 2, p), T2i = aex_pow(aex_add(T, T, p), p - 2, p);
-	aex_u64 *g = buf, *dg = buf + TAU, *d2g = buf + 2 * TAU;
+static void aex_extract(aex_w a, const aex_w * b, aex_w out[3][TAU],
+		const aex_tw_t & TT, aex_w * buf, aex_set_t set) {
+	const aex_w T = TAU, T2 = aex_mul(T, T);
+	const aex_w Ti = zq::inv(T), T2i = zq::inv(aex_add(T, T));
+	aex_w *g = buf, *dg = buf + TAU, *d2g = buf + 2 * TAU;
 
 	if (set == AEX_FREE || set == AEX_ZERO) {
 		for (size_t i = 0; i < TAU; i++) {
@@ -1564,51 +1379,51 @@ static void aex_extract(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
 	}
 	aex_ntt_tw(g, TT, 1);
 	for (size_t k = 0; k < TAU; k++) {
-		dg[k] = aex_mul(g[k], k, p);
-		d2g[k] = aex_mul(dg[k], k, p);
+		dg[k] = aex_mul(g[k], k);
+		d2g[k] = aex_mul(dg[k], k);
 	}
 	aex_ntt_tw(dg, TT, 0);
-	const aex_u64 aT = aex_mul(a, T, p), a2 = aex_mul(a, a, p);
+	const aex_w aT = aex_mul(a, T), a2 = aex_mul(a, a);
 	if (set != AEX_TER) {
 		/* P'(b) = 2b - 1 for {0, 1}, 2b for {-1, 1}; G_1 = a^2, G_2 = 0. */
 		for (size_t i = 0; i < TAU; i++) {
-			aex_u64 dp = aex_add(b[i], b[i], p);
+			aex_w dp = aex_add(b[i], b[i]);
 			if (set == AEX_BIN) {
-				dp = aex_sub(dp, 1, p);
+				dp = aex_sub(dp, 1);
 			}
-			out[0][i] = aex_mul(aex_mul(dp, aex_add(dg[i], aT, p), p), Ti, p);
+			out[0][i] = aex_mul(aex_mul(dp, aex_add(dg[i], aT)), Ti);
 			out[1][i] = a2;
 			out[2][i] = 0;
 		}
 		return;
 	}
 	aex_ntt_tw(d2g, TT, 0);
-	const aex_u64 aT2 = aex_mul(a, T2, p), a3 = aex_mul(a2, a, p);
+	const aex_w aT2 = aex_mul(a, T2), a3 = aex_mul(a2, a);
 	/* P = X^3 - X: P'(b) = 3b^2 - 1, P''(b) = 6b. g is spent; its space takes
 	 * G_0's coefficients, and dg's DF. */
 	for (size_t i = 0; i < TAU; i++) {
-		const aex_u64 bb = aex_mul(b[i], b[i], p);
-		const aex_u64 p1 = aex_sub(aex_add(aex_add(bb, bb, p), bb, p), 1, p);
-		const aex_u64 b2 = aex_add(b[i], b[i], p);
-		const aex_u64 p2 = aex_add(aex_add(b2, b2, p), b2, p);
-		const aex_u64 df = aex_add(dg[i], aT, p);
-		const aex_u64 d2f = aex_add(d2g[i], aT2, p);
-		const aex_u64 F = aex_mul(aex_mul(p1, df, p), Ti, p);
-		const aex_u64 d2h = aex_add(aex_mul(p2, aex_mul(df, df, p), p),
-				aex_mul(p1, d2f, p), p);
+		const aex_w bb = aex_mul(b[i], b[i]);
+		const aex_w p1 = aex_sub(aex_add(aex_add(bb, bb), bb), 1);
+		const aex_w b2 = aex_add(b[i], b[i]);
+		const aex_w p2 = aex_add(aex_add(b2, b2), b2);
+		const aex_w df = aex_add(dg[i], aT);
+		const aex_w d2f = aex_add(d2g[i], aT2);
+		const aex_w F = aex_mul(aex_mul(p1, df), Ti);
+		const aex_w d2h = aex_add(aex_mul(p2, aex_mul(df, df)),
+				aex_mul(p1, d2f));
 
 		out[0][i] = F;
 		g[i] = F;
-		dg[i] = aex_mul(aex_sub(d2h, aex_mul(T2, F, p), p), T2i, p);
+		dg[i] = aex_mul(aex_sub(d2h, aex_mul(T2, F)), T2i);
 		out[2][i] = a3;
 	}
 	aex_ntt_tw(g, TT, 1);
 	for (size_t k = 0; k < TAU; k++) {
-		g[k] = aex_mul(g[k], k, p);
+		g[k] = aex_mul(g[k], k);
 	}
 	aex_ntt_tw(g, TT, 0);
 	for (size_t i = 0; i < TAU; i++) {
-		out[1][i] = aex_mul(aex_sub(dg[i], g[i], p), Ti, p);
+		out[1][i] = aex_mul(aex_sub(dg[i], g[i]), Ti);
 	}
 }
 
@@ -1723,21 +1538,14 @@ static void pismall_hash(gr_t & x, gr_t & beta0, gr_t beta[TAU][3], fmpz_t q,
 	flint_rand_clear(rand);
 }
 
-/* out = in * x mod q, as fmpz_mod_poly_scalar_mul_fmpz, through the residues
- * of q's two moduli: Z_q is Z_p0 x Z_p1, so each coefficient is taken apart,
- * each residue multiplied by x's with Shoup's precomputed quotient, and the
- * product recombined by the CRT. FLINT does a two-limb multiplication and
- * reduction a coefficient instead. Other moduli, and a scalar outside
- * [0, q), go to FLINT. out may be in. */
+/* out = in * x mod q, as fmpz_mod_poly_scalar_mul_fmpz, on aex_w values and
+ * zq's reduction, where FLINT does a two-limb multiplication and a general
+ * reduction a coefficient. Other moduli, and a scalar outside [0, q), go to
+ * FLINT. out may be in. */
 static void scalar_mul(fmpz_mod_poly_t out, const fmpz_mod_poly_t in,
 		const fmpz_t x, const fmpz_mod_ctx_t ctx) {
-	static_assert(params::poly_q::nmoduli == 2, "q is two moduli");
-	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
-	const util::crt < params::poly_q > &c = util::crt < params::poly_q >::get();
 	const slong len = fmpz_mod_poly_length(in, ctx);
 	fmpz_t Q;
-	ulong xw[2] = { 0, 0 };
-	uint64_t s[2], sp[2];
 
 	fmpz_init(Q);
 	fmpz_set_mpz(Q, params::poly_q::moduli_product());
@@ -1748,34 +1556,10 @@ static void scalar_mul(fmpz_mod_poly_t out, const fmpz_mod_poly_t in,
 		fmpz_mod_poly_scalar_mul_fmpz(out, in, x, ctx);
 		return;
 	}
-	fmpz_get_ui_array(xw, 2, x);
-	for (size_t cm = 0; cm < 2; cm++) {
-		s[cm] = n.red(xw[0], xw[1], cm);
-		sp[cm] = (uint64_t) (((__uint128_t) s[cm] << 64) / n.p[cm]);
-	}
+	const aex_w s = aex_from_fmpz(x);
 	fmpz_mod_poly_fit_length(out, len, ctx);
 	for (slong i = 0; i < len; i++) {
-		ulong w[2] = { 0, 0 };
-		uint64_t r[2];
-
-		fmpz_get_ui_array(w, 2, in->coeffs + i);
-		for (size_t cm = 0; cm < 2; cm++) {
-			const uint64_t v = n.red(w[0], w[1], cm), p = n.p[cm];
-			const uint64_t h = (uint64_t) (((__uint128_t) sp[cm] * v) >> 64);
-			uint64_t t = s[cm] * v - h * p;
-
-			r[cm] = t - ((t >= p) ? p : 0);
-		}
-		/* CRT: r0 + p0 ((r1 - r0) p0^-1 mod p1), below q. */
-		const uint64_t p1 = c.p1, r0m = n.red(r[0], 1);
-		const uint64_t d = (r[1] >= r0m) ? r[1] - r0m : r[1] + p1 - r0m;
-		const uint64_t h = (uint64_t) (((__uint128_t) c.wp * d) >> 64);
-		uint64_t t = d * c.w - h * p1;
-		t -= (t >= p1) ? p1 : 0;
-		const __uint128_t v = (__uint128_t) r[0] + (__uint128_t) c.p0 * t;
-		const ulong o[2] = { (ulong) v, (ulong) (v >> 64) };
-
-		fmpz_set_ui_array(out->coeffs + i, o, 2);
+		aex_to_fmpz(out->coeffs + i, aex_mul(s, aex_from_fmpz(in->coeffs + i)));
 	}
 	_fmpz_mod_poly_set_length(out, len);
 	_fmpz_mod_poly_normalise(out);
@@ -1783,58 +1567,31 @@ static void scalar_mul(fmpz_mod_poly_t out, const fmpz_mod_poly_t in,
 
 static void poly_to(params::poly_q & out, fmpz_mod_poly_t & in,
 		const fmpz_mod_ctx_t ctx) {
-	/* in's coefficients are reduced mod q, so each is below 2^128 and is taken
-	 * apart into its residues directly; past in's length they are zero. */
+	/* in's coefficients are reduced mod q, so each is one aex_w; past in's
+	 * length they are zero. */
 	const slong len = fmpz_mod_poly_length(in, ctx);
-	const util::rns < params::poly_q > &n = util::rns < params::poly_q >::get();
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		ulong w[2] = { 0, 0 };
-
-		if ((slong) i < len) {
-			fmpz_get_ui_array(w, 2, in->coeffs + i);
-		}
-		for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-			out(cm, i) = n.red(w[0], w[1], cm);
-		}
+		out(0, i) = ((slong) i < len) ? aex_from_fmpz(in->coeffs + i) : 0;
 	}
 	out.ntt_pow_phi();
 }
 
 #ifdef MAIN
 /* Only the tests convert this way now: the prover and the verifier keep
- * their sums in residues (aex_rpoly). */
+ * their sums as aex_rpoly. */
 static void poly_from(fmpz_mod_poly_t & out, params::poly_q & in,
 		const fmpz_mod_ctx_t ctx) {
-	/* in is stored as RNS residues, so recombine them directly rather than
-	 * going through poly2mpz and an mpz per coefficient. No centring: out's
-	 * modulus is the same moduli product, so centring is a no-op modulo it. */
-	static_assert(params::poly_q::nmoduli == 2, "CRT below assumes two moduli");
-	static int ready = 0;
-	static aex_u64 P0, P1, P0inv;
+	/* No centring: out's modulus is q, so centring is a no-op modulo it.
+	 * Write the coefficient array directly: the values are already reduced,
+	 * so fmpz_mod_poly_set_coeff_fmpz's bounds check, length update and
+	 * redundant reduction are all wasted work at 4096 coefficients. */
 	const size_t N = params::poly_q::degree;
-	if (!ready) {
-		P0 = nfl::params < uint64_t >::P[0];
-		P1 = nfl::params < uint64_t >::P[1];
-		P0inv = aex_pow(P0 % P1, P1 - 2, P1);
-		ready = 1;
-	}
-	in.invntt_pow_invphi();
-	const uint64_t *d = in.data();
 
-	/* Write the coefficient array directly: the recombined values are already
-	 * reduced, so fmpz_mod_poly_set_coeff_fmpz's bounds check, length update
-	 * and redundant reduction are all wasted work at 4096 coefficients. */
+	in.invntt_pow_invphi();
 	fmpz_mod_poly_fit_length(out, N, ctx);
 	for (size_t l = 0; l < N; l++) {
-		aex_u64 r0 = d[l], r1 = d[N + l];
-		aex_u64 t = aex_mul(aex_sub(r1 % P1, r0 % P1, P1), P0inv, P1);
-		__uint128_t val = (__uint128_t) P0 * t + r0;
-		unsigned long limb[2] = {
-			(unsigned long) (val & 0xffffffffffffffffULL),
-			(unsigned long) (val >> 64)
-		};
-		fmpz_set_ui_array(out->coeffs + l, limb, 2);
+		aex_to_fmpz(out->coeffs + l, in(0, l));
 	}
 	_fmpz_mod_poly_set_length(out, N);
 	_fmpz_mod_poly_normalise(out);
@@ -1971,71 +1728,42 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 	bdlop_commit(com, d, key, rd);
 
 	/* Compute the v_{i,j} by the three-round extraction, one coefficient
-	 * position at a time and one prime at a time, recombining by CRT. */
+	 * position at a time. */
 	{
 		const size_t N = params::poly_q::degree;
-		const size_t NM = params::poly_q::nmoduli;
-		aex_u64 P[2], wt[2];
-		aex_tw_t TT[2];
-		for (size_t j = 0; j < NM; j++) {
-			P[j] = nfl::params < uint64_t >::P[j];
-			for (ulong g = 2;; g++) {
-				wt[j] = aex_pow(g, (P[j] - 1) / TAU, P[j]);
-				if (aex_pow(wt[j], TAU / 2, P[j]) != 1) break;
-			}
-			aex_tw_init(TT[j], TAU, wt[j], P[j]);
-		}
+		aex_tw_t TT;
+		aex_tw_init(TT, TAU, aex_root(TAU));
 
-		aex_u64 *sres = new aex_u64[NM * N * TAU];
-		aex_u64 *s0res = new aex_u64[NM * N];
-		aex_u64 *buf = new aex_u64[3 * TAU];
-		static aex_u64 out[2][3][TAU];
-		mpz_t pz;
-		mpz_init(pz);
+		aex_w *sres = new aex_w[N * TAU];
+		aex_w *s0res = new aex_w[N];
+		aex_w *buf = new aex_w[3 * TAU];
+		static aex_w out[3][TAU];
 
 		for (size_t k = 0; k < V; k++) {
-			/* data()[j * N + l] is already coefficient l modulo P[j], so the
-			 * residues can be read straight out without going through mpz. */
+			/* data()[l] is already coefficient l, so the values can be read
+			 * straight out without going through mpz. */
 			s0[k].invntt_pow_invphi();
-			{
-				const uint64_t *d = s0[k].data();
-				for (size_t j = 0; j < NM; j++) {
-					for (size_t l = 0; l < N; l++) {
-						s0res[j * N + l] = d[j * N + l];
-					}
-				}
-			}
+			memcpy(s0res, s0[k].data(), N * sizeof(aex_w));
 			s0[k].ntt_pow_phi();
 			for (size_t i = 0; i < TAU; i++) {
 				s[i][k].invntt_pow_invphi();
-				const uint64_t *d = s[i][k].data();
-				for (size_t j = 0; j < NM; j++) {
-					for (size_t l = 0; l < N; l++) {
-						sres[(j * N + l) * TAU + i] = d[j * N + l];
-					}
+				const aex_w *d = s[i][k].data();
+				for (size_t l = 0; l < N; l++) {
+					sres[l * TAU + i] = d[l];
 				}
 				s[i][k].ntt_pow_phi();
 			}
 			for (size_t l = 0; l < N; l++) {
-				for (size_t j = 0; j < NM; j++) {
-					aex_extract(s0res[j * N + l], sres + (j * N + l) * TAU,
-							out[j], TT[j], buf, aex_set_at(k, l));
-				}
-				/* Kept as residues: the encoder and the sums below work
-				 * modulo each prime. */
+				aex_extract(s0res[l], sres + l * TAU, out, TT, buf,
+						aex_set_at(k, l));
 				for (size_t jj = 0; jj < 3; jj++) {
 					for (size_t i = 0; i < TAU; i++) {
-						for (size_t j = 0; j < NM; j++) {
-							v[jj][i][k][j * N + l] = out[j][jj][i];
-						}
+						v[jj][i][k][l] = out[jj][i];
 					}
 				}
 			}
 		}
-		for (size_t j = 0; j < NM; j++) {
-			aex_tw_clear(TT[j]);
-		}
-		mpz_clear(pz);
+		aex_tw_clear(TT);
 		delete[]sres;
 		delete[]s0res;
 		delete[]buf;
@@ -2287,13 +2015,13 @@ static int pismall_verifier(commit_t & com, fmpz_mod_poly_t f[V][AEX_DEG],
 			memset(ru, 0, sizeof(aex_rpoly) * AEX_DEG);
 			for (int a = 0; a < AEX_DEG; a++) {
 				for (int b = 0; b < AEX_DEG; b++) {
-					if (aex_basis_nr[a][b]) {
+					if (aex_basis_nr(a, b)) {
 						gr_mul_nr(nrb, l0i.c[b], ctx_q);
 					} else {
 						fmpz_set(nrb, l0i.c[b]);
 					}
 					rs_from_fmpz(sc[0], nrb);
-					rp_addmul(ru[aex_basis_idx[a][b]], rr[i][a].r, sc[0]);
+					rp_addmul(ru[aex_basis_idx(a, b)], rr[i][a].r, sc[0]);
 				}
 			}
 			for (int c = 1; c < AEX_DEG; c++) {
@@ -2574,23 +2302,21 @@ static void aex_scalar_test_setup(comkey_t & key, commit_t * P,
 /* Exact division by X^TAU - 1 into a separate buffer: Q_{m-TAU} = c_m + Q_m,
  * taken from the top. src and dst must not alias -- computing it in place
  * silently evaluates a different recurrence. */
-static size_t aex_divl0(aex_u64 * dst, const aex_u64 * src, size_t len,
-		aex_u64 p) {
+static size_t aex_divl0(aex_w * dst, const aex_w * src, size_t len) {
 	for (size_t i = 0; i < len; i++) {
 		dst[i] = 0;
 	}
 	for (size_t m = len; m-- > TAU;) {
-		dst[m - TAU] = aex_add(src[m], dst[m], p);
+		dst[m - TAU] = aex_add(src[m], dst[m]);
 	}
 	return len > TAU ? len - TAU : 1;
 }
 
 /* The extraction aex_extract replaced, through P(f) on 4 TAU points and the
  * division by X^TAU - 1 level by level, for the tests. */
-static void aex_extract_ref(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
-		const aex_tw_t & TT, const aex_tw_t & T4, aex_u64 * bufA,
-		aex_u64 * bufB, aex_u64 * buft, aex_set_t set) {
-	const aex_u64 p = TT.p;
+static void aex_extract_ref(aex_w a, const aex_w * b, aex_w out[3][TAU],
+		const aex_tw_t & TT, const aex_tw_t & T4, aex_w * bufA,
+		aex_w * bufB, aex_w * buft, aex_set_t set) {
 	/* g = interpolant of b at the nodes */
 	for (size_t i = 0; i < TAU; i++) {
 		buft[i] = b[i];
@@ -2603,8 +2329,8 @@ static void aex_extract_ref(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
 	for (size_t i = 0; i < TAU; i++) {
 		bufA[i] = buft[i];
 	}
-	bufA[0] = aex_sub(bufA[0], a, p);
-	bufA[TAU] = aex_add(bufA[TAU], a, p);
+	bufA[0] = aex_sub(bufA[0], a);
+	bufA[TAU] = aex_add(bufA[TAU], a);
 	for (size_t i = 0; i <= TAU; i++) {
 		bufB[i] = bufA[i];
 	}
@@ -2619,29 +2345,29 @@ static void aex_extract_ref(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
 	} else if (set != AEX_ZERO) {
 		aex_ntt_tw(bufA, T4, 0);
 		for (size_t i = 0; i < AEX_N4; i++) {
-			aex_u64 fi = bufA[i];
-			aex_u64 sq = aex_mul(fi, fi, p);
-			bufA[i] = (set == AEX_TER) ? aex_mul(sq, fi, p) : sq;
+			aex_w fi = bufA[i];
+			aex_w sq = aex_mul(fi, fi);
+			bufA[i] = (set == AEX_TER) ? aex_mul(sq, fi) : sq;
 		}
 		aex_ntt_tw(bufA, T4, 1);
 		if (set == AEX_SGN) {
-			bufA[0] = aex_sub(bufA[0], 1, p);
+			bufA[0] = aex_sub(bufA[0], 1);
 		} else {
 			for (size_t i = 0; i <= TAU; i++) {
-				bufA[i] = aex_sub(bufA[i], bufB[i], p);
+				bufA[i] = aex_sub(bufA[i], bufB[i]);
 			}
 		}
 	}
 	/* Q = P(f) / (X^TAU - 1) */
-	size_t len = aex_divl0(bufB, bufA, AEX_N4, p);
-	aex_u64 *cur = bufB, *oth = bufA;
+	size_t len = aex_divl0(bufB, bufA, AEX_N4);
+	aex_w *cur = bufB, *oth = bufA;
 
 	for (int j = 0; j < 3; j++) {
 		for (size_t i = 0; i < TAU; i++) {
 			buft[i] = 0;
 		}
 		for (size_t m = 0; m < len; m++) {
-			buft[m % TAU] = aex_add(buft[m % TAU], cur[m], p);
+			buft[m % TAU] = aex_add(buft[m % TAU], cur[m]);
 		}
 		aex_ntt_tw(buft, TT, 0);
 		for (size_t i = 0; i < TAU; i++) {
@@ -2652,22 +2378,35 @@ static void aex_extract_ref(aex_u64 a, const aex_u64 * b, aex_u64 out[3][TAU],
 		}
 		aex_ntt_tw(buft, TT, 1);
 		for (size_t i = 0; i < TAU && i < len; i++) {
-			cur[i] = aex_sub(cur[i], buft[i], p);
+			cur[i] = aex_sub(cur[i], buft[i]);
 		}
-		len = aex_divl0(oth, cur, len, p);
-		aex_u64 *sw = cur;
+		len = aex_divl0(oth, cur, len);
+		aex_w *sw = cur;
 		cur = oth;
 		oth = sw;
 	}
 }
 
 
+/* A uniform value of Z_q, for the tests. */
+static aex_w aex_randq(flint_rand_t rand) {
+	fmpz_t x, Q;
+	aex_w r;
+
+	fmpz_init(x);
+	fmpz_init(Q);
+	aex_to_fmpz(Q, zq::MODULUS);
+	fmpz_randm(x, rand, Q);
+	r = aex_from_fmpz(x);
+	fmpz_clear(x);
+	fmpz_clear(Q);
+	return r;
+}
+
 /* The straightforward transform aex_ntt_tw replaced, for the tests. */
-static void aex_ntt_tw_ref(aex_u64 * a, const aex_tw_t & t, int inverse) {
+static void aex_ntt_tw_ref(aex_w * a, const aex_tw_t & t, int inverse) {
 	const size_t n = t.n;
-	const aex_u64 p = t.p;
-	const aex_u64 *W = inverse ? t.iw : t.w;
-	const aex_u64 *Wp = inverse ? t.iwp : t.wp;
+	const aex_w *W = inverse ? t.iw : t.w;
 
 	for (size_t i = 1, j = 0; i < n; i++) {
 		size_t bit = n >> 1;
@@ -2676,7 +2415,7 @@ static void aex_ntt_tw_ref(aex_u64 * a, const aex_tw_t & t, int inverse) {
 		}
 		j ^= bit;
 		if (i < j) {
-			aex_u64 x = a[i]; a[i] = a[j]; a[j] = x;
+			aex_w x = a[i]; a[i] = a[j]; a[j] = x;
 		}
 	}
 	for (size_t len = 2; len <= n; len <<= 1) {
@@ -2684,16 +2423,16 @@ static void aex_ntt_tw_ref(aex_u64 * a, const aex_tw_t & t, int inverse) {
 		for (size_t i = 0; i < n; i += len) {
 			for (size_t k = 0; k < len / 2; k++) {
 				size_t idx = k * step;
-				aex_u64 u = a[i + k];
-				aex_u64 v = aex_mul_shoup(a[i + k + len / 2], W[idx], Wp[idx], p);
-				a[i + k] = aex_add(u, v, p);
-				a[i + k + len / 2] = aex_sub(u, v, p);
+				aex_w u = a[i + k];
+				aex_w v = aex_mul(a[i + k + len / 2], W[idx]);
+				a[i + k] = aex_add(u, v);
+				a[i + k + len / 2] = aex_sub(u, v);
 			}
 		}
 	}
 	if (inverse) {
 		for (size_t i = 0; i < n; i++) {
-			a[i] = aex_mul_shoup(a[i], t.ninv, t.ninvp, p);
+			a[i] = aex_mul(a[i], t.ninv);
 		}
 	}
 }
@@ -2778,56 +2517,46 @@ static void test(flint_rand_t rand) {
 	fmpz_mod_poly_init(lag[TAU], ctx);
 
 	rd.resize(WIDTH);
-	TEST_ONCE("aex_mul agrees with a 128-bit remainder") {
-		/* Its floating-point quotient against the exact one, for both moduli,
-		 * at random operands and at the extremes. */
+	TEST_ONCE("aex_mul agrees with FLINT's") {
+		/* zq's folding reduction against fmpz, at random operands and at the
+		 * extremes. */
+		const aex_w ends[4] = { 0, 1, zq::MODULUS - 2, zq::MODULUS - 1 };
+		fmpz_t fa, fb, fc;
 		int ok = 1;
 
-		for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-			const aex_u64 p = params::poly_q::get_modulus(cm);
-			const aex_u64 ends[4] = { 0, 1, p - 2, p - 1 };
+		fmpz_init(fa); fmpz_init(fb); fmpz_init(fc);
+		for (int k = 0; k < 100016; k++) {
+			const aex_w a = (k < 16) ? ends[k / 4] : aex_randq(rand);
+			const aex_w b = (k < 16) ? ends[k % 4] : aex_randq(rand);
 
-			for (int i = 0; i < 4; i++) {
-				for (int j = 0; j < 4; j++) {
-					ok &= aex_mul(ends[i], ends[j], p) ==
-							(aex_u64) ((__uint128_t) ends[i] * ends[j] % p);
-				}
-			}
-			for (int k = 0; k < 1000000; k++) {
-				const aex_u64 a = n_randint(rand, p), b = n_randint(rand, p);
-				ok &= aex_mul(a, b, p) == (aex_u64) ((__uint128_t) a * b % p);
-			}
+			aex_to_fmpz(fa, a);
+			aex_to_fmpz(fb, b);
+			fmpz_mod_mul(fc, fa, fb, ctx_q);
+			ok &= aex_mul(a, b) == aex_from_fmpz(fc);
 		}
+		fmpz_clear(fa); fmpz_clear(fb); fmpz_clear(fc);
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
-	TEST_ONCE("the lazy NTT agrees with the straightforward one") {
-		/* Both lengths the extraction uses, both directions, both primes, at
-		 * random inputs and at all p - 1. */
+	TEST_ONCE("the NTT agrees with the straightforward one") {
+		/* Both lengths the extraction uses, both directions, at random inputs
+		 * and at all q - 1. */
 		int ok = 1;
-		aex_u64 *x = new aex_u64[AEX_N4], *y = new aex_u64[AEX_N4];
+		aex_w *x = new aex_w[AEX_N4], *y = new aex_w[AEX_N4];
 
-		for (size_t cm = 0; cm < params::poly_q::nmoduli && ok; cm++) {
-			const aex_u64 p = nfl::params < uint64_t >::P[cm];
-			for (size_t n : { (size_t) TAU, (size_t) AEX_N4 }) {
-				aex_u64 w = 0;
-				aex_tw_t tw;
-				for (ulong g = 2;; g++) {
-					w = aex_pow(g, (p - 1) / n, p);
-					if (aex_pow(w, n / 2, p) != 1) break;
+		for (size_t n : { (size_t) TAU, (size_t) AEX_N4 }) {
+			aex_tw_t tw;
+			aex_tw_init(tw, n, aex_root(n));
+			for (int rep = 0; rep < 6 && ok; rep++) {
+				for (size_t i = 0; i < n; i++) {
+					x[i] = (rep == 0) ? zq::MODULUS - 1 : aex_randq(rand);
+					y[i] = x[i];
 				}
-				aex_tw_init(tw, n, w, p);
-				for (int rep = 0; rep < 6 && ok; rep++) {
-					for (size_t i = 0; i < n; i++) {
-						x[i] = (rep == 0) ? p - 1 : n_randint(rand, p);
-						y[i] = x[i];
-					}
-					aex_ntt_tw(x, tw, rep & 1);
-					aex_ntt_tw_ref(y, tw, rep & 1);
-					for (size_t i = 0; i < n; i++) ok &= x[i] == y[i];
-				}
-				aex_tw_clear(tw);
+				aex_ntt_tw(x, tw, rep & 1);
+				aex_ntt_tw_ref(y, tw, rep & 1);
+				for (size_t i = 0; i < n; i++) ok &= x[i] == y[i];
 			}
+			aex_tw_clear(tw);
 		}
 		delete[] x;
 		delete[] y;
@@ -2835,51 +2564,38 @@ static void test(flint_rand_t rand) {
 	} TEST_END;
 
 	TEST_ONCE("extraction by derivatives agrees with division") {
-		/* aex_extract against aex_extract_ref, for every set, both primes,
-		 * at random a and at a = p - 1, with b in the set as an honest
-		 * witness has it. */
-		aex_u64 *bufA = new aex_u64[AEX_N4], *bufB = new aex_u64[AEX_N4];
-		aex_u64 *buft = new aex_u64[TAU], *buf = new aex_u64[3 * TAU];
-		static aex_u64 o0[3][TAU], o1[3][TAU];
-		aex_u64 b[TAU];
+		/* aex_extract against aex_extract_ref, for every set, at random a and
+		 * at a = q - 1, with b in the set as an honest witness has it. */
+		aex_w *bufA = new aex_w[AEX_N4], *bufB = new aex_w[AEX_N4];
+		aex_w *buft = new aex_w[TAU], *buf = new aex_w[3 * TAU];
+		static aex_w o0[3][TAU], o1[3][TAU];
+		aex_w b[TAU];
+		aex_tw_t TT, T4;
 		int ok = 1;
 
-		for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-			const aex_u64 p = nfl::params < uint64_t >::P[cm];
-			aex_u64 wt = 0, w4 = 0;
-			aex_tw_t TT, T4;
-			for (ulong g = 2;; g++) {
-				wt = aex_pow(g, (p - 1) / TAU, p);
-				if (aex_pow(wt, TAU / 2, p) != 1) break;
-			}
-			for (ulong g = 2;; g++) {
-				w4 = aex_pow(g, (p - 1) / AEX_N4, p);
-				if (aex_pow(w4, AEX_N4 / 2, p) != 1) break;
-			}
-			aex_tw_init(TT, TAU, wt, p);
-			aex_tw_init(T4, AEX_N4, w4, p);
-			for (aex_set_t set : { AEX_TER, AEX_BIN, AEX_SGN, AEX_ZERO, AEX_FREE }) {
-				for (int rep = 0; rep < 20; rep++) {
-					const aex_u64 a = (rep == 0) ? p - 1 : n_randint(rand, p);
+		aex_tw_init(TT, TAU, aex_root(TAU));
+		aex_tw_init(T4, AEX_N4, aex_root(AEX_N4));
+		for (aex_set_t set : { AEX_TER, AEX_BIN, AEX_SGN, AEX_ZERO, AEX_FREE }) {
+			for (int rep = 0; rep < 20; rep++) {
+				const aex_w a = (rep == 0) ? zq::MODULUS - 1 : aex_randq(rand);
+				for (size_t i = 0; i < TAU; i++) {
+					const aex_w v = n_randint(rand, 3);
+					b[i] = (set == AEX_TER) ? (v == 2 ? zq::MODULUS - 1 : v) :
+							(set == AEX_BIN) ? (v & 1) :
+							(set == AEX_SGN) ? ((v & 1) ? zq::MODULUS - 1 : 1) :
+							(set == AEX_ZERO) ? 0 : aex_randq(rand);
+				}
+				aex_extract(a, b, o0, TT, buf, set);
+				aex_extract_ref(a, b, o1, TT, T4, bufA, bufB, buft, set);
+				for (size_t j = 0; j < 3; j++) {
 					for (size_t i = 0; i < TAU; i++) {
-						const aex_u64 v = n_randint(rand, 3);
-						b[i] = (set == AEX_TER) ? (v == 2 ? p - 1 : v) :
-								(set == AEX_BIN) ? (v & 1) :
-								(set == AEX_SGN) ? ((v & 1) ? p - 1 : 1) :
-								(set == AEX_ZERO) ? 0 : n_randint(rand, p);
-					}
-					aex_extract(a, b, o0, TT, buf, set);
-					aex_extract_ref(a, b, o1, TT, T4, bufA, bufB, buft, set);
-					for (size_t j = 0; j < 3; j++) {
-						for (size_t i = 0; i < TAU; i++) {
-							ok &= o0[j][i] == o1[j][i];
-						}
+						ok &= o0[j][i] == o1[j][i];
 					}
 				}
 			}
-			aex_tw_clear(TT);
-			aex_tw_clear(T4);
 		}
+		aex_tw_clear(TT);
+		aex_tw_clear(T4);
 		delete[] bufA;
 		delete[] bufB;
 		delete[] buft;
@@ -2890,23 +2606,20 @@ static void test(flint_rand_t rand) {
 	TEST_ONCE("the pruned DIF transform is the NTT in bit-reversed order") {
 		/* aex_ntt_dif on the encoder's tables against the straightforward
 		 * transform, with x zero past the message length, at random inputs
-		 * and at all p - 1. */
+		 * and at all q - 1. */
 		const size_t len = 2 * params::poly_q::degree + ETA;
-		aex_u64 *x = new aex_u64[AEX_COLS], *y = new aex_u64[AEX_COLS];
+		aex_w *x = new aex_w[AEX_COLS], *y = new aex_w[AEX_COLS];
 		int ok = 1;
 
-		for (size_t cm = 0; cm < 2; cm++) {
-			const aex_u64 p = aex_tw[cm].p;
-			for (int rep = 0; rep < 2; rep++) {
-				for (size_t i = 0; i < AEX_COLS; i++) {
-					x[i] = (i >= len) ? 0 : (rep == 0) ? p - 1 : n_randint(rand, p);
-					y[i] = x[i];
-				}
-				aex_ntt_dif(x, aex_tw[cm], len);
-				aex_ntt_tw_ref(y, aex_tw[cm], 0);
-				for (size_t c = 0; c < AEX_COLS; c++) {
-					ok &= x[c] == y[aex_tw[cm].rev[c]];
-				}
+		for (int rep = 0; rep < 2; rep++) {
+			for (size_t i = 0; i < AEX_COLS; i++) {
+				x[i] = (i >= len) ? 0 : (rep == 0) ? zq::MODULUS - 1 : aex_randq(rand);
+				y[i] = x[i];
+			}
+			aex_ntt_dif(x, aex_tw, len);
+			aex_ntt_tw_ref(y, aex_tw, 0);
+			for (size_t c = 0; c < AEX_COLS; c++) {
+				ok &= x[c] == y[aex_tw.rev[c]];
 			}
 		}
 		delete[] x;
@@ -2914,9 +2627,9 @@ static void test(flint_rand_t rand) {
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
-	TEST_ONCE("GR multiplication per prime agrees with gr_mul") {
-		/* grq_mul on each prime's residues against gr_mul over Z_q, at
-		 * random elements and at ones whose coordinates are all q - 1. */
+	TEST_ONCE("GR multiplication on aex_w agrees with gr_mul") {
+		/* grq_mul against gr_mul over fmpz, at random elements and at ones
+		 * whose coordinates are all q - 1. */
 		gr_t ga, gb, gc;
 		fmpz_t Q;
 		aex_rscalar sc;
@@ -2926,6 +2639,8 @@ static void test(flint_rand_t rand) {
 		fmpz_init(Q);
 		fmpz_set_mpz(Q, params::poly_q::moduli_product());
 		for (int k = 0; k < 200 && ok; k++) {
+			aex_w ra[AEX_DEG], rb[AEX_DEG], rc_[AEX_DEG];
+
 			for (int i = 0; i < AEX_DEG; i++) {
 				if (k == 0) {
 					fmpz_sub_ui(ga.c[i], Q, 1);
@@ -2936,19 +2651,14 @@ static void test(flint_rand_t rand) {
 				}
 			}
 			gr_mul(gc, ga, gb, ctx_q);
-			for (size_t cm = 0; cm < 2; cm++) {
-				uint64_t ra[AEX_DEG], rb[AEX_DEG], rc_[AEX_DEG];
-				const uint64_t p = params::poly_q::get_modulus(cm);
-
-				for (int i = 0; i < AEX_DEG; i++) {
-					rs_from_fmpz(sc, ga.c[i]); ra[i] = sc.s[cm];
-					rs_from_fmpz(sc, gb.c[i]); rb[i] = sc.s[cm];
-				}
-				grq_mul(rc_, ra, rb, p);
-				for (int i = 0; i < AEX_DEG; i++) {
-					rs_from_fmpz(sc, gc.c[i]);
-					ok &= rc_[i] == sc.s[cm];
-				}
+			for (int i = 0; i < AEX_DEG; i++) {
+				rs_from_fmpz(sc, ga.c[i]); ra[i] = sc.s;
+				rs_from_fmpz(sc, gb.c[i]); rb[i] = sc.s;
+			}
+			grq_mul(rc_, ra, rb);
+			for (int i = 0; i < AEX_DEG; i++) {
+				rs_from_fmpz(sc, gc.c[i]);
+				ok &= rc_[i] == sc.s;
 			}
 		}
 		gr_clear(ga); gr_clear(gb); gr_clear(gc);
@@ -3068,7 +2778,7 @@ static void test(flint_rand_t rand) {
 	bdlop_sample_rand(rd);
 
 	TEST_ONCE("a codeword is the message evaluated at the roots of unity") {
-		/* Symbol c of Encode(m0, m1, r), mod each prime p, is the message
+		/* Symbol c of Encode(m0, m1, r) is the message
 		 * polynomial (m0, m1, r, then zeros) evaluated at w^rev(c), with w the
 		 * primitive AEX_COLS-th root aex_ntt_setup took: checked by Horner
 		 * at a few columns, the first and the last among them. */
@@ -3087,24 +2797,18 @@ static void test(flint_rand_t rand) {
 		}
 		aex_encode(*cw, m0, m1, (const fmpz *) r, ctx);
 		const size_t N = params::poly_q::degree, cols[4] = { 0, 1, 5000, AEX_COLS - 1 };
-		for (size_t cm = 0; cm < 2; cm++) {
-			const aex_u64 p = aex_tw[cm].p, w = aex_tw[cm].w[1];
-			for (size_t t = 0; t < 4; t++) {
-				const aex_u64 x = aex_pow(w, aex_tw[cm].rev[cols[t]], p);
-				aex_u64 acc = 0;
-				/* Horner from the top coefficient, 2N + ETA - 1, down. */
-				for (size_t i = 2 * N + ETA; i-- > 0;) {
-					if (i < N) fmpz_mod_poly_get_coeff_fmpz(cf, m0, i, ctx);
-					else if (i < 2 * N) fmpz_mod_poly_get_coeff_fmpz(cf, m1, i - N, ctx);
-					else fmpz_set(cf, r[i - 2 * N]);
-					ulong lw[2] = { 0, 0 };
-					fmpz_get_ui_array(lw, 2, cf);
-					const aex_u64 ci = (aex_u64) ((((__uint128_t) lw[1] << 64) | lw[0]) % p);
-					acc = aex_add(aex_mul(acc, x, p), ci, p);
-				}
-				const __uint128_t sym = ((__uint128_t) cw->w[2 * cols[t] + 1] << 64) | cw->w[2 * cols[t]];
-				ok &= (aex_u64) (sym % p) == acc;
+		const aex_w w = aex_tw.w[1];
+		for (size_t t = 0; t < 4; t++) {
+			const aex_w x = aex_pow(w, aex_tw.rev[cols[t]]);
+			aex_w acc = 0;
+			/* Horner from the top coefficient, 2N + ETA - 1, down. */
+			for (size_t i = 2 * N + ETA; i-- > 0;) {
+				if (i < N) fmpz_mod_poly_get_coeff_fmpz(cf, m0, i, ctx);
+				else if (i < 2 * N) fmpz_mod_poly_get_coeff_fmpz(cf, m1, i - N, ctx);
+				else fmpz_set(cf, r[i - 2 * N]);
+				acc = aex_add(aex_mul(acc, x), aex_from_fmpz(cf));
 			}
+			ok &= aex_code_sym(cw, cols[t]) == acc;
 		}
 		for (size_t i = 0; i < ETA; i++) fmpz_clear(r[i]);
 		fmpz_clear(cf);
@@ -3250,16 +2954,16 @@ static void test(flint_rand_t rand) {
 		 * second coordinate, and that the proof verifies anyway, so that the
 		 * Y^1 identity is satisfied rather than vacuous. */
 		/* X^AEX_DEG - AEX_NR is only irreducible while AEX_NR is a non-residue
-		 * modulo every prime of the basis. If that ever stops holding the
-		 * extension silently collapses and the soundness claim with it. At
-		 * degree 4 the criterion also asks that AEX_NR not lie in -4 (Z_p)^4,
-		 * which follows: p = 1 mod 4 here, so -1 is a square, and -AEX_NR/4 is
-		 * then a non-square and cannot be a fourth power. Both halves are
-		 * checked below. */
+		 * modulo q. If that ever stops holding the extension silently
+		 * collapses and the soundness claim with it. At degree 4 the criterion
+		 * also asks that AEX_NR not lie in -4 (Z_q)^4, which follows: q = 1
+		 * mod 4, so -1 is a square, and -AEX_NR/4 is then a non-square and
+		 * cannot be a fourth power. Both halves are checked below. */
 		live = 1;
-		for (size_t i = 0; i < params::poly_q::nmoduli; i++) {
+		{
 			fmpz_t pi, e, w;
-			fmpz_init_set_ui(pi, nfl::params < uint64_t >::P[i]);
+			fmpz_init(pi);
+			aex_to_fmpz(pi, zq::MODULUS);
 			fmpz_init(e);
 			fmpz_init(w);
 			fmpz_sub_ui(e, pi, 1);
@@ -3268,8 +2972,8 @@ static void test(flint_rand_t rand) {
 			fmpz_powm(w, w, e, pi);          /* Euler: -1 iff a non-residue */
 			fmpz_sub_ui(e, pi, 1);
 			live &= fmpz_equal(w, e);
-			/* p = 1 mod 4, the other half of the degree-4 criterion. */
-			live &= (nfl::params < uint64_t >::P[i] % 4 == 1);
+			/* q = 1 mod 4, the other half of the degree-4 criterion. */
+			live &= (zq::MODULUS % 4 == 1);
 			fmpz_clear(pi);
 			fmpz_clear(e);
 			fmpz_clear(w);
@@ -3386,27 +3090,21 @@ static void test(flint_rand_t rand) {
 		TEST_ASSERT(ok == 0, end);
 	} TEST_END;
 
-	TEST_ONCE("KNOWN GAP: the coefficient sets are per CRT component") {
-		/* Not a gap in the proof of shuffle, which compensates with a norm
-		 * bound, but a gap in what Pi_SMALL establishes on its own. */
-		/* q is composite, so f^3 - f has 27 roots in Z_q and not 3: every CRT
-		 * combination of {-1, 0, 1} satisfies the identity the proof checks.
-		 * The witness below is +1 modulo the first prime and -1 modulo the
-		 * second in every coefficient, which is as far from ternary over Z_q
-		 * as an element gets, and the proof accepts it. The same holds for the
-		 * binary and sign sets, and it is why the proof of shuffle declares its
-		 * sigma_i AEX_SCALAR rather than using any of them: the singleton {0}
-		 * behind that declaration is the one set here that is exact over Z_q.
-		 * See SOUNDNESS.md, sections 5.1 and 5.2. Asserting the bug, so that a
-		 * Pi_SMALL that became exact throughout would turn this test red. */
-		aex_open_t o;
-		params::poly_q z;
+	TEST_ONCE("AEX proof rejects a coefficient outside its set") {
+		/* With two primes this was a known gap: f^3 - f had 27 roots in Z_q,
+		 * and a witness +1 modulo one prime and -1 modulo the other in every
+		 * coefficient passed as ternary. q is prime now, so the roots are
+		 * -1, 0, 1 and nothing else, and the sets are exact over Z_q. The
+		 * witness below has every coefficient 2. See SOUNDNESS.md, sections
+		 * 5.1 and 5.2. */
+		aex_open_t o = { };
+		params::poly_q z, s00 = s[0][0];
+		vector < params::poly_q > t0(t[0], t[0] + R);
 		int ok;
 
 		z = 0;
 		for (size_t l = 0; l < params::poly_q::degree; l++) {
-			z(0, l) = 1;
-			z(1, l) = nfl::params < uint64_t >::P[1] - 1;
+			z(0, l) = 2;
 		}
 		z.ntt_pow_phi();
 		s[0][0] = z;
@@ -3416,10 +3114,15 @@ static void test(flint_rand_t rand) {
 				t[0][j] = t[0][j] + A[j][k] * s[0][k];
 			}
 		}
-		pismall_prover(com, x, f, rf, h, rh, rd, key, lag, rand, ctx, o);
-		ok = pismall_verifier(com, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		ok = pismall_prover(com, x, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		ok = ok && pismall_verifier(com, f, rf, h, rh, rd, key, lag, rand, ctx, o);
 		aex_open_clear(o);
-		TEST_ASSERT(ok == 1, end);
+		/* The benchmarks below prove the honest witness again. */
+		s[0][0] = s00;
+		for (int j = 0; j < R; j++) {
+			t[0][j] = t0[j];
+		}
+		TEST_ASSERT(ok == 0, end);
 	} TEST_END;
 
 	printf("\n** Benchmarks for lattice-based AEX proof:\n\n");

@@ -41,6 +41,7 @@
 #include "ballot_proof.h"
 
 static_assert(BALLOT_DEG == DEGREE, "the ballot proof is for this ring");
+static_assert((zq::u128) BALLOT_Q == zq::MODULUS, "the ballot proof is for this q");
 
 /* The distributed BGV of src/bgv.cpp, which common.h does not declare. */
 void bgv_keyshare(params::poly_q s[], size_t shares, params::poly_q & sk);

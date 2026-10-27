@@ -22,10 +22,10 @@ extern "C" {
 #endif
 
 /* The ring the ballots live in: DEGREE of common.h, which voting.cpp checks,
- * and the product of params::poly_q's two moduli, given as its factors. */
+ * and params::poly_q's prime, 2^88 - 25 2^16 + 1, which voting.cpp checks
+ * too. */
 #define BALLOT_DEG 	4096
-#define BALLOT_Q0 	17592167170049ULL
-#define BALLOT_Q1 	17592123129857ULL
+#define BALLOT_Q 	(((__int128) 1 << 88) - ((__int128) 25 << 16) + 1)
 
 /* Initialise LaZer; call once before proving or verifying. */
 void ballot_setup(void);

@@ -38,18 +38,6 @@
 
 namespace serial {
 
-/** Bits in one residue of coefficient, per prime of the basis. */
-static inline size_t pbits(size_t cm) {
-	size_t b = 0;
-	uint64_t p = nfl::params < uint64_t >::P[cm];
-
-	while (p != 0) {
-		b++;
-		p >>= 1;
-	}
-	return b;
-}
-
 /** A growable bit buffer, written and read most-significant bit first. */
 class bits {
   public:
@@ -141,22 +129,18 @@ static inline int64_t get_rice(bits & b, int k) {
 	return unzigzag(u);
 }
 
-/** Write a uniform ring element: every residue of every coefficient. */
+/** Write a uniform ring element: every coefficient, in the 88 bits of q. */
 static inline void put_uniform(bits & b, const params::poly_q & p) {
-	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-		size_t n = pbits(cm);
-		for (size_t i = 0; i < params::poly_q::degree; i++) {
-			b.put(p(cm, i), n);
-		}
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		b.put((uint64_t) (p(0, i) >> 64), 24);
+		b.put((uint64_t) p(0, i), 64);
 	}
 }
 
 static inline void get_uniform(bits & b, params::poly_q & p) {
-	for (size_t cm = 0; cm < params::poly_q::nmoduli; cm++) {
-		size_t n = pbits(cm);
-		for (size_t i = 0; i < params::poly_q::degree; i++) {
-			p(cm, i) = b.get(n);
-		}
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		zq::u128 hi = b.get(24);
+		p(0, i) = (hi << 64) | b.get(64);
 	}
 }
 
