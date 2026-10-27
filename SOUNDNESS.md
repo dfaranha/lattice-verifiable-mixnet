@@ -1,5 +1,8 @@
 # Soundness of the proof of shuffle on this branch
 
+**On the `single-prime` branch, read section 0 first**: `q` is prime there,
+and it says which of the gaps below that closes.
+
 ## Status of this document
 
 This is a **draft argument, not a reviewed result.** It records what the
@@ -40,6 +43,78 @@ the one taken, repeating each linear proof against challenges bound to each
 other, which closes the layer at `2^-134` and takes 13% off the proof into the
 bargain. With that the numbers in sections 6, 7 and 9 are what the protocol is
 worth rather than what it would be.
+
+## 0. The `single-prime` branch: what a prime `q` changes
+
+The rest of this document was written for `fix-pkc`, where `q = p_1 p_2` is
+the product of two 44-bit NFLlib primes. On the `single-prime` branch `q` is
+one prime,
+
+```
+q = 2^88 - 25 * 2^16 + 1 = 309485009821345068723142657,
+q - 1 = 2^16 * 3 * 29 * 789879043 * 68719476731,
+```
+
+at least as large as the old product, so the noise budget of section 8 and the
+lattice estimates there carry over unchanged. NFLlib cannot hold an 88-bit
+prime, so `include/zq.hpp` replaces it for `poly_q` and `poly_big`: a
+coefficient is one `unsigned __int128`, still 16 bytes, so every hash that
+absorbs `16 * DEGREE` bytes an element still absorbs all of it. Where a section
+below says `p_1`, `p_2` or `p_min`, read `q`; where it says "CRT component",
+read "NTT slot", of which there are now `N = 4096` and not `2N`. What that
+changes, section by section:
+
+| section | on `fix-pkc` | on `single-prime` |
+| --- | --- | --- |
+| 2, the ring | `2N` slots, two fields | `N` slots, one field `Z_q` |
+| 3, short zero divisors | found in seconds modulo `p_1` | exist, but the same search costs about `2^44`; both test patterns are now invertible |
+| 4.2, a singular `b_i` | `2^-21` a pass | `N MSGS / q`, `2^-66` a pass |
+| 5, membership | `Pi_SMALL` and `Pi_BND` | `Pi_SMALL` alone |
+| 5.2, the other sets of `Pi_SMALL` | per CRT component, a `KNOWN GAP` | exact over `Z_q`; the test now asserts rejection |
+| 5.4, one opening, two proofs | argued modulo each `p_j`, MSIS mod each `p_j` | not needed; no assumption beyond MSIS and MLWE mod `q` |
+| 5.5, the AEx challenge | `GR(q,4)`, `18 TAU / p_min^4` | `GR(q,2)`, `18 TAU / q^2 = 2^-160`; `AEX_NR = 5` |
+| 6, a pass of the product argument | `MSGS / p_min = 2^-34`, 4 passes | `MSGS / q = 2^-77`, `SHUFFLE_REPS = 2` |
+| 7, `Pi_LIN` | `2^-44` an instance, a known zero divisor | about `2^-87` an instance, heuristically; `LIN_REPS = 2` |
+| 9, `rho` | `1 / p_min` a pass | `1 / q` a pass, `2^-174` over two |
+
+**Membership needs one sub-proof.** Lemma 5 asks that the committed `sigma_i`
+lie in a set whose differences are units. `Pi_SMALL` shows that each `sigma_i`
+is a constant `c_i in Z_q`, and over a field every non-zero constant is a unit,
+so the set of all constants is admissible as it stands. In each NTT slot the
+product identity is then a polynomial identity over the field `Z_q`, which
+matches the pairs `(a_i, g(i))` with the `(b_j, sigma_j)`; the `g(i)` are
+distinct and each `sigma_j` is the same value in every slot, so every slot reads
+off the same permutation. With two primes a constant could be one integer
+modulo `p_1` and another modulo `p_2`, and `Pi_BND`'s norm bound was what ruled
+that out. The proof of shuffle no longer runs it; it is kept as
+`CONFIG=-DSHUFFLE_PIBND=1`, which passes the same tests. The
+CRT-mixed-`sigma` attack of the test suite is still rejected, now by
+`Pi_SMALL`: half the slots of one constant and half of another is not a
+constant.
+
+**What did not change.** `R_q` still splits all the way, since an NTT needs
+`q = 1 mod 2N`, so nothing proves a difference of sparse ternary challenges
+invertible, and `Pi_LIN` still has no extraction argument of its own: its
+`1 / q` an instance is the heuristic that no such difference vanishes in a
+slot, made more plausible only by the cost of looking for one. The passes and
+repetitions still have to be bound under Fiat-Shamir exactly as sections 6.1
+and 7.1 describe, and are. The zero-knowledge arguments of section 4 and the
+decryption budget of section 8 do not depend on how `q` factors.
+
+**What it costs.** NFLlib keeps a residue in a 64-bit word and vectorises
+across it; `zq` multiplies 128-bit values with four 64-bit products and a fold
+by `2^88 = 25 * 2^16 - 1`. A negacyclic NTT of degree 4096 takes about
+2.3 times as long, an addition about 4 times. The proof does less of
+everything, so it still comes out ahead: at `MSGS = 2`, against `fix-pkc`,
+
+| | `fix-pkc` | `single-prime` |
+| --- | --- | --- |
+| a pass | 372.6 KB/vote | 292.4 KB/vote |
+| the passes | 4, 1490.3 KB/vote | 2, 584.8 KB/vote |
+| `Pi_SMALL` | 1735.3 KB/vote | 1065.6 KB/vote |
+| `Pi_BND` | 3028.1 KB/vote | not run |
+| total | 6341.8 KB/vote | 1738.4 KB/vote |
+| `shuffle-proof` | 5.54 Gcycles | 1.69 Gcycles |
 
 ## 1. The attack
 

@@ -15,54 +15,48 @@ component, and the components need not agree.
 
 The `fix-pkc` branch replaces that product with the one from Lemma 5 of their
 paper, taking `g(i) = i`: differences of distinct indices are non-zero integers
-smaller than either prime of the basis, hence units, which is what the lemma
-asks and which holds however far the ring splits. A second, independent hole found along the way — every
+smaller than `q`, hence units, which is what the lemma asks and which holds
+however far the ring splits. A second, independent hole found along the way — every
 equality the verifier checked was NFLlib's element-wise `operator==`, true as
 soon as the two sides agree in one of the 8192 NTT slots — was fixed on `main`
 and is inherited here.
 
+**This is the `single-prime` branch**: `q` is the prime
+`2^88 - 25 * 2^16 + 1` rather than the product of two 44-bit NFLlib primes,
+and [SOUNDNESS.md](SOUNDNESS.md) section 0 says what that changes. NFLlib cannot
+hold an 88-bit prime, so `include/zq.hpp` replaces it for `R_q`, with one
+128-bit word a coefficient; NFLlib is still used for the plaintext ring.
+
 Lemma 5 also requires the committed permutation elements to lie in a set whose
-differences are units, and the shuffle proves that with two sub-proofs over the
-commitments to the `sigma_i`. `\Pi_SMALL` shows that each `sigma_i` is a ring
-constant — every coefficient above the constant one is zero. That constraint is
-*exact* over `Z_q`, unlike every other coefficient set in that file: `f = 0` has
-a single root however `q` factors. `\Pi_BND` then bounds the norm of the
-openings, and the two together give that every difference of committed constants
-is a unit, by an argument that never has to name the set. A prover who CRT-mixes
-the committed `sigma_i` as well as the messages is rejected.
+differences are units. `\Pi_SMALL` shows that each `sigma_i` is a ring
+constant -- every coefficient above the constant one is zero -- and over a
+prime `q` that is enough: two distinct constants differ by a unit, and a
+constant is the same value in every NTT slot, so every slot reads off the same
+permutation. A prover who mixes the slots of the committed `sigma_i` as well as
+the messages is rejected, since the result is not a constant. With a composite
+`q` a second sub-proof, `\Pi_BND`, had to bound the norm of the openings as
+well; it is kept as `CONFIG=-DSHUFFLE_PIBND=1`.
 
-One pass of the product argument is worth only `MSGS / p_min`, about `2^-34` at
-`MSGS = 1000`, so it is repeated with independent challenges as many times as
-`LEVEL` needs -- four or five at any supported size. The same repetitions cover
-two weaknesses found afterwards. The challenge set of the linear proof is not
-free of zero divisors in a ring splitting this far, so that proof is worth only
-about `2^-44` per pass and has no soundness argument of its own; a `KNOWN GAP`
-test exhibits a legal challenge that is a zero divisor. And the `SIZE` components
-of each message are compressed into one with a vector `rho` before the proof
-sees them, so an output list altered by any `Delta` with
-`\sum_j rho_j Delta_j = 0` was accepted outright, `rho` having been sampled
-rather than derived. It is now hashed from the commitments and the output
-components, and drawn afresh in each pass.
+One pass of the product argument is worth `MSGS / q`, about `2^-77` at
+`MSGS = 1000`, so it is run twice with challenges bound across the passes. The
+same two passes cover the compression of the `SIZE` components of each message
+by a vector `rho`, which is hashed from the commitments and the output
+components and drawn afresh in each pass. The linear proof's challenges are
+sparse ternary differences, and nothing proves those invertible in a ring that
+splits all the way, as an NTT needs; each is taken to be worth about `1 / q`,
+which no known zero divisor contradicts, and the proof is repeated twice against
+challenges bound to each other.
 
-**The modulus has moved from 78 to 88 bits**, because the slack bound feeding
-the distributed-decryption budget drops a factor that the amortized proof's own
-correctness analysis requires. The lattice estimator puts the BGV instance at `2^158` there and the
-commitment's hiding at `2^156`, against `2^180` for the former at the paper's
-modulus, so the ring degree stays at 4096. Binding turns out to need no
-assumption at all at these dimensions: no two openings that short can differ.
-See
-[SOUNDNESS.md](SOUNDNESS.md) section 9.
+**The modulus is 88 bits rather than the paper's 78**, because the slack bound
+feeding the distributed-decryption budget drops a factor that the amortized
+proof's own correctness analysis requires. The lattice estimator puts the BGV
+instance at `2^158` there and the commitment's hiding at `2^156`, against
+`2^180` for the former at the paper's modulus, so the ring degree stays at
+4096. Binding turns out to need no assumption at all at these dimensions: no
+two openings that short can differ. See [SOUNDNESS.md](SOUNDNESS.md) section 9.
 
-**Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this.** Two things
-in particular. `\Pi_SMALL`'s *other* coefficient sets are not exact over `Z_q`,
-where "ternary" means "ternary in each CRT component"; a `KNOWN GAP` test in
-`pismall` exhibits a full-size element it accepts as ternary. That defect is not
-in the path above, but it is real, and the argument below in fact relies on it.
-And
-reading the two sub-proofs as statements about a single opening of `P_i` takes
-an argument, made in section 6.4 modulo each prime of the basis, which costs one
-assumption the mix-net did not make before: MSIS modulo each `p_j` and not only
-modulo their product.
+**Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this**, starting
+with section 0; sections 1 to 12 were written for the composite modulus.
 
 Dependencies are the [NFLlib](https://github.com/quarkslab/NFLlib) and [FLINT](https://flintlib.org/doc/) libraries.
 NFLlib is already included in this repository, but instructions for installing its dependencies can be found in the link above.
@@ -178,5 +172,5 @@ The workflow builds FLINT from source and caches it, rather than installing it f
 
 __WARNING__: This is an academic proof of concept, and in particular has not
 received code review. This implementation is NOT ready for any type of
-production use, in particular because of the soundness gap described above and
-in [SOUNDNESS.md](SOUNDNESS.md).
+production use, in particular because the linear proof's soundness rests on the
+heuristic described above and in [SOUNDNESS.md](SOUNDNESS.md).
