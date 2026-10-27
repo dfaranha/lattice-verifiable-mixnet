@@ -117,10 +117,11 @@ $(OBJ)/pismall-const.o: src/pismall.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -UTAU -DTAU='AEX_PAD2(MSGS)' \
 		-DPISMALL_R='(HEIGHT+1)' -DPISMALL_V='(WIDTH+1)' -c $< -o $@
 
-# pibnd as a library, for the norm bound that makes those coefficient sets
-# exact. Its relation is the commitment equation, so V is WIDTH + 1 rather than
-# the HEIGHT + 3 of the mix-net's own instance, and it needs no padding: the
-# amortization parameter is MSGS itself.
+# pibnd as a library, for the norm bound a composite q needed next to the
+# constant-membership proof; the shuffle calls it only when built with
+# CONFIG=-DSHUFFLE_PIBND=1. Its relation is the commitment equation, so V is
+# WIDTH + 1 rather than the HEIGHT + 3 of the mix-net's own instance, and it
+# needs no padding: the amortization parameter is MSGS itself.
 $(OBJ)/pibnd-short.o: src/pibnd.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -DPIBND_SHORT -c $< -o $@
 

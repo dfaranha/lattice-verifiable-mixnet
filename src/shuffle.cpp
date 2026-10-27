@@ -71,15 +71,21 @@ static double shuffle_now(void) {
  * nothing about a general ring element. It does certify something about a
  * constant, which is why this encoding works and those do not.
  *
- * Lemma 5 also requires the committed sigma_i to lie in D, and two sub-proofs
- * over the same commitments discharge it between them.
+ * Lemma 5 also requires the committed sigma_i to lie in D. With q prime, D can
+ * be every constant: two distinct constants differ by a non-zero element of
+ * the field Z_q, a unit. So one sub-proof discharges it.
  *
- * pismall_const_prove() is the algebraic half: the amortized exact proof of
- * src/pismall.cpp over all MSGS commitments, showing that every coefficient of
- * sigma_i above the constant one is zero. That constraint is exact over Z_q,
- * unlike every other coefficient set in that file -- f = 0 has a single root
- * however q factors -- so nothing here needs repairing afterwards. It leaves
- * sigma_i an arbitrary constant c_i.
+ * pismall_const_prove() is the amortized exact proof of src/pismall.cpp over
+ * all MSGS commitments, showing that every coefficient of sigma_i above the
+ * constant one is zero. It leaves sigma_i an arbitrary constant c_i, which is
+ * the same value in every NTT slot, so in each slot the product identity
+ * matches the pairs (a_i, g(i)) with the (b_j, sigma_j) and the permutation
+ * it reads off is the same in all of them.
+ *
+ * With q = p_1 p_2 that was not enough: a constant could be one integer
+ * modulo p_1 and another modulo p_2, and a difference divisible by p_1 was a
+ * zero divisor. The size half below closed that, and is kept, off by
+ * default, as SHUFFLE_PIBND; see SOUNDNESS.md section 5.
  *
  * pibnd_short_prove() is the size half: Pi_BND over the same commitments,
  * bounding the openings. Together with the argument of SOUNDNESS.md section
@@ -98,6 +104,12 @@ static double shuffle_now(void) {
  * assumption, MSIS modulo each p_j and not only modulo their product. See
  * SOUNDNESS.md, section 5.4.
  */
+
+/* Whether the proof of shuffle also runs Pi_BND on the P_i. Only a composite
+ * q needs it; see above. */
+#ifndef SHUFFLE_PIBND
+#define SHUFFLE_PIBND 	0
+#endif
 
 /* Differences of distinct g(i) are non-zero integers below MSGS, and they have
  * to stay coprime to q for Lemma 5, so MSGS must stay below the prime q. That
@@ -191,8 +203,8 @@ static params::poly_q *sg, *fa, *fb;
  * threaded through the already long argument lists of the two. */
 static pismall_const_t *cst;
 
-/* The proof that every committed sigma_i is short, which is what makes the
- * coefficient sets of the membership proof exact; see the header comment. */
+/* The proof that every committed sigma_i is short, under SHUFFLE_PIBND; see
+ * the header comment. */
 static pibnd_short_t *bnd;
 
 static void shuffle_alloc(void) {
@@ -240,9 +252,11 @@ static void shuffle_free(void) {
 	pismall_const_free(cst);
 	cst = NULL;
 	pismall_const_clear();
+#if SHUFFLE_PIBND
 	pibnd_short_free(bnd);
 	bnd = NULL;
 	pibnd_short_clear();
+#endif
 }
 
 /**
@@ -838,13 +852,12 @@ static void shuffle_coeffs(params::poly_q coef[3], size_t l,
  * bdlop_commit expects. It has to precede the challenges tau and mu, which is
  * exactly why it cannot be inside a pass.
  *
- * Membership needs two sub-proofs because a product identity alone cannot give
- * it -- a prover who CRT-mixes the sigma_i the way it mixes the messages
- * balances the product again. pismall shows, coefficient by coefficient, that
- * the element opened by each P_i is binary and that multiplying it by the
- * public 2 - sum_j x^j leaves every coefficient in {-1, 1}, which pins the
- * Hamming weight to one; pibnd bounds the norm of the openings, which is what
- * makes those coefficient sets exact over Z_q. See SOUNDNESS.md, section 5.
+ * Membership needs a sub-proof because a product identity alone cannot give
+ * it -- a prover who mixes the NTT slots of the sigma_i the way it mixes the
+ * messages balances the product again. pismall shows that the element opened
+ * by each P_i is a constant, the same in every slot, which over a prime q is
+ * all Lemma 5 needs; pibnd, under SHUFFLE_PIBND, bounds the norm of the
+ * openings as a composite q required. See SOUNDNESS.md, section 5.
  */
 static void shuffle_commit_sigma(commit_t p[MSGS],
 		vector < params::poly_q > pr[MSGS], params::poly_q sigma[MSGS],
@@ -862,8 +875,10 @@ static void shuffle_commit_sigma(commit_t p[MSGS],
 
 	pismall_const_free(cst);
 	cst = pismall_const_prove(key, p, pr, sigma, MSGS);
+#if SHUFFLE_PIBND
 	pibnd_short_free(bnd);
 	bnd = pibnd_short_prove(key, p, pr, sigma, MSGS);
+#endif
 }
 
 /* The factors of the product of Lemma 5:
@@ -1138,7 +1153,9 @@ static int run(vector < vector < params::poly_q >> &m,
 	t1 = shuffle_now();
 	shuffle_t_prove += t1 - t0;
 	result &= pismall_const_verify(cst, key, pcom, MSGS);
+#if SHUFFLE_PIBND
 	result &= pibnd_short_verify(bnd, key, pcom, MSGS);
+#endif
 	t0 = shuffle_now();
 	shuffle_t_verify += t0 - t1;
 
@@ -1435,6 +1452,7 @@ static void test() {
 		TEST_ASSERT(poly_inverse(t0, e) == 1, end);
 	} TEST_END;
 
+#if SHUFFLE_PIBND
 	TEST_ONCE("the norm bound leaves room for the integer argument") {
 		/* Section 6.4 of SOUNDNESS.md reads a congruence modulo q as an
 		 * equality over the integers. That step needs every quantity in it to
@@ -1446,6 +1464,7 @@ static void test() {
 
 		TEST_ASSERT(slack < (double) zq::MODULUS / 2.0, end);
 	} TEST_END;
+#endif
 
 	TEST_ONCE("the challenge zero divisor modulo p_1 is invertible modulo q") {
 		/* The linear proof draws beta with bdlop_sample_chal, the difference of
@@ -1537,25 +1556,21 @@ static void test() {
 	} TEST_END;
 
 	/* Second-order attack, targeting the membership requirement of Lemma 5:
-	 * the cheating prover applies to the permutation elements the very same CRT
-	 * swap it applied to the messages. Then sigma_0 = g(pi(1)) and
-	 * sigma_1 = g(pi(0)) in the first CRT component, while sigma_i = g(pi(i))
-	 * in the second, so the product of Lemma 5 balances in both components
-	 * again. A CRT mix of two constants is still a constant, so the algebraic
-	 * half of the membership proof accepts these sigma_i; what rules them out
-	 * is that the constant is a CRT idempotent, far too large for the norm
-	 * bound. */
+	 * the cheating prover applies to the permutation elements the very same
+	 * slot swap it applied to the messages. Then sigma_0 = g(pi(1)) and
+	 * sigma_1 = g(pi(0)) in half the slots, while sigma_i = g(pi(i)) in the
+	 * other half, so the product of Lemma 5 balances in every slot again.
+	 * With two primes, swapping the slots of one prime left a constant, a CRT
+	 * idempotent, which only the norm bound rejected. With one prime the mixed
+	 * sigma_i are not constants, and the membership proof rejects them. */
 	for (int i = 0; i < MSGS; i++) {
 		asigma[i] = sigma[i];
 	}
 	crt_mix(asigma[0], asigma[1]);
 
 	TEST_ONCE("shuffle proof rejects CRT-mixed sigma") {
-		/* pismall_const_prove() accepts these sigma_i: a CRT mix of two
-		 * constants is a constant, so the exact half of the membership proof
-		 * has nothing to object to. It is the norm bound that rejects them,
-		 * their value being a CRT idempotent and far too large for the masked
-		 * opening to stay inside the bound the verifier checks. */
+		/* Half the slots of a constant and half of another is not a
+		 * constant, so pismall_const_verify() rejects these sigma_i. */
 		TEST_ASSERT(run(m, am, asigma, key) == 0, end);
 	} TEST_END;
 
@@ -1635,7 +1650,7 @@ static void proof_size(void) {
 
 	size_t per_pass = pass.bytes() + MSGS * one.bytes();
 	size_t small = pismall_const_bytes(cst);
-	size_t bound = pibnd_short_bytes(bnd);
+	size_t bound = SHUFFLE_PIBND ? pibnd_short_bytes(bnd) : 0;
 	size_t first = once.bytes() + small + bound;
 	size_t total = SHUFFLE_REPS * per_pass + first;
 
@@ -1644,12 +1659,15 @@ static void proof_size(void) {
 			per_pass / 1024.0 / MSGS);
 	printf("  %d passes                              = %8.1f KB/vote\n",
 			SHUFFLE_REPS, SHUFFLE_REPS * per_pass / 1024.0 / MSGS);
-	printf("  P_i, Pi_SMALL and Pi_BND, sent once   = %8.1f KB/vote\n",
+	printf("  P_i, Pi_SMALL%s, sent once%s   = %8.1f KB/vote\n",
+			SHUFFLE_PIBND ? " and Pi_BND" : "", SHUFFLE_PIBND ? "" : "           ",
 			first / 1024.0 / MSGS);
 	printf("    of which Pi_SMALL                   = %8.1f KB/vote\n",
 			small / 1024.0 / MSGS);
-	printf("    of which Pi_BND                     = %8.1f KB/vote\n",
-			bound / 1024.0 / MSGS);
+	if (SHUFFLE_PIBND) {
+		printf("    of which Pi_BND                     = %8.1f KB/vote\n",
+				bound / 1024.0 / MSGS);
+	}
 	printf("  TOTAL                                 = %8.1f KB/vote\n",
 			total / 1024.0 / MSGS);
 }
