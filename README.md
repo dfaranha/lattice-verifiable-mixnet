@@ -68,6 +68,7 @@ Dependencies are the [NFLlib](https://github.com/quarkslab/NFLlib) and [FLINT](h
 NFLlib is already included in this repository, but instructions for installing its dependencies can be found in the link above.
 FLINT is usually included in package managers and can be easily installed in most systems out there. FLINT 3.1 or later is required: the code uses the `flint_rand_init()` family introduced in that release, and the `fmpz_mod_poly_{get,set}_coeff_mpz()` functions it used to call were removed in FLINT 3.5.
 GMP, MPFR and MPC are also required, all of them available as packages (`libgmp-dev`, `libmpfr-dev` and `libmpc-dev` on Debian-based systems). MPC only provides the `mpc.h` header included by `poly.h`; no MPC symbol is linked.
+The voters' ballot proofs use [LaZer](https://github.com/lazer-crypto/lazer), the submodule `third_party/lazer` (branch `skip-zeros` of [this fork](https://github.com/dfaranha/lazer), with fixes and speed-ups); fetch it with `git submodule update --init third_party/lazer`. The first `make` of `voting` builds it, HEXL included.
 
 The code is compiled as `gnu++17`. NFLlib predates C++20 and relies on `std::allocator<void>`, which that standard removed, so the language level is pinned in the `Makefile` rather than left to the compiler default.
 
@@ -91,20 +92,39 @@ The binaries respectively implement the BDLOP commitment scheme, the distributed
 
 `voting` puts them together, with `MSGS` voters, 4 mix servers and `PARTIES`
 trustees: the trustees share a BGV key; each voter encrypts a vote for one of 8
-candidates; each mix server in turn re-encrypts every ciphertext with a fresh
+candidates and proves the ballot well formed, which the board checks (below);
+each mix server in turn re-encrypts every ciphertext with a fresh
 encryption of zero, commits to that encryption of zero and adds the input into
 the commitment, which makes it a commitment to the re-encryption, and publishes
 the re-encryptions permuted with a proof of shuffle over those commitments; and
 the trustees' partial decryptions of the last list are combined and tallied. It
-also checks that a mix server that changes an output, or replaces a ballot with
-one of its own, is rejected. What this branch does not implement is not in it:
-the voters' ballot proofs, the proof that each re-encryption adds an encryption
-of zero with short randomness, and the trustees' proofs of correct decryption.
+also checks that a ballot proof moved to another voter or kept for a changed
+ciphertext is rejected, that a ballot for two candidates cannot be proven, and
+that a mix server that changes an output, or replaces a ballot with one of its
+own, is rejected. What this branch does not implement is not in it: the proof
+that each re-encryption adds an encryption of zero with short randomness, and
+the trustees' proofs of correct decryption.
 The election size is the build-time `MSGS`: `make CONFIG=-DMSGS=25 voting` runs
 the same election as the `voting` of lattice-voting-ctrsa21, 25 voters and 8
-candidates, in about two and a quarter minutes and half a GiB; at `MSGS = 4` it
-takes about half a minute. `-DNCAND=<n>` sets the number of candidates and
+candidates, in about four and a half minutes, three of them the ballot proofs,
+and half a GiB; at `MSGS = 4` it
+takes about a minute. `-DNCAND=<n>` sets the number of candidates and
 `-DMIXERS=<n>` the number of mix servers.
+
+The ballot proof (`src/ballot_proof.c`) shows, with LaZer's linear proofs, that
+(u, v) = (ar + 2e1, br + 2e2 + m) with r, e1, e2 ternary and short and
+m = X^j or 0: one vote or none. It proves m binary and equal to a u' with
+||u'|| <= 1, which leaves only those. It is bound to the election and the
+voter, so it cannot be copied to another voter's ballot. LaZer lifts the
+statement, over R_q of degree 4096 and the 88-bit q, to its ring of degree 64
+and a 115-bit proof modulus; `lazer/ballot.py` describes it, and
+`lazer/ballot.h` is generated from it, from `third_party/lazer/scripts`, with
+`sage lin-codegen.sage ../../../lazer/ballot.py > ../../../lazer/ballot.h`.
+LaZer's default target, a root Hermite factor of 1.0044, is about 102 bits
+core-SVP under the lattice-estimator, so the file asks for 1.0036: MLWE 134.9
+and MSIS 136.1 bits, knowledge error 2^-127. The proof is about 82 KiB, and
+takes about 4.4 s to prove and 3.0 s to check on a laptop: the degree and the
+width of q make it the slowest of the codebases' ballot proofs.
 
 ### Memory requirements
 

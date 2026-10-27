@@ -25,6 +25,19 @@ LIBS     = deps/libnfllib_static.a -lgmp -lmpfr -lquadmath
 # actually depends on it.
 FLINT    = -L deps/ -lflint
 
+# LaZer, for the voter's ballot proof (src/ballot_proof.c), is the submodule
+# third_party/lazer: branch skip-zeros of dfaranha/lazer, LaZer with fixes and
+# speed-ups. Its own Makefile builds it on first use, HEXL included; fetch it
+# with git submodule update --init third_party/lazer. The ballot proof is C,
+# compiled with CC against LaZer's headers; the C++ code calls it through
+# include/ballot_proof.h.
+CC       = gcc
+LAZER    = third_party/lazer
+LAZER_LIB = $(LAZER)/liblazer.a
+HEXL_LIB = $(LAZER)/third_party/hexl-development/build/hexl/lib64/libhexl.a
+LAZER_LIBS = $(LAZER_LIB) $(HEXL_LIB) -lmpfr -lstdc++
+CCFLAGS  = -O3 -march=native -mtune=native -Wall -Wextra -ggdb -I include -I $(LAZER)
+
 OBJ      = obj
 BIN      = bdlop bgv shuffle pismall pibnd voting
 
@@ -67,6 +80,17 @@ $(OBJ)/%.o: src/%.c $(STAMP) | $(OBJ)
 
 $(OBJ)/%.o: src/%.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -c $< -o $@
+
+# LaZer's library and HEXL, built by LaZer's Makefile.
+$(LAZER_LIB):
+	$(MAKE) -C $(LAZER) liblazer.a
+$(HEXL_LIB): $(LAZER_LIB)
+
+# The ballot proof, in C against LaZer (its parameters: lazer/ballot.h,
+# generated from lazer/ballot.py by LaZer's lin-codegen.sage).
+$(OBJ)/ballot_proof.o: src/ballot_proof.c include/ballot_proof.h lazer/ballot.h \
+		$(LAZER_LIB) | $(OBJ)
+	$(CC) $(CCFLAGS) -c $< -o $@
 
 # BLAKE3 is bundled as a mix of C and assembly; keep it in a single object.
 $(BLAKE3): $(BLAKE3_SRC) | $(OBJ)
@@ -118,10 +142,11 @@ shuffle: src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/pismall-const.o \
 # shuffle links plus the distributed BGV of src/bgv.cpp.
 voting: src/voting.cpp src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/bgv.o \
 		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
-		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) $(STAMP)
+		$(OBJ)/sample_z_large.o $(OBJ)/ballot_proof.o $(COMMON) $(BLAKE3) $(STAMP)
 	$(CPP) $(CFLAGS) src/voting.cpp $(OBJ)/bdlop.o $(OBJ)/bgv.o \
 		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
-		$(OBJ)/sample_z_large.o $(COMMON) $(BLAKE3) -o $@ $(LIBS) $(FLINT)
+		$(OBJ)/sample_z_large.o $(OBJ)/ballot_proof.o $(COMMON) $(BLAKE3) -o $@ \
+		$(LIBS) $(LAZER_LIBS) $(FLINT)
 
 pismall: src/pismall.cpp $(OBJ)/bdlop-size3.o $(COMMON) $(BLAKE3) $(STAMP)
 	$(CPP) $(CFLAGS) -DSIZE=3 -DMAIN src/pismall.cpp \

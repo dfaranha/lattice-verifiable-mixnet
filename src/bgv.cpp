@@ -101,12 +101,18 @@ void bgv_keyshare(params::poly_q s[], size_t shares, params::poly_q & sk) {
 	s[0] = t;
 }
 
-void bgv_encrypt(bgvenc_t & c, bgvkey_t & pk, params::poly_p & m) {
+/* As bgv_encrypt, and also return the randomness r, e1 and e2, in the
+ * coefficient domain, for the voter's ballot proof. */
+void bgv_encrypt_rand(bgvenc_t & c, bgvkey_t & pk, params::poly_p & m,
+		params::poly_q & r_out, params::poly_q & e1_out, params::poly_q & e2_out) {
 	std::array < mpz_t, DEGREE > coeffs;
 	params::poly_q e1 = nfl::ZO_dist();
 	params::poly_q e2 = nfl::ZO_dist();
 	params::poly_q r = nfl::ZO_dist();
 
+	r_out = r;
+	e1_out = e1;
+	e2_out = e2;
 	e1.ntt_pow_phi();
 	e2.ntt_pow_phi();
 	r.ntt_pow_phi();
@@ -130,6 +136,12 @@ void bgv_encrypt(bgvenc_t & c, bgvkey_t & pk, params::poly_p & m) {
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
 	}
+}
+
+void bgv_encrypt(bgvenc_t & c, bgvkey_t & pk, params::poly_p & m) {
+	params::poly_q r, e1, e2;
+
+	bgv_encrypt_rand(c, pk, m, r, e1, e2);
 }
 
 void bgv_add(bgvenc_t & c, bgvenc_t & d, bgvenc_t & e) {

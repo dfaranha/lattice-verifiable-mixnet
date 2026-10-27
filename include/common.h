@@ -135,6 +135,8 @@ void bgv_sample_message(params::poly_p& r);
 void bgv_sample_short(params::poly_q& r);
 void bgv_keygen(bgvkey_t& pk, params::poly_q& sk);
 void bgv_encrypt(bgvenc_t &c, bgvkey_t& pk, params::poly_p& m);
+void bgv_encrypt_rand(bgvenc_t &c, bgvkey_t& pk, params::poly_p& m,
+		params::poly_q& r, params::poly_q& e1, params::poly_q& e2);
 void bgv_decrypt(params::poly_p& m, bgvenc_t& c, params::poly_q & sk);
 
 #endif
