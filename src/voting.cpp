@@ -50,9 +50,14 @@ void bgv_distdec(params::poly_q & tj, bgvenc_t & c, params::poly_q & sj);
 void bgv_comb(params::poly_p & m, bgvenc_t & c, params::poly_q t[],
 		size_t shares);
 
-/* Mix servers. */
+/* Mix servers. The decryption budget q is sized against was set for the noise
+ * of 4 servers' re-encryptions, so fewer are fine and more need it
+ * recomputed. */
 #ifndef MIXERS
 #define MIXERS 		4
+#endif
+#if MIXERS < 1 || MIXERS > 4
+#error "lattice-verifiable-mixnet: the decryption budget allows 1 to 4 mix servers (MIXERS)"
 #endif
 /* Candidates: a vote for candidate j is X^j. */
 #ifndef NCAND
