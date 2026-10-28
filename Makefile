@@ -1,8 +1,7 @@
 CPP      = g++
 
-# NFLlib predates C++20 and uses std::allocator<void>::const_pointer, which was
-# removed in that standard, so the language level has to be pinned. The GNU
-# dialect is required for the `Q` suffix on __float128 literals in param.h.
+# The GNU dialect is required for the `Q` suffix on __float128 literals in
+# param.h, so the language level is pinned.
 STD      = -std=gnu++17
 
 # A params::poly_q is 64 KiB, so it is very easy to write a function whose
@@ -10,20 +9,20 @@ STD      = -std=gnu++17
 # usual default limit, and every function here is well under it.
 WARN     = -Wall -Wframe-larger-than=4194304
 OPT      = -O3 -march=native -mtune=native -flto
-INCLUDE  = -I NFLlib/include/ -I NFLlib/include/nfl -I NFLlib/include/nfl/prng -I include
-DEFINE   = -DNFL_OPTIMIZED=ON -DNTT_AVX2
+INCLUDE  = -I include
+DEFINE   =
 # Extra defines for a build, e.g. make CONFIG="-DTAU=10 -DNTI=8" to shrink the
 # proofs enough to run them on a machine without tens of gigabytes of RAM.
 CONFIG   =
 CFLAGS   = $(STD) $(OPT) $(WARN) -ggdb $(INCLUDE) $(DEFINE) $(CONFIG) -MMD -MP
 
-LIBS     = deps/libnfllib_static.a -lgmp -lmpfr -lquadmath
+LIBS     = -lgmp -lmpfr -lquadmath
 # Only pismall uses FLINT, for GR(q,2) scalar arithmetic and for the dense
 # polynomials over Z_q that are not in the NTT domain. shuffle inherits the
 # dependency by linking pismall for the membership sub-proof; everything else
-# works through NFLlib, so linking it everywhere only obscured which binary
+# works through zq, so linking it everywhere only obscured which binary
 # actually depends on it.
-FLINT    = -L deps/ -lflint
+FLINT    = -lflint
 
 # LaZer, for the voter's ballot proof (src/ballot_proof.c), is the submodule
 # third_party/lazer: branch skip-zeros of dfaranha/lazer, LaZer with fixes and
@@ -64,7 +63,8 @@ BLAKE3_SRC = src/blake3/blake3.c src/blake3/blake3_dispatch.c \
              src/blake3/blake3_avx2_x86-64_unix.S \
              src/blake3/blake3_avx512_x86-64_unix.S
 BLAKE3   = $(OBJ)/blake3.o
-COMMON   = $(OBJ)/test.o $(OBJ)/bench.o $(OBJ)/cpucycles.o
+COMMON   = $(OBJ)/test.o $(OBJ)/bench.o $(OBJ)/cpucycles.o \
+           $(OBJ)/fastrandombytes.o $(OBJ)/randombytes.o
 
 .PHONY: all clean
 .SECONDARY:

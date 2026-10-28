@@ -57,8 +57,9 @@ template <class P> inline bool is_zero(P const &a) {
 	return true;
 }
 
-/* NFLlib's poly_p below; poly_q and poly_big are zq's, with their own
- * centred and set_signed further down. */
+/* The generic crt, rns, centred and set_signed below are for NFLlib's residue
+ * representation, which the other branches use. On this branch every
+ * polynomial is zq's, so only the zq overloads further down are instantiated. */
 /* Centred coefficients without GMP. A coefficient of R_q is stored as one
  * residue per modulus; with one or two moduli below 2^63 its value mod q fits
  * 128 bits, and the CRT that recombines two residues needs one multiplication

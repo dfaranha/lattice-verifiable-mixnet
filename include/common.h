@@ -74,7 +74,7 @@ using namespace std;
 #define BOUND_D     "11260098580054016"
 
 namespace params {
-    using poly_p = nfl::poly_from_modulus<uint32_t, DEGREE, 30>;
+    using poly_p = zq::poly<DEGREE>;
     /* One 88-bit prime, q = 2^88 - 25 * 2^16 + 1 (include/zq.hpp), so R_q
      * has no zero divisors from a split modulus. The paper analyses 78, but
      * its bound on the slack of Pi_BND drops a factor that proof's own

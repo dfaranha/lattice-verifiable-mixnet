@@ -1,10 +1,11 @@
 /**
  * @file
  *
- * Helpers for moving polynomial coefficients between NFLlib and FLINT.
+ * Helpers for moving polynomial coefficients between the ring code and FLINT.
  *
- * NFLlib converts polynomials through arrays of GMP integers (poly2mpz and
- * mpz2poly), whereas FLINT works in terms of fmpz. FLINT 3.5 removed the
+ * The ring code converts polynomials through arrays of GMP integers (poly2mpz
+ * and mpz2poly, NFLlib's interface, which zq keeps), whereas FLINT works in
+ * terms of fmpz. FLINT 3.5 removed the
  * fmpz_mod_poly_{get,set}_coeff_mpz functions that used to bridge the two --
  * those names are now macros expanding to `#pragma GCC error`, so they cannot
  * even be mentioned in a translation unit that includes fmpz_mod_poly.h. The

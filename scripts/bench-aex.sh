@@ -45,13 +45,6 @@ print('%.2f' % ((H+v+s+t+res)/1e9))"
 LOG=${LOG:-/tmp/bench-aex.log}
 : > "$LOG"
 
-if [ ! -f deps/libnfllib_static.a ]; then
-  echo "error: deps/libnfllib_static.a is missing -- NFLlib has not been built here."
-  echo "       mkdir -p deps && cd deps &&"
-  echo "       cmake ../NFLlib -DCMAKE_BUILD_TYPE=Release -DNFL_OPTIMIZED=ON && make"
-  exit 1
-fi
-
 echo "toolchain: $(${CXX:-g++} --version | head -1)"
 echo "flint:     $(pkg-config --modversion flint 2>/dev/null || grep -m1 'define FLINT_VERSION' /usr/include/flint/flint.h 2>/dev/null || echo unknown)"
 echo "build log: $LOG"

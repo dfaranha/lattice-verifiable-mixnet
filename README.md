@@ -24,8 +24,10 @@ and is inherited here.
 **This is the `single-prime` branch**: `q` is the prime
 `2^88 - 25 * 2^16 + 1` rather than the product of two 44-bit NFLlib primes,
 and [SOUNDNESS.md](SOUNDNESS.md) section 0 says what that changes. NFLlib cannot
-hold an 88-bit prime, so `include/zq.hpp` replaces it for `R_q`, with one
-128-bit word a coefficient; NFLlib is still used for the plaintext ring.
+hold an 88-bit prime, so `include/zq.hpp` replaces it, with one 128-bit word a
+coefficient, and the plaintext ring is a `zq` polynomial as well: this branch no
+longer depends on NFLlib. What it kept of it is the sampler tags (`include/nfl.hpp`)
+and the AES-256-CTR generator (`src/fastrandombytes.cpp`).
 
 Lemma 5 also requires the committed permutation elements to lie in a set whose
 differences are units. `\Pi_SMALL` shows that each `sigma_i` is a ring
@@ -58,25 +60,12 @@ two openings that short can differ. See [SOUNDNESS.md](SOUNDNESS.md) section 9.
 **Read [SOUNDNESS.md](SOUNDNESS.md) before relying on any of this**, starting
 with section 0; sections 1 to 12 were written for the composite modulus.
 
-Dependencies are the [NFLlib](https://github.com/quarkslab/NFLlib) and [FLINT](https://flintlib.org/doc/) libraries.
-NFLlib is already included in this repository, but instructions for installing its dependencies can be found in the link above.
+The only library dependency beyond GMP and MPFR is [FLINT](https://flintlib.org/doc/); unlike the other branches, this one does not use NFLlib.
 FLINT is usually included in package managers and can be easily installed in most systems out there. FLINT 3.1 or later is required: the code uses the `flint_rand_init()` family introduced in that release, and the `fmpz_mod_poly_{get,set}_coeff_mpz()` functions it used to call were removed in FLINT 3.5.
 GMP, MPFR and MPC are also required, all of them available as packages (`libgmp-dev`, `libmpfr-dev` and `libmpc-dev` on Debian-based systems). MPC only provides the `mpc.h` header included by `poly.h`; no MPC symbol is linked.
 The voters' ballot proofs use [LaZer](https://github.com/lazer-crypto/lazer), the submodule `third_party/lazer` (branch `skip-zeros` of [this fork](https://github.com/dfaranha/lazer), with fixes and speed-ups); fetch it with `git submodule update --init third_party/lazer`. The first `make` of `voting` builds it, HEXL included.
 
-The code is compiled as `gnu++17`. NFLlib predates C++20 and relies on `std::allocator<void>`, which that standard removed, so the language level is pinned in the `Makefile` rather than left to the compiler default.
-
-### Building dependencies
-
-To build NFLlib, run the following inside a cloned version of this repository:
-
-```
-$ mkdir deps
-$ cd deps
-$ cmake ../NFLlib -DCMAKE_BUILD_TYPE=Release -DNFL_OPTIMIZED=ON
-$ make
-$ make test
-```
+The code is compiled as `gnu++17`, pinned in the `Makefile`: the GNU dialect is needed for the `Q` suffix on the `__float128` literals in `param.h`. The generator uses AES-NI, which `-march=native` enables on any x86-64 processor that has it.
 
 ### Building and running the code
 

@@ -9,7 +9,7 @@ voting
 *.o
 *.d
 
-# NFLlib is configured and built out of tree into deps/
+# The other branches build NFLlib out of tree into deps/; this one does not use it
 deps/
 
 # Stray benchmark output

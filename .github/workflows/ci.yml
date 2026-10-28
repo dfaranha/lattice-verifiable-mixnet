@@ -43,13 +43,6 @@ jobs:
           make -j"$(nproc)"
           make install
 
-      - name: Build NFLlib
-        run: |
-          mkdir -p deps
-          cd deps
-          cmake ../NFLlib -DCMAKE_BUILD_TYPE=Release -DNFL_OPTIMIZED=ON
-          make -j"$(nproc)"
-
       # The paper's parameters need tens of gigabytes and hours, which a runner
       # has neither of. These sizes exercise the same code paths at a size that
       # fits, which is what the Makefile's CONFIG hook exists for. TAU must stay
@@ -124,19 +117,12 @@ jobs:
           make -j"$(nproc)"
           make install
 
-      - name: Build NFLlib
-        run: |
-          mkdir -p deps
-          cd deps
-          cmake ../NFLlib -DCMAKE_BUILD_TYPE=Release -DNFL_OPTIMIZED=ON
-          make -j"$(nproc)"
-
       # shuffle is included since the proof of shuffle was fixed: it draws half
       # again as many Gaussians as before, which exposed a misaligned load in
       # the sampler that UBSan reports and that is fixed in sample_z_small.c.
-      # -march=native stays, because NFLlib is built with NTT_AVX2 and needs it.
+      # -march=native stays, because the generator uses AES-NI.
       # -flto is dropped: it obscures sanitizer stack traces. Leak detection is
-      # off because NFLlib and FLINT both keep static caches alive at exit.
+      # off because FLINT keeps static caches alive at exit.
       - name: Build and run under sanitizers
         run: |
           make CONFIG="-I$FLINT_PREFIX/include -DBENCH=1 -DTAU=8 -DMSGS=4" \

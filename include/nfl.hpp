@@ -1,20 +1,29 @@
-/* Copyright (C) 2015  Carlos Aguilar, Tancrède Lepoint, Adrien Guinet and Serge Guelton
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+/*
+ * What is left of NFLlib: the tags that select a sampler when a polynomial is
+ * assigned, and its fast PRNG (src/fastrandombytes.cpp, AES-256 in counter
+ * mode). Both keep NFLlib's names so that the callers did not have to change.
+ * The tags are NFLlib's own definitions (NFLlib/include/nfl/poly.hpp).
  */
-
 #ifndef NFL_HPP
 #define NFL_HPP
 
-#include "nfl/poly.hpp"
-#include "nfl/poly_p.hpp"
+#include <cstdint>
+#include "fastrandombytes.h"
+
+namespace nfl {
+
+struct uniform {};
+
+struct hwt_dist { // hamming weight distribution.
+	uint32_t hwt;
+	hwt_dist(uint32_t hwt_) : hwt(hwt_) {}
+};
+
+struct ZO_dist { // zero distribution.
+	uint8_t rho; // P(1) = P(-1) = (rho/0xFF)/2, P(0) = 1 - P(1) - P(-1)
+	ZO_dist(uint8_t rho_ = 0x7F) : rho(rho_) {}
+};
+
+}
 
 #endif
