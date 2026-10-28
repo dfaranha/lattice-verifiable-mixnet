@@ -62,8 +62,17 @@ using namespace std;
  * left it at the old weight of 36. Each published coefficient costs
  * log2(6 SIGMA_C) bits, so this is a bit a coefficient off every response. */
 #define SIGMA_C     (1u << 11)
-/* Parties that run the distributed decryption protocol. */
+/* Parties that run the distributed decryption protocol: the trustees, set
+ * like the other election sizes with make CONFIG="-DPARTIES=...". It can only
+ * be 4: the decryption budget B_DDec = 2 p xi^2 B-hat_Bnd that q is sized
+ * against, and the drowning noise each trustee adds, are for xi = 4 (see
+ * SOUNDNESS.md, section 8). Another value needs both recomputed. */
+#ifndef PARTIES
 #define PARTIES     4
+#endif
+#if PARTIES != 4
+#error "lattice-verifiable-mixnet: the decryption budget and q are sized for 4 trustees, so PARTIES must be 4"
+#endif
 /* Security level for Distributed Decryption. */
 #define BGVSEC      40
 /* Bound for Distributed Decryption: 2^BGVSEC * (B_Dec / (p * xi)), the paper's
