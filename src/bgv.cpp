@@ -176,7 +176,11 @@ void bgv_decrypt(params::poly_p & m, bgvenc_t & c, params::poly_q & sk) {
 	}
 }
 
-void bgv_distdec(params::poly_q & tj, bgvenc_t & c, params::poly_q & sj) {
+/* As bgv_distdec, and also return the drowning noise E_j, in the coefficient
+ * domain, which the trustee's proof of correct decryption commits to:
+ * t_j = s_j u + p E_j, E_j drawn from [0, BOUND_D). */
+void bgv_distdec_noise(params::poly_q & tj, params::poly_q & Ej_out,
+		bgvenc_t & c, params::poly_q & sj) {
 	std::array < mpz_t, DEGREE > coeffs;
 	params::poly_q mj, Ej;
 	mpz_t qDivBy2, bound;
@@ -197,6 +201,7 @@ void bgv_distdec(params::poly_q & tj, bgvenc_t & c, params::poly_q & sj) {
 		mpz_mod(coeffs[i], coeffs[i], bound);
 	}
 	Ej.mpz2poly(coeffs);
+	Ej_out = Ej;
 	Ej.ntt_pow_phi();
 	mj = sj * c.u;
 	tj = mj;
@@ -209,6 +214,12 @@ void bgv_distdec(params::poly_q & tj, bgvenc_t & c, params::poly_q & sj) {
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		mpz_clear(coeffs[i]);
 	}
+}
+
+void bgv_distdec(params::poly_q & tj, bgvenc_t & c, params::poly_q & sj) {
+	params::poly_q Ej;
+
+	bgv_distdec_noise(tj, Ej, c, sj);
 }
 
 void bgv_comb(params::poly_p & m, bgvenc_t & c, params::poly_q t[],

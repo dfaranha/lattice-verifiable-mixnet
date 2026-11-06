@@ -74,19 +74,37 @@ For building the actual code, run `make` inside the source directory. This will 
 The binaries respectively implement the BDLOP commitment scheme, the distributed BGV cryptosystem, the two zero-knowledge proofs and the shuffle itself. Tests and benchmarks are included for each of them, such that they can be used independently. Each binary exits non-zero if any of its tests failed, so a run can be checked without reading the output.
 
 `voting` puts them together, with `MSGS` voters, 4 mix servers and `PARTIES`
-trustees: the trustees share a BGV key; each voter encrypts a vote for one of 8
-candidates and proves the ballot well formed, which the board checks (below);
-each mix server in turn re-encrypts every ciphertext with a fresh
-encryption of zero, commits to that encryption of zero and adds the input into
-the commitment, which makes it a commitment to the re-encryption, and publishes
-the re-encryptions permuted with a proof of shuffle over those commitments; and
-the trustees' partial decryptions of the last list are combined and tallied. It
-also checks that a ballot proof moved to another voter or kept for a changed
-ciphertext is rejected, that a ballot for two candidates cannot be proven, and
-that a mix server that changes an output, or replaces a ballot with one of its
-own, is rejected. What this branch does not implement is not in it: the proof
-that each re-encryption adds an encryption of zero with short randomness, and
-the trustees' proofs of correct decryption.
+trustees, and runs every proof of the paper's protocol:
+
+- the trustees share a BGV key, and each share `s_j` is committed to and
+  published as `[[s_j]]`;
+- each voter encrypts a vote for one of 8 candidates and proves the ballot well
+  formed, which the board checks (below);
+- each mix server in turn re-encrypts every ciphertext with a fresh encryption
+  of zero `E_i`, publishes a commitment to each `E_i` and proves, with one
+  amortized `\Pi_SMALL` over all of them, that each opens to an encryption of
+  zero with ternary randomness (`pismall_mix_*` in `include/pismall.h`). The
+  verifier adds each input into the commitment to its `E_i` itself, which gives
+  the commitments to the re-encryptions, and the server publishes the
+  re-encryptions permuted with a proof of shuffle over those;
+- each trustee publishes its partial decryption `t_ij = s_j u_i + p E_ij` of
+  every ciphertext of the last list, a commitment to each drowning noise
+  `E_ij`, a linear proof per ciphertext that the openings of `[[s_j]]` and
+  `[[E_ij]]` satisfy that equation, and one amortized `\Pi_BND` that every
+  `E_ij` is bounded (`pibnd_dec_*` in `include/pibnd.h`): `\Pi_DDec` of the
+  paper. The shares are combined and tallied once every proof has been checked.
+
+It also checks that a ballot proof moved to another voter or kept for a changed
+ciphertext is rejected, that a ballot for two candidates cannot be proven, that
+a mix server that changes an output, replaces a ballot with one of its own, or
+commits to something other than an encryption of zero is rejected, and that a
+trustee whose partial decryption is wrong, or whose noise is far out of bounds,
+is rejected. It prints the time and size of each proof: per ballot for the
+voters, per ballot and mix server for the proofs of re-encryption and of
+shuffle, and per ballot and trustee for the shares and the proofs of
+decryption. Section 13 of `SOUNDNESS.md` describes the proofs of re-encryption
+and of decryption and what they rest on. `pismall.cpp` and `pibnd.cpp` are
+each built twice into `voting`, once per relation, as the `Makefile` explains.
 The election size is the build-time `MSGS`: `make CONFIG=-DMSGS=25 voting` runs
 the same election as the `voting` of lattice-voting-ctrsa21, 25 voters and 8
 candidates, in about four and a half minutes, three of them the ballot proofs,

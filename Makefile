@@ -117,6 +117,13 @@ $(OBJ)/pismall-const.o: src/pismall.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -UTAU -DTAU='AEX_PAD2(MSGS)' \
 		-DPISMALL_R='(HEIGHT+1)' -DPISMALL_V='(WIDTH+1)' -c $< -o $@
 
+# pismall again, at the mix-net's own relation (R = HEIGHT + 2 rows, V = WIDTH + 3
+# components, the defaults in the source): the proof that each re-encryption adds
+# an encryption of zero with short randomness. Amortized like the one above over
+# the MSGS re-encryptions of a mix server, padded to a power of two.
+$(OBJ)/pismall-mix.o: src/pismall.cpp $(STAMP) | $(OBJ)
+	$(CPP) $(CFLAGS) -UTAU -DTAU='AEX_PAD2(MSGS)' -DPISMALL_MIX -c $< -o $@
+
 # pibnd as a library, for the norm bound a composite q needed next to the
 # constant-membership proof; the shuffle calls it only when built with
 # CONFIG=-DSHUFFLE_PIBND=1. Its relation is the commitment equation, so V is
@@ -124,6 +131,11 @@ $(OBJ)/pismall-const.o: src/pismall.cpp $(STAMP) | $(OBJ)
 # needs no padding: the amortization parameter is MSGS itself.
 $(OBJ)/pibnd-short.o: src/pibnd.cpp $(STAMP) | $(OBJ)
 	$(CPP) $(CFLAGS) -DPIBND_SHORT -c $< -o $@
+
+# pibnd again, for the trustees' proofs of correct decryption: the same
+# commitment relation, its last row the drowning noise, bounded by BOUND_D.
+$(OBJ)/pibnd-dec.o: src/pibnd.cpp $(STAMP) | $(OBJ)
+	$(CPP) $(CFLAGS) -DPIBND_DEC -c $< -o $@
 
 bdlop: src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) $(STAMP)
 	$(CPP) $(CFLAGS) -DMAIN src/bdlop.cpp $(OBJ)/bgv.o $(COMMON) -o $@ $(LIBS)
@@ -140,12 +152,15 @@ shuffle: src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/pismall-const.o \
 
 # The mix-net end to end: voters, mix servers and trustees. It includes
 # src/shuffle.cpp, without MAIN, for the proof of shuffle, so it links what
-# shuffle links plus the distributed BGV of src/bgv.cpp.
+# shuffle links plus the distributed BGV of src/bgv.cpp, and the second builds
+# of pismall and pibnd for the proofs of re-encryption and of decryption.
 voting: src/voting.cpp src/shuffle.cpp $(OBJ)/bdlop.o $(OBJ)/bgv.o \
-		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
+		$(OBJ)/pismall-const.o $(OBJ)/pismall-mix.o $(OBJ)/pibnd-short.o \
+		$(OBJ)/pibnd-dec.o $(OBJ)/sample_z_small.o \
 		$(OBJ)/sample_z_large.o $(OBJ)/ballot_proof.o $(COMMON) $(BLAKE3) $(STAMP)
 	$(CPP) $(CFLAGS) src/voting.cpp $(OBJ)/bdlop.o $(OBJ)/bgv.o \
-		$(OBJ)/pismall-const.o $(OBJ)/pibnd-short.o $(OBJ)/sample_z_small.o \
+		$(OBJ)/pismall-const.o $(OBJ)/pismall-mix.o $(OBJ)/pibnd-short.o \
+		$(OBJ)/pibnd-dec.o $(OBJ)/sample_z_small.o \
 		$(OBJ)/sample_z_large.o $(OBJ)/ballot_proof.o $(COMMON) $(BLAKE3) -o $@ \
 		$(LIBS) $(LAZER_LIBS) $(FLINT)
 

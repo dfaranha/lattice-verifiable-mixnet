@@ -1,5 +1,10 @@
 # Soundness of the proof of shuffle on this branch
 
+**On the `full-protocol` branch, section 13** describes the proofs of
+re-encryption and of decryption that the election now runs around the proof of
+shuffle, and the change to `pismall_hash` they brought, which the membership
+proof of section 5 shares.
+
 **On the `single-prime` branch, read section 0 first**: `q` is prime there,
 and it says which of the gaps below that closes.
 
@@ -1568,3 +1573,127 @@ Section 6's pass count, Section 7's `2^-44`, 7.1's `LIN_REPS` and 5.5's two
 terms all move together if the RNS basis moves again. Then the sizes, if
 `LIN_REPS`, `ETA` or `AEX_REPS` change. The benchmarks are single runs on a
 loaded machine and should be read as ratios, not absolutes.
+
+## 13. The rest of the mix-net: the proofs of re-encryption and of decryption
+
+The sections above are about the proof of shuffle. On the `full-protocol`
+branch `voting` also runs the two proofs the paper puts around it, which the
+repository had only as standalone tests on random instances: the proof that
+each re-encryption adds an encryption of zero, without which nothing ties a
+mix server's shuffle to its input list, and the trustees' proofs of correct
+decryption. This section records how they are instantiated, what in them is a
+choice of this implementation rather than of the paper, and what has not been
+looked at. It is a description, not a review, like the rest of this document.
+
+### 13.1 The proof of re-encryption
+
+Each mix server publishes `P_i = [[E_i]]`, a commitment to the encryption of
+zero `E_i = (a rho_i + p e1_i, b rho_i + p e2_i)` it adds to the `i`-th input,
+and one `Pi_SMALL` over all `MSGS` of them (`pismall_mix_prove`, the build of
+`src/pismall.cpp` with `-DPISMALL_MIX`) for the relation
+
+```
+row 0    P_i.c1    = r_0 + sum_j A1[0][j] r_{j+1}
+row 1    P_i.c2[0] = sum_j A2[0][j] r_j + a rho_i + p e1_i
+row 2    P_i.c2[1] = sum_j A2[1][j] r_j + b rho_i + p e2_i
+```
+
+with the commitment randomness `r` and `rho_i, e1_i, e2_i` all ternary: `R = 3`
+rows and `V = WIDTH + 3 = 7` components, the instance the standalone `pismall`
+binary was always built for. It is amortized over the `MSGS` relations, padded
+to the power of two `TAU` like the membership proof, and its soundness is that
+proof's, `2^-133` (section 5.5): the same `ETA` and challenge extension, and the
+coefficient set `{-1, 0, 1}` is exact over the prime `q`.
+
+The verifier then forms the commitments the proof of shuffle is about itself,
+`P_i + (0, c_i)`, from the published `P_i` and the input list
+(`verifier_commitments` in `src/voting.cpp`). Before this branch the proof of
+shuffle ran on commitments the mix server computed, and a server that committed
+to `own - c_i` in place of `E_i` had its commitment to `c_i + E_i` open to a
+ciphertext `own` of its choosing, with every check passing. The test "a mix
+server that commits to other than a zero is rejected" builds exactly that
+commitment and checks that `Pi_SMALL` refuses it.
+
+Two things in it are this implementation's:
+
+- **The prover's commitment to `d = -A s_0` has three rows, and the BDLOP key
+  two.** `Pi_SMALL` commits to `d`, one ring element a row of the relation,
+  before its challenges, and the verifier opens that commitment on the `d` it
+  recomputes, with the published randomness. So it has to bind but need not
+  hide, and the third row's part of `A2` is drawn from a public seed
+  (`aex_A2x` in `src/pismall.cpp`) rather than added to the key; binding rests
+  on `A1` alone. The standalone binary used a key of `SIZE = 3` instead, which
+  at `WIDTH = 4`, `HEIGHT = 1` leaves BDLOP no hiding margin; here the key keeps
+  `SIZE = 2` for everything that does need to hide.
+- **`pismall_hash` now absorbs the statement**, `A` and every `t_i`, after the
+  Merkle root and the commitment to `d`. It took neither before, so the
+  challenges did not depend on what was being proven, and a prover could pick
+  its `t_i` -- here, its own `P_i` -- after seeing them. This changes the
+  transcript of the membership proof of section 5 as well, which uses the same
+  function; it costs one pass of BLAKE3 over `R V + TAU R` more ring elements,
+  about 200 MB at `TAU = 1024`.
+
+### 13.2 The proof of decryption
+
+At key generation each trustee's share `s_j` is committed to and published as
+`S_j = [[s_j]]`. For the `i`-th ciphertext `(u_i, v_i)` of the last list,
+trustee `j` publishes its partial decryption `t_ij = s_j u_i + p E_ij`, with
+`E_ij` drawn from `[0, BOUND_D)`, a commitment `Y_ij = [[E_ij]]`, and:
+
+- a **linear proof** that the openings of `S_j` and `Y_ij` satisfy
+  `u_i s + p E = t_ij` (`dlin_prove` in `src/voting.cpp`). It is the linear
+  proof of the proof of shuffle with two openings instead of three: the same
+  `SIGMA_C`, the same rejection sampling over all the openings at once (section
+  8.1), and `LIN_REPS = 2` repetitions against challenges from one hash, so it
+  inherits section 7's heuristic of about `1 / q` per repetition and no better.
+  Its hash binds the key, both commitments, `u_i`, `t_ij` and the indices `i`
+  and `j`;
+- one **`Pi_BND`** over the `MSGS` commitments `Y_ij` (`pibnd_dec_prove`, the
+  build of `src/pibnd.cpp` with `-DPIBND_DEC`), on the commitment equation with
+  `E_ij` as the last witness row and `BOUND_D` as that row's infinity norm.
+  It is the relaxed proof, so what it gives is the slack bound of section 8,
+  `sqrt(2N) sigma-hat`, about `2^79.7` at `MSGS = 1000`, and it is against that
+  slack and not against `BOUND_D` that `q` is sized there.
+
+`pibnd.cpp`'s instance for the decryption noise had never been run: its
+standalone test puts a ternary row where the noise goes. With `||E||_inf` at
+`BOUND_D`, `sigma-hat` is about `1.1 * 10^22` (`2^73.2`) at `MSGS = 1000`, and both
+discrete Gaussian samplers stop at `2.9 * 10^16`, where their probability
+comparisons lose exactness; the large one aborts there. That row is now drawn as
+the convolution of Micciancio and Walter (CRYPTO 2017, Theorem 3),
+`z1 + K z2` with `z1` of width `2^50`, `K = 2^44` and `z2` of width
+`sqrt(sigma-hat^2 - 2^100) / K`, which is within statistical distance about
+`2 eps` of the target when `2^50 >= sqrt(2) K eta_eps(Z)`; at `eps = 2^-128`,
+`eta_eps(Z)` is about 5.3, so the margin is a factor of eight. Both widths are
+in the double-precision sampler's exact range (`pibnd_sample_wide`).
+
+`E_ij` is drawn one-sided, from `[0, BOUND_D)`, where the paper takes the
+symmetric `[-BOUND_D, BOUND_D]`. The norm bound proven is the same, and the
+statistical distance the drowning buys is `||s_j u_i + ...|| / BOUND_D` either
+way; it is left as the repository had it.
+
+The test "a trustee whose partial decryption is wrong is rejected" makes a
+linear proof for `t_ij + 1` from the true witness; "a trustee whose noise is
+out of bounds is rejected" gives one `E_ij` a coefficient of `2^84`, far past
+the slack, with a share consistent with it, so that the linear proof holds and
+only `Pi_BND` can fail. Its honest prover then cannot pass rejection sampling
+and gives up after `PIBND_TRIES` attempts, which is what the test observes;
+the verifier's norm test, which a cheating prover could not avoid by setting
+the completion flag, is not exercised separately.
+
+### 13.3 What is still not covered
+
+- **Key generation is still a dealer.** `S_j` is committed to by the party that
+  made the shares, and nothing proves that the `s_j` sum to the key behind `pk`
+  or that the BGV key is well formed.
+- **Nothing is serialised.** Prover and verifier run in one process, and the
+  verifier reads the prover's structures, as the proof of shuffle does
+  (section 12). The sizes `voting` prints are the encoders' lengths: the
+  commitments and shares uniform, the linear proofs' responses Gaussian-coded,
+  `Pi_SMALL` by the formula of section 10 and `Pi_BND` by its encoder.
+- **Re-randomisation proofs are per mix server and per list**, not bound to
+  each other or to the server's index beyond the statement they prove; the
+  linear proofs of decryption are bound to `i` and `j`, `Pi_BND`'s hash to its
+  statement only. None of the hashes takes an election identifier.
+- **Not run at the paper's size here**, for the reason section 12 gives; the
+  election has been run at `MSGS = 8`, every check passing.

@@ -21,6 +21,18 @@
 #define TAU         MSGS
 #define ANEX_E_INF  TAU
 #endif
+/* The mix-net's own instance: a trustee's MSGS commitments to the drowning noise
+ * E_i of its partial decryptions, the relation again the commitment equation
+ * with E_i as the committed message, so V is WIDTH + 1 here too. What differs
+ * from the instance above is the last row's infinity norm, which is the
+ * drowning bound BOUND_D, E_i being drawn from [0, BOUND_D). The Makefile
+ * selects it with -DPIBND_DEC, and the API below is then named pibnd_dec_*. */
+#ifdef PIBND_DEC
+#define PIBND_V     (WIDTH+1)
+#undef TAU
+#define TAU         MSGS
+#define ANEX_E_INF  atof(BOUND_D)
+#endif
 
 /* Number of witness components. The mix-net's own instance of this proof has
  * V = HEIGHT + 3; the proof of shuffle links this file with V = WIDTH + 1, the
@@ -93,14 +105,14 @@ static const double SIGMA_ANEX =
 static const double SIGMA_ANEX_HAT =
 		0.954 * ANEX_E_INF * DEGREE * sqrt((double) NTI * TAU / 2.0);
 
-/* Whether the last row needs the quad-precision sampler. sigma-hat_ANEx runs
- * past 2^64 when the last witness row is the mix-net's decryption noise, whose
- * infinity norm is far above BETA, and then it does. When the row is as short
- * as the others -- the proof of shuffle bounds a committed constant with it --
- * sigma-hat is a few thousand and the double sampler covers it, at two orders
- * of magnitude less time. Both sides of the branch are compile-time constant.
- */
-static const bool ANEX_HAT_LARGE = SIGMA_ANEX_HAT > 1e15;
+/* Whether the last row is too wide for a single draw. sigma-hat_ANEx runs
+ * past 2^70 when the last witness row is the mix-net's decryption noise, whose
+ * infinity norm is far above BETA, and then it is drawn as a convolution of two
+ * narrower samples (pibnd_sample_wide below). When the row is as short as the
+ * others -- the proof of shuffle bounds a committed constant with it -- sigma-hat
+ * is a few thousand and the double sampler covers it directly; it does up to
+ * 2.9 * 10^16, past the 2^54 where this switches. */
+static const bool ANEX_HAT_LARGE = SIGMA_ANEX_HAT > 0x1p54;
 
 /* A params::poly_q is 64 KiB, so the matrices dimensioned by TAU or NTI are far
  * too large to be locals: s and t alone are 600 MiB at the default
@@ -278,7 +290,7 @@ static bool pibnd_test_norm(params::poly_q r, double sigma) {
 }
 
 // Sample a challenge.
-void pibnd_sample_chall(params::poly_q & f) {
+[[maybe_unused]] static void pibnd_sample_chall(params::poly_q & f) {
 	f = nfl::ZO_dist();
 	f.ntt_pow_phi();
 }
@@ -301,6 +313,32 @@ static int pibnd_sample_c(void) {
 	return b & 1;
 }
 
+/*
+ * A sample of D_{Z, SIGMA_ANEX_HAT} when that is too wide for the samplers. Both
+ * stop at sigma = 2^56 / sqrt(2 pi), 2.9 * 10^16, where their probability
+ * comparisons lose exactness, and the decryption instance needs sigma-hat near
+ * 10^22. This is the convolution of Micciancio and Walter (CRYPTO 2017,
+ * Theorem 3): with z1 from D_{sigma1} and z2 from D_{sigma2}, z1 + K z2 is
+ * within statistical distance about 2 eps of D_{sqrt(sigma1^2 + K^2 sigma2^2)}
+ * as long as sigma1 is at least sqrt(2) eta_eps(K Z) = sqrt(2) K eta_eps(Z).
+ * At eps = 2^-128 eta_eps(Z) is about 5.3, so sigma1 / K = 2^6 leaves a factor
+ * of eight to spare; sigma2 is then chosen for the target width exactly.
+ * Both widths, 2^50 and about 10^8 at MSGS = 1000, are inside the double
+ * sampler's exact range, which is two orders of magnitude faster than the
+ * quad-precision one.
+ */
+#define PIBND_WIDE_S1   0x1p50
+#define PIBND_WIDE_K    ((__int128) 1 << 44)
+
+static __int128 pibnd_sample_wide(void) {
+	static const double s2 = sqrt(SIGMA_ANEX_HAT * SIGMA_ANEX_HAT
+			- PIBND_WIDE_S1 * PIBND_WIDE_S1) / (double) PIBND_WIDE_K;
+	__int128 z1 = sample_z(0.0, PIBND_WIDE_S1);
+	__int128 z2 = sample_z(0.0, s2);
+
+	return z1 + PIBND_WIDE_K * z2;
+}
+
 static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		params::poly_q A[R][V], params::poly_q t[TAU][V],
 		params::poly_q s[TAU][V]) {
@@ -317,8 +355,7 @@ static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 					} else if (!ANEX_HAT_LARGE) {
 						coeffs[k] = sample_z(0.0, SIGMA_ANEX_HAT);
 					} else {
-						coeffs[k] = sample_z((__float128) 0.0,
-								(__float128) SIGMA_ANEX_HAT);
+						coeffs[k] = pibnd_sample_wide();
 					}
 				}
 				util::set_signed(Z[i][j], coeffs);
@@ -381,7 +418,7 @@ static int pibnd_prover(uint8_t h[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 	return !(rej0 || rej1);
 }
 
-int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
+static int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 		params::poly_q A[R][V], params::poly_q t[TAU][V]) {
 	uint8_t h2[BLAKE3_OUT_LEN];
 	int result;
@@ -430,6 +467,18 @@ int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 }
 
 /* --- The norm bound used by the proof of shuffle ------------------------- */
+
+/* The decryption build publishes the same API under its own names. */
+#ifdef PIBND_DEC
+#define pibnd_short         pibnd_dec
+#define pibnd_short_t       pibnd_dec_t
+#define pibnd_short_prove   pibnd_dec_prove
+#define pibnd_short_verify  pibnd_dec_verify
+#define pibnd_short_bytes   pibnd_dec_bytes
+#define pibnd_short_bound   pibnd_dec_bound
+#define pibnd_short_free    pibnd_dec_free
+#define pibnd_short_clear   pibnd_dec_clear
+#endif
 
 struct pibnd_short {
 	uint8_t h[BLAKE3_OUT_LEN];

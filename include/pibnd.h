@@ -63,4 +63,23 @@ size_t pibnd_short_bytes(const pibnd_short_t * pi);
 void pibnd_short_free(pibnd_short_t * pi);
 void pibnd_short_clear(void);
 
+/**
+ * The same proof for the trustees' decryption, from a second build of
+ * src/pibnd.cpp (PIBND_DEC): the n = MSGS commitments P[i] to the drowning
+ * noise E_i of a trustee's partial decryptions open, under ternary randomness,
+ * to messages of infinity norm at most BOUND_D. It is the relaxed Pi_BND of
+ * Pi_DDec in the paper; its slack, pibnd_dec_bound(), is what q is sized
+ * against (SOUNDNESS.md section 8). The arguments are those of the functions
+ * above, with sigma the E_i in the coefficient domain.
+ */
+typedef struct pibnd_dec pibnd_dec_t;
+
+pibnd_dec_t *pibnd_dec_prove(comkey_t & key, commit_t * P,
+		std::vector < params::poly_q > *r, params::poly_q * sigma, size_t n);
+int pibnd_dec_verify(pibnd_dec_t * pi, comkey_t & key, commit_t * P, size_t n);
+double pibnd_dec_bound(void);
+size_t pibnd_dec_bytes(const pibnd_dec_t * pi);
+void pibnd_dec_free(pibnd_dec_t * pi);
+void pibnd_dec_clear(void);
+
 #endif
