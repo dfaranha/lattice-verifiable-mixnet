@@ -2,7 +2,7 @@
 // 
 // protocol is statistically complete with correctness error >= 1 - 2^(-3)
 // protocol is simulatable under MLWE(88,20,[-1,1])
-// protocol is knowledge-sound with knowledge error <= 2^(-127.0) under MSIS(9,428,2^(36.951419))
+// protocol is knowledge-sound with knowledge error <= 2^(-127.0) under MSIS(9,492,2^(36.968539))
 // 
 // Ring
 // degree d = 64
@@ -14,19 +14,19 @@
 // gamma = 7999566, log(gamma) ~ 22.93149
 // 
 // Dimensions of secrets
-// s1: m1 = 320
+// s1: m1 = 384
 // m: l = 0
 // s2: m2 = 108
 // 
 // Size of secrets
-// l2(s1) <= alpha = 114.0
+// l2(s1) <= alpha = 131.0
 // m unbounded
 // s2 uniform in [-nu,nu] = [-1,1]
 // 
 // Norm proofs
-// binary: yes (dimension: 64)
+// binary: yes (dimension: 128)
 // exact euclidean: yes (dimensions: [192, 64], bounds: [94.060406, 1.0])
-// approximate infinity: yes (psi: 2685.8772, dimension: 192, bound: 10240.5)
+// approximate infinity: yes (psi: 2238.2492, dimension: 256, bound: 12288.5)
 // 
 // Challenge space
 // c uniform in [-omega,omega] = [-8,8], o(c)=c, sqrt(l1(o(c)*c)) <= eta = 140
@@ -38,20 +38,20 @@
 // stdev4 = 812646.4, log(stdev4/1.55) = 19.0
 // 
 // Repetition rate
-// M1 = 2.8829669
+// M1 = 3.3729972
 // M2 = 1.5221636
-// M3 = 1.0137556
-// M4 = 1.0271183
-// total = 4.5693531
+// M3 = 1.0181045
+// M4 = 1.0392815
+// total = 5.4325392
 // 
 // Security
 // MSIS dimension: 9
-// MSIS root hermite factor: 1.0035784
+// MSIS root hermite factor: 1.0035817
 // MLWE dimension: 88
 // MLWE root hermite factor: 1.0035838
 // 
 // Proof size
-// ~ 85.5410156250000 KiB
+// ~ 96.0410156250000 KiB
 // 
 // 50 bit moduli for degree 64: [1125899906840833, 1125899906839937, 1125899906837633, 1125899906826241, 1125899906824961]
 // bit length of products: [49, 99, 149, 199, 249]
@@ -76,13 +76,13 @@ static const limb_t _lvm_ballot_pow2Dby2_limbs[] = {4096UL, 0UL};
 static const int_t _lvm_ballot_pow2Dby2 = {{(limb_t *)_lvm_ballot_pow2Dby2_limbs, 2, 0}};
 static const limb_t _lvm_ballot_Bsq_limbs[] = {12376624525508762UL, 0UL, 0UL, 0UL};
 static const int_t _lvm_ballot_Bsq = {{(limb_t *)_lvm_ballot_Bsq_limbs, 4, 0}};
-static const limb_t _lvm_ballot_scM1_limbs[] = {17550231064929692896UL, 16287864230548339280UL, 2UL};
+static const limb_t _lvm_ballot_scM1_limbs[] = {3733504186193557029UL, 6880583177083245277UL, 3UL};
 static const int_t _lvm_ballot_scM1 = {{(limb_t *)_lvm_ballot_scM1_limbs, 3, 0}};
 static const limb_t _lvm_ballot_scM2_limbs[] = {13422267533879926233UL, 9632218054064781082UL, 1UL};
 static const int_t _lvm_ballot_scM2 = {{(limb_t *)_lvm_ballot_scM2_limbs, 3, 0}};
-static const limb_t _lvm_ballot_scM3_limbs[] = {15562035816764016110UL, 253746675852167652UL, 1UL};
+static const limb_t _lvm_ballot_scM3_limbs[] = {9895536207276634707UL, 333969777844581336UL, 1UL};
 static const int_t _lvm_ballot_scM3 = {{(limb_t *)_lvm_ballot_scM3_limbs, 3, 0}};
-static const limb_t _lvm_ballot_scM4_limbs[] = {1837335416394232750UL, 500244019322765651UL, 1UL};
+static const limb_t _lvm_ballot_scM4_limbs[] = {5760272609422605510UL, 724615470062538130UL, 1UL};
 static const int_t _lvm_ballot_scM4 = {{(limb_t *)_lvm_ballot_scM4_limbs, 3, 0}};
 static const limb_t _lvm_ballot_stdev1sq_limbs[] = {41274635715UL, 0UL, 0UL, 0UL};
 static const int_t _lvm_ballot_stdev1sq = {{(limb_t *)_lvm_ballot_stdev1sq_limbs, 4, 0}};
@@ -121,15 +121,15 @@ static const int_srcptr _lvm_ballot_l2Bsq[] = {_lvm_ballot_l2Bsq0, _lvm_ballot_l
 static const int_srcptr _lvm_ballot_Ppmodq[] = {_lvm_ballot_Ppmodq_0, _lvm_ballot_Ppmodq_1, _lvm_ballot_Ppmodq_2, _lvm_ballot_Ppmodq_3, _lvm_ballot_Ppmodq_4};
 static const polyring_t _lvm_ballot_ring = {{_lvm_ballot_q, 64, 116, 6, moduli_d64, 5, _lvm_ballot_Pmodq, _lvm_ballot_Ppmodq, _lvm_ballot_inv2}};
 static const dcompress_params_t _lvm_ballot_dcomp = {{ _lvm_ballot_q, _lvm_ballot_qminus1, _lvm_ballot_m, _lvm_ballot_mby2, _lvm_ballot_gamma, _lvm_ballot_gammaby2, _lvm_ballot_pow2D, _lvm_ballot_pow2Dby2, 13, 0, 93 }};
-static const abdlop_params_t _lvm_ballot_tbox = {{ _lvm_ballot_ring, _lvm_ballot_dcomp, 322, 108, 0, 11, 9, _lvm_ballot_Bsq, 1, 8, 5, 140, 1, 17, _lvm_ballot_scM1, _lvm_ballot_stdev1sq, 2, 13, _lvm_ballot_scM2, _lvm_ballot_stdev2sq}};
-static const abdlop_params_t _lvm_ballot_quad_eval_ = {{ _lvm_ballot_ring, _lvm_ballot_dcomp, 322, 108, 9, 2, 9, _lvm_ballot_Bsq, 1, 8, 5, 140, 1, 17, _lvm_ballot_scM1, _lvm_ballot_stdev1sq, 2, 13, _lvm_ballot_scM2, _lvm_ballot_stdev2sq}};
-static const abdlop_params_t _lvm_ballot_quad_many_ = {{ _lvm_ballot_ring, _lvm_ballot_dcomp, 322, 108, 10, 1, 9, _lvm_ballot_Bsq, 1, 8, 5, 140, 1, 17, _lvm_ballot_scM1, _lvm_ballot_stdev1sq, 2, 13, _lvm_ballot_scM2, _lvm_ballot_stdev2sq}};
+static const abdlop_params_t _lvm_ballot_tbox = {{ _lvm_ballot_ring, _lvm_ballot_dcomp, 386, 108, 0, 11, 9, _lvm_ballot_Bsq, 1, 8, 5, 140, 1, 17, _lvm_ballot_scM1, _lvm_ballot_stdev1sq, 2, 13, _lvm_ballot_scM2, _lvm_ballot_stdev2sq}};
+static const abdlop_params_t _lvm_ballot_quad_eval_ = {{ _lvm_ballot_ring, _lvm_ballot_dcomp, 386, 108, 9, 2, 9, _lvm_ballot_Bsq, 1, 8, 5, 140, 1, 17, _lvm_ballot_scM1, _lvm_ballot_stdev1sq, 2, 13, _lvm_ballot_scM2, _lvm_ballot_stdev2sq}};
+static const abdlop_params_t _lvm_ballot_quad_many_ = {{ _lvm_ballot_ring, _lvm_ballot_dcomp, 386, 108, 10, 1, 9, _lvm_ballot_Bsq, 1, 8, 5, 140, 1, 17, _lvm_ballot_scM1, _lvm_ballot_stdev1sq, 2, 13, _lvm_ballot_scM2, _lvm_ballot_stdev2sq}};
 static const lnp_quad_eval_params_t _lvm_ballot_quad_eval = {{ _lvm_ballot_quad_eval_, _lvm_ballot_quad_many_, 2}};
-static const lnp_tbox_params_t _lvm_ballot = {{ _lvm_ballot_tbox, _lvm_ballot_quad_eval, 64, _lvm_ballot_n, 192, 2, 322, 2, 13, _lvm_ballot_scM3, _lvm_ballot_stdev3sq, 2, 19, _lvm_ballot_scM4, _lvm_ballot_stdev4sq, _lvm_ballot_Bz3sqr, _lvm_ballot_Bz4, &_lvm_ballot_l2Bsq[0], _lvm_ballot_inv4, 87594UL }};
+static const lnp_tbox_params_t _lvm_ballot = {{ _lvm_ballot_tbox, _lvm_ballot_quad_eval, 128, _lvm_ballot_n, 256, 2, 386, 2, 13, _lvm_ballot_scM3, _lvm_ballot_stdev3sq, 2, 19, _lvm_ballot_scM4, _lvm_ballot_stdev4sq, _lvm_ballot_Bz3sqr, _lvm_ballot_Bz4, &_lvm_ballot_l2Bsq[0], _lvm_ballot_inv4, 98346UL }};
 
-static const unsigned int lvm_ballot_Ps[64] = {192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255};
+static const unsigned int lvm_ballot_Ps[128] = {192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319};
 static const unsigned int lvm_ballot_Es0[192] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191};
-static const unsigned int lvm_ballot_Es1[64] = {256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319};
+static const unsigned int lvm_ballot_Es1[64] = {320, 321, 322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383};
 static const unsigned int *lvm_ballot_Es[2] = { lvm_ballot_Es0, lvm_ballot_Es1, };
 static const unsigned int lvm_ballot_Es_nrows[2] = {192, 64};
 
@@ -137,6 +137,6 @@ static const limb_t lvm_ballot_p_limbs[] = {18446744073707913217UL, 16777215UL};
 static const int_t lvm_ballot_p = {{(limb_t *)lvm_ballot_p_limbs, 2, 0}};
 static const limb_t lvm_ballot_pinv_limbs[] = {6366747537801245167UL, 1022533593585230UL};
 static const int_t lvm_ballot_pinv = {{(limb_t *)lvm_ballot_pinv_limbs, 2, 1}};
-static const unsigned int lvm_ballot_s1_indices[5] = {0, 1, 2, 3, 4};
-static const lin_params_t lvm_ballot = {{ _lvm_ballot, 4096, lvm_ballot_p, lvm_ballot_pinv, 64, lvm_ballot_s1_indices, 5, NULL, 0,  lvm_ballot_Ps, 64, lvm_ballot_Es, lvm_ballot_Es_nrows, NULL, NULL }};
+static const unsigned int lvm_ballot_s1_indices[6] = {0, 1, 2, 3, 4, 5};
+static const lin_params_t lvm_ballot = {{ _lvm_ballot, 4096, lvm_ballot_p, lvm_ballot_pinv, 64, lvm_ballot_s1_indices, 6, NULL, 0,  lvm_ballot_Ps, 128, lvm_ballot_Es, lvm_ballot_Es_nrows, NULL, NULL }};
 

@@ -7,13 +7,18 @@ vname = "lvm_ballot"
 #   u = a r + 2 e1
 #   v = b r + 2 e2 + m
 #   0 = m - u'
+#   0 = X^(4096 - NCAND) m - m'
 #
-# with witness w = (r, e1, e2, m, u'): (r, e1, e2) short, m binary and
-# ||u'|| <= 1, so that m is X^j or 0, a vote for one candidate or none.
+# with witness w = (r, e1, e2, m, m', u'): (r, e1, e2) short, m and m' binary
+# and ||u'|| <= 1, so that m is X^j or 0, a vote for one candidate or none.
+# The last row bounds j: the ring is negacyclic, so X^(4096 - NCAND) X^j is
+# X^(4096 - NCAND + j), binary, when j < NCAND, and -X^(j - NCAND), not
+# binary, when j >= NCAND. NCAND is a coefficient of A, set at run time; the
+# parameters here do not depend on it.
 deg   = 4096
 mod   = 309485009821345068723142657
-dim   = (3, 5)
-wpart = [[0, 1, 2], [3], [4]]
+dim   = (4, 6)
+wpart = [[0, 1, 2], [3, 4], [5]]
 # ZO_dist: each coefficient of r, e1, e2 is +-1 with probability 1/2, so
 # ||(r, e1, e2)||^2 is about 6144, far below 1.2^2 * 6144.
 wl2   = [1.2*sqrt(3*4096*0.5), 0, 1]

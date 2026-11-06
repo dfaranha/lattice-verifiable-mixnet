@@ -35,8 +35,8 @@ size_t ballot_proof_len(void);
 
 /**
  * Prove that u = a r + 2 e1 and v = b r + 2 e2 + m with r, e1, e2 ternary and
- * short and m = X^j or 0, bound to ctx. Refuses (returns 0, no proof) if the
- * witness is not of that form or the equations do not hold.
+ * short and m = X^j, j < ncand, or 0, bound to ctx. Refuses (returns 0, no
+ * proof) if the witness is not of that form or the equations do not hold.
  *
  * @param[out] proof		- room for ballot_proof_len() bytes.
  * @param[out] len			- the bytes written, at most that.
@@ -45,16 +45,16 @@ size_t ballot_proof_len(void);
 int ballot_prove(uint8_t *proof, size_t *len, const __int128 u[],
 		const __int128 v[], const __int128 a[], const __int128 b[],
 		const int64_t r[], const int64_t e1[], const int64_t e2[],
-		const int64_t m[], const uint8_t *ctx, size_t ctxlen);
+		const int64_t m[], int ncand, const uint8_t *ctx, size_t ctxlen);
 
 /**
- * Verify a ballot proof for (u, v) under the public key (a, b) and the
- * context ctx.
+ * Verify a ballot proof for (u, v) under the public key (a, b), for an
+ * election of ncand candidates, and the context ctx.
  *
  * @return 1 if it verifies, 0 otherwise.
  */
 int ballot_verify(const uint8_t *proof, size_t len, const __int128 u[],
-		const __int128 v[], const __int128 a[], const __int128 b[],
+		const __int128 v[], const __int128 a[], const __int128 b[], int ncand,
 		const uint8_t *ctx, size_t ctxlen);
 
 #ifdef __cplusplus

@@ -96,36 +96,38 @@ trustees, and runs every proof of the paper's protocol:
 
 It also checks that a ballot proof moved to another voter or kept for a changed
 ciphertext is rejected, that a ballot for two candidates cannot be proven, that
-a mix server that changes an output, replaces a ballot with one of its own, or
-commits to something other than an encryption of zero is rejected, and that a
-trustee whose partial decryption is wrong, or whose noise is far out of bounds,
-is rejected. It prints the time and size of each proof: per ballot for the
-voters, per ballot and mix server for the proofs of re-encryption and of
-shuffle, and per ballot and trustee for the shares and the proofs of
-decryption. Section 13 of `SOUNDNESS.md` describes the proofs of re-encryption
-and of decryption and what they rest on. `pismall.cpp` and `pibnd.cpp` are
-each built twice into `voting`, once per relation, as the `Makefile` explains.
-The election size is the build-time `MSGS`: `make CONFIG=-DMSGS=25 voting` runs
-the same election as the `voting` of lattice-voting-ctrsa21, 25 voters and 8
-candidates, in about four and a half minutes, three of them the ballot proofs,
-and half a GiB; at `MSGS = 4` it
-takes about a minute. `-DNCAND=<n>` sets the number of candidates and
+a ballot for a candidate past the last is rejected, that a mix server that
+changes an output, replaces a ballot with one of its own, or commits to
+something other than an encryption of zero is rejected, and that a trustee whose
+partial decryption is wrong, or whose noise is far out of bounds, is rejected.
+It prints the time and size of each proof: per ballot for the voters, per ballot
+and mix server for the proofs of re-encryption and of shuffle, and per ballot
+and trustee for the shares and the proofs of decryption. Section 13 of
+`SOUNDNESS.md` describes the proofs of re-encryption and of decryption and what
+they rest on. `pismall.cpp` and `pibnd.cpp` are each built twice into `voting`,
+once per relation, as the `Makefile` explains. The election size is the
+build-time `MSGS`: `make CONFIG=-DMSGS=25 voting` runs the same election as the
+`voting` of lattice-voting-ctrsa21, 25 voters and 8 candidates, in about four
+and a half minutes, three of them the ballot proofs, and half a GiB; at `MSGS =
+4` it takes about a minute. `-DNCAND=<n>` sets the number of candidates and
 `-DMIXERS=<n>` the number of mix servers.
 
 The ballot proof (`src/ballot_proof.c`) shows, with LaZer's linear proofs, that
-(u, v) = (ar + 2e1, br + 2e2 + m) with r, e1, e2 ternary and short and
-m = X^j or 0: one vote or none. It proves m binary and equal to a u' with
-||u'|| <= 1, which leaves only those. It is bound to the election and the
-voter, so it cannot be copied to another voter's ballot. LaZer lifts the
-statement, over R_q of degree 4096 and the 88-bit q, to its ring of degree 64
-and a 115-bit proof modulus; `lazer/ballot.py` describes it, and
-`lazer/ballot.h` is generated from it, from `third_party/lazer/scripts`, with
-`sage lin-codegen.sage ../../../lazer/ballot.py > ../../../lazer/ballot.h`.
-LaZer's default target, a root Hermite factor of 1.0044, is about 102 bits
-core-SVP under the lattice-estimator, so the file asks for 1.0036: MLWE 134.9
-and MSIS 136.1 bits, knowledge error 2^-127. The proof is about 82 KiB, and
-takes about 4.4 s to prove and 3.0 s to check on a laptop: the degree and the
-width of q make it the slowest of the codebases' ballot proofs.
+(u, v) = (ar + 2e1, br + 2e2 + m) with r, e1, e2 ternary and short and m = X^j
+with j < NCAND, or 0: a vote for one candidate, or a blank one. It proves m
+binary and equal to a u' with ||u'|| <= 1, which leaves only X^j or 0, and
+X^(4096 - NCAND) m binary, which in the negacyclic ring holds for j < NCAND and
+fails for j >= NCAND. It is bound to the election and the voter, so it cannot be
+copied to another voter's ballot. LaZer lifts the statement, over R_q of degree
+4096 and the 88-bit q, to its ring of degree 64 and a 115-bit proof modulus;
+`lazer/ballot.py` describes it, and `lazer/ballot.h` is generated from it, from
+`third_party/lazer/scripts`, with `sage lin-codegen.sage
+../../../lazer/ballot.py > ../../../lazer/ballot.h`. LaZer's default target, a
+root Hermite factor of 1.0044, is about 102 bits core-SVP under the
+lattice-estimator, so the file asks for 1.0036: MLWE 134.9 and MSIS 136.1 bits,
+knowledge error 2^-127. The proof is about 92 KiB, and takes about 4.4 s to
+prove and 3.0 s to check on a laptop: the degree and the width of q make it the
+slowest of the codebases' ballot proofs.
 
 ### Memory requirements
 

@@ -29,11 +29,12 @@
  *      into the plaintexts and tallies.
  *
  * Then the ballots, the mixing and the decryption are attacked: a ballot proof
- * moved to another voter or kept for a changed ciphertext, and a ballot for two
- * candidates, must be refused; a server that changes an output, replaces a
- * ballot with one of its own, or commits to something other than an encryption
- * of zero must not get its proofs accepted; and a trustee whose partial
- * decryption is wrong must not get its proof of decryption accepted.
+ * moved to another voter or kept for a changed ciphertext, a ballot for two
+ * candidates and one for a candidate past the last, must be refused; a server
+ * that changes an output, replaces a ballot with one of its own, or commits to
+ * something other than an encryption of zero must not get its proofs accepted;
+ * and a trustee whose partial decryption is wrong must not get its proof of
+ * decryption accepted.
  *
  * The proof of shuffle is internal to shuffle.cpp, so this file includes it;
  * shuffle.cpp's own tests are behind MAIN, which is left undefined here. Its
@@ -527,8 +528,9 @@ static void test() {
 	}
 
 	/* Voting. The votes are the test oracle, kept apart from what the mix
-	 * servers and the trustees use. Each voter proves its ballot is X^j or 0
-	 * under short randomness, bound to this election and to the voter. */
+	 * servers and the trustees use. Each voter proves its ballot is X^j for
+	 * j < NCAND, or 0, under short randomness, bound to this election and to
+	 * the voter. */
 	t0 = shuffle_now();
 	for (int i = 0; i < MSGS; i++) {
 		votes[i] = uniform_below(NCAND);
@@ -544,7 +546,7 @@ static void test() {
 		ballot_ctx(ctx, eid, i);
 		proof[i].resize(ballot_proof_len());
 		cast_ok &= ballot_prove(proof[i].data(), &len, u128, v128, a128, b128,
-				r64, e164, e264, m64, ctx, sizeof(ctx));
+				r64, e164, e264, m64, NCAND, ctx, sizeof(ctx));
 		proof[i].resize(len);
 		proof_bytes += len;
 	}
@@ -561,7 +563,7 @@ static void test() {
 			to_i128(v128, list[0][i].v, true);
 			ballot_ctx(ctx, eid, i);
 			board_ok &= ballot_verify(proof[i].data(), proof[i].size(), u128,
-					v128, a128, b128, ctx, sizeof(ctx));
+					v128, a128, b128, NCAND, ctx, sizeof(ctx));
 		}
 		t_board = shuffle_now() - t0;
 		TEST_ASSERT(board_ok, end);
@@ -572,7 +574,7 @@ static void test() {
 		to_i128(v128, list[0][0].v, true);
 		ballot_ctx(ctx, eid, 1);
 		TEST_ASSERT(ballot_verify(proof[0].data(), proof[0].size(), u128, v128,
-				a128, b128, ctx, sizeof(ctx)) == 0, end);
+				a128, b128, NCAND, ctx, sizeof(ctx)) == 0, end);
 	} TEST_END;
 
 	TEST_ONCE("a ballot changed after its proof is rejected") {
@@ -582,7 +584,7 @@ static void test() {
 		v128[0] += 2;
 		ballot_ctx(ctx, eid, 0);
 		TEST_ASSERT(ballot_verify(proof[0].data(), proof[0].size(), u128, v128,
-				a128, b128, ctx, sizeof(ctx)) == 0, end);
+				a128, b128, NCAND, ctx, sizeof(ctx)) == 0, end);
 	} TEST_END;
 
 	TEST_ONCE("a ballot for two candidates cannot be proven") {
@@ -599,7 +601,36 @@ static void test() {
 		m64[0] = m64[1] = 1;
 		ballot_ctx(ctx, eid, 0);
 		TEST_ASSERT(ballot_prove(pf.data(), &len, u128, v128, a128, b128, r64,
-				e164, e264, m64, ctx, sizeof(ctx)) == 0, end);
+				e164, e264, m64, NCAND, ctx, sizeof(ctx)) == 0, end);
+	} TEST_END;
+
+	TEST_ONCE("a ballot for a candidate past the last is rejected") {
+		/* X^NCAND, a vote for no candidate of this election, proven as a
+		 * ballot of an election with one candidate more: the proof is a valid
+		 * one, of that other statement, and the board must refuse it. */
+		std::vector < uint8_t > pf(ballot_proof_len());
+		params::poly_p past;
+		bgvenc_t c;
+
+		make_vote(past, NCAND);
+		bgv_encrypt_rand(c, pk, past, rr, re1, re2);
+		to_i128(u128, c.u, true);
+		to_i128(v128, c.v, true);
+		to_i64(r64, rr, false);
+		to_i64(e164, re1, false);
+		to_i64(e264, re2, false);
+		memset(m64, 0, sizeof(m64));
+		m64[NCAND] = 1;
+		ballot_ctx(ctx, eid, 0);
+		TEST_ASSERT(ballot_prove(pf.data(), &len, u128, v128, a128, b128, r64,
+				e164, e264, m64, NCAND, ctx, sizeof(ctx)) == 0, end);
+		TEST_ASSERT(ballot_prove(pf.data(), &len, u128, v128, a128, b128, r64,
+				e164, e264, m64, NCAND + 1, ctx, sizeof(ctx)) == 1, end);
+		pf.resize(len);
+		TEST_ASSERT(ballot_verify(pf.data(), pf.size(), u128, v128, a128, b128,
+				NCAND + 1, ctx, sizeof(ctx)) == 1, end);
+		TEST_ASSERT(ballot_verify(pf.data(), pf.size(), u128, v128, a128, b128,
+				NCAND, ctx, sizeof(ctx)) == 0, end);
 	} TEST_END;
 
 	/* Mixing: server s takes list[s] and publishes list[s + 1]. */
