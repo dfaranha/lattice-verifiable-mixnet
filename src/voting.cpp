@@ -443,7 +443,7 @@ static int mix_publish(serial::bits & out, size_t sz[4], bgvenc_t in[MSGS],
 		vector < vector < params::poly_q >> &_m,
 		vector < params::poly_q > &sigma, bgvkey_t & pk, comkey_t & key,
 		int &commit_ok) {
-	static bgvenc_t list_out[MSGS];
+	static bgvenc_t *list_out = new bgvenc_t[MSGS];
 	pismall_mix_t *pr;
 	size_t at = out.bytes();
 	double t0;
@@ -536,8 +536,8 @@ static void test() {
 	static params::poly_q T[PARTIES][MSGS], E[MSGS];
 	/* What the trustees published, as read: the shares and the noise
 	 * commitments, which is what the shares are combined from. */
-	static params::poly_q VT[PARTIES][MSGS];
-	static commit_t vY[MSGS];
+	static params::poly_q (*VT)[MSGS] = new params::poly_q[PARTIES][MSGS];
+	static commit_t *vY = new commit_t[MSGS];
 	static params::poly_q dz[LIN_REPS][WIDTH], d_z[LIN_REPS][WIDTH];
 	uint8_t dh[BLAKE3_OUT_LEN];
 	size_t share_bytes = 0, dproof_bytes = 0;
@@ -838,7 +838,7 @@ static void test() {
 		double keep[5] = { t_remix, t_rr_prove, t_rr_verify, shuffle_t_prove,
 			shuffle_t_verify };
 		serial::bits pub;
-		static bgvenc_t next[MSGS];
+		static bgvenc_t *next = new bgvenc_t[MSGS];
 		size_t sz[4] = { };
 		const size_t elem = params::poly_q::degree * 88 / 8;
 		int junk = 1;
