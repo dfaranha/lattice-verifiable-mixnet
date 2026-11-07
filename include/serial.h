@@ -44,6 +44,15 @@ class bits {
 	std::vector < uint8_t > buf;
 	size_t nbits = 0;
 	size_t pos = 0;
+	/* Set by a read past the end, or of an encoding no writer produces; a
+	 * transcript read with it set is to be rejected. */
+	bool bad = false;
+
+	bits() = default;
+	/** A reader over len published bytes. */
+	bits(const uint8_t *in, size_t len) : buf(in, in + len), nbits(8 * len) {}
+	/** A reader over a writer's bytes, which it takes over. */
+	explicit bits(std::vector < uint8_t > &&in) : buf(std::move(in)), nbits(8 * buf.size()) {}
 
 	/* The low n bits of v, most significant first; for n > 64, the bits
 	 * above v's 64 are zeros, written without shifting a 64-bit value by 64
@@ -62,6 +71,11 @@ class bits {
 
 	uint64_t get(int n) {
 		uint64_t v = 0;
+		if (pos + n > 8 * buf.size()) {
+			bad = true;
+			pos = 8 * buf.size();
+			return 0;
+		}
 		for (int i = 0; i < n; i++) {
 			v <<= 1;
 			v |= (buf[pos >> 3] >> (7 - (pos & 7))) & 1;
@@ -72,6 +86,31 @@ class bits {
 
 	size_t bytes(void) const {
 		return (nbits + 7) / 8;
+	}
+
+	/** Whether a reader ended exactly where its writer did: nothing flagged,
+	 * no byte left over and the padding bits of the last byte zero. */
+	bool finish(void) const {
+		return !bad && (pos + 7) / 8 == buf.size()
+				&& ((pos & 7) == 0 || (buf[pos >> 3] & (0xff >> (pos & 7))) == 0);
+	}
+
+	/** n <= 128 bits of v, most significant first. */
+	void put128(zq::u128 v, int n) {
+		if (n > 64) {
+			put((uint64_t) (v >> 64), n - 64);
+			put((uint64_t) v, 64);
+		} else {
+			put((uint64_t) v, n);
+		}
+	}
+
+	zq::u128 get128(int n) {
+		if (n > 64) {
+			zq::u128 hi = get(n - 64);
+			return (hi << 64) | get(64);
+		}
+		return get(n);
 	}
 };
 
@@ -120,7 +159,12 @@ static inline int64_t get_rice(bits & b, int k) {
 		q++;
 	}
 	if (q >= SERIAL_ESCAPE) {
-		return unzigzag(b.get(64));
+		uint64_t u = b.get(64);
+		/* The writer escapes only what the unary run cannot carry. */
+		if ((u >> k) < SERIAL_ESCAPE) {
+			b.bad = true;
+		}
+		return unzigzag(u);
 	}
 	uint64_t u = q << k;
 	if (k > 0) {
@@ -138,55 +182,162 @@ static inline void put_uniform(bits & b, const params::poly_q & p) {
 }
 
 static inline void get_uniform(bits & b, params::poly_q & p) {
+	const zq::u128 q = params::poly_q::get_modulus(0);
+
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
 		zq::u128 hi = b.get(24);
-		p(0, i) = (hi << 64) | b.get(64);
+		zq::u128 v = (hi << 64) | b.get(64);
+		if (v >= q) {
+			b.bad = true;
+			v = 0;
+		}
+		p(0, i) = v;
 	}
 }
 
+/* Zigzag and Golomb-Rice in 128 bits: the widest response here, Pi_BND's
+ * row for the decryption noise, is about 2^74, past what 64 bits hold. */
+static inline zq::u128 zigzag128(__int128 x) {
+	return ((zq::u128) x << 1) ^ (zq::u128) (x >> 127);
+}
+
+static inline __int128 unzigzag128(zq::u128 u) {
+	return (__int128) (u >> 1) ^ -(__int128) (u & 1);
+}
+
+static inline void put_rice128(bits & b, __int128 x, int k) {
+	zq::u128 u = zigzag128(x);
+	zq::u128 q = u >> k;
+
+	if (q >= SERIAL_ESCAPE) {
+		b.put(0xffffff, SERIAL_ESCAPE);
+		b.put128(u, 128);
+		return;
+	}
+	for (unsigned i = 0; i < (unsigned) q; i++) {
+		b.put(1, 1);
+	}
+	b.put(0, 1);
+	if (k > 0) {
+		b.put128(u & ((((zq::u128) 1) << k) - 1), k);
+	}
+}
+
+static inline __int128 get_rice128(bits & b, int k) {
+	unsigned q = 0;
+	zq::u128 u;
+
+	while (q < SERIAL_ESCAPE && b.get(1) == 1) {
+		q++;
+	}
+	if (q >= SERIAL_ESCAPE) {
+		u = b.get128(128);
+		if ((u >> k) < SERIAL_ESCAPE) {
+			b.bad = true;
+		}
+	} else {
+		u = ((zq::u128) q << k) | (k > 0 ? b.get128(k) : 0);
+	}
+	return unzigzag128(u);
+}
+
 /**
- * Write a masked opening, Rice-coded about its own width. The residues of a
- * short element are not themselves short, so this reconstructs the integer
- * coefficient and centres it before coding. The element is taken in the
- * coefficient domain, which is how it is transmitted.
+ * Write a masked opening, Rice-coded about its own width: the centred
+ * coefficients of an element in the coefficient domain, which is how it is
+ * transmitted. q is one prime, so a coefficient is one residue.
  */
-static inline void put_gauss(bits & b, params::poly_q p, double sigma) {
-	std::array < mpz_t, params::poly_q::degree > c;
-	mpz_t qDivBy2;
+static inline void put_gauss(bits & b, const params::poly_q & p, double sigma) {
+	const zq::u128 q = params::poly_q::get_modulus(0);
 	int k = rice_k(sigma);
 
-	mpz_init(qDivBy2);
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_init2(c[i], (params::poly_q::bits_in_moduli_product() << 2));
-	}
-	mpz_fdiv_q_2exp(qDivBy2, params::poly_q::moduli_product(), 1);
-	p.poly2mpz(c);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		util::center(c[i], c[i], params::poly_q::moduli_product(), qDivBy2);
-		/* A response is far inside 64 bits; anything else is a witness that
-		 * is not short, and the escape carries it rather than truncating. */
-		put_rice(b, mpz_fits_slong_p(c[i]) ? mpz_get_si(c[i]) : INT64_MAX, k);
-	}
-	mpz_clear(qDivBy2);
-	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(c[i]);
+		zq::u128 c = p(0, i);
+		__int128 x = c > q / 2 ? -(__int128) (q - c) : (__int128) c;
+		put_rice128(b, x, k);
 	}
 }
 
 static inline void get_gauss(bits & b, params::poly_q & p, double sigma) {
-	std::array < mpz_t, params::poly_q::degree > c;
+	const zq::u128 q = params::poly_q::get_modulus(0);
 	int k = rice_k(sigma);
 
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_init2(c[i], (params::poly_q::bits_in_moduli_product() << 2));
-		mpz_set_si(c[i], get_rice(b, k));
-		if (mpz_sgn(c[i]) < 0) {
-			mpz_add(c[i], c[i], params::poly_q::moduli_product());
+		__int128 x = get_rice128(b, k);
+		if (x > (__int128) (q / 2) || x < -(__int128) (q / 2)) {
+			b.bad = true;
+			x = 0;
 		}
+		p(0, i) = x < 0 ? q - (zq::u128) (-x) : (zq::u128) x;
 	}
-	p.mpz2poly(c);
+}
+
+/** A Gaussian element held in the NTT domain, sent in the coefficient one. */
+static inline void put_gauss_ntt(bits & b, const params::poly_q & p, double sigma) {
+	params::poly_q t = p;
+	t.invntt_pow_invphi();
+	put_gauss(b, t, sigma);
+}
+
+static inline void get_gauss_ntt(bits & b, params::poly_q & p, double sigma) {
+	get_gauss(b, p, sigma);
+	p.ntt_pow_phi();
+}
+
+/** A ternary element held in the NTT domain: 2 bits a coefficient, 0, 1 or
+ * 2 for -1. Returns 0, writing nothing usable, if it is not ternary. */
+static inline int put_ternary_ntt(bits & b, const params::poly_q & p) {
+	const zq::u128 q = params::poly_q::get_modulus(0);
+	params::poly_q t = p;
+	int ok = 1;
+
+	t.invntt_pow_invphi();
 	for (size_t i = 0; i < params::poly_q::degree; i++) {
-		mpz_clear(c[i]);
+		zq::u128 c = t(0, i);
+		ok &= c <= 1 || c == q - 1;
+		b.put(c <= 1 ? (uint64_t) c : 2, 2);
+	}
+	return ok;
+}
+
+static inline void get_ternary_ntt(bits & b, params::poly_q & p) {
+	const zq::u128 q = params::poly_q::get_modulus(0);
+
+	for (size_t i = 0; i < params::poly_q::degree; i++) {
+		uint64_t c = b.get(2);
+		if (c == 3) {
+			b.bad = true;
+			c = 0;
+		}
+		p(0, i) = c == 2 ? q - 1 : (zq::u128) c;
+	}
+	p.ntt_pow_phi();
+}
+
+static inline void put_bytes(bits & b, const uint8_t *v, size_t n) {
+	for (size_t i = 0; i < n; i++) {
+		b.put(v[i], 8);
+	}
+}
+
+static inline void get_bytes(bits & b, uint8_t *v, size_t n) {
+	for (size_t i = 0; i < n; i++) {
+		v[i] = (uint8_t) b.get(8);
+	}
+}
+
+/** A commitment: c1 and its n message rows, uniform, as held. */
+static inline void put_commit(bits & b, const commit_t & c) {
+	put_uniform(b, c.c1);
+	for (size_t i = 0; i < c.c2.size(); i++) {
+		put_uniform(b, c.c2[i]);
+	}
+}
+
+static inline void get_commit(bits & b, commit_t & c, size_t n) {
+	get_uniform(b, c.c1);
+	c.c2.resize(n);
+	for (size_t i = 0; i < n; i++) {
+		get_uniform(b, c.c2[i]);
 	}
 }
 

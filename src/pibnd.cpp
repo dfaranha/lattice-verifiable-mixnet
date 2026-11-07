@@ -478,6 +478,8 @@ static int pibnd_verifier(uint8_t h1[BLAKE3_OUT_LEN], params::poly_q Z[V][NTI],
 #define pibnd_short_bound   pibnd_dec_bound
 #define pibnd_short_free    pibnd_dec_free
 #define pibnd_short_clear   pibnd_dec_clear
+#define pibnd_short_write   pibnd_dec_write
+#define pibnd_short_read    pibnd_dec_read
 #endif
 
 struct pibnd_short {
@@ -598,6 +600,39 @@ int pibnd_short_verify(pibnd_short_t * pi, comkey_t & key, commit_t * P,
 	}
 
 	return pibnd_verifier(pi->h, short_scratch, A, t);
+}
+
+/* The proof as published bytes: its hash, then Z, held in the NTT domain and
+ * sent as coefficients, Golomb-Rice coded about the width of its row (the
+ * decryption build's last row is about 2^74 wide, which the coder carries in
+ * 128 bits). Only a complete proof is published; complete is not sent. */
+int pibnd_short_write(const pibnd_short_t * pi, serial::bits & b) {
+	if (pi == NULL || !pi->complete) {
+		return 0;
+	}
+	serial::put_bytes(b, pi->h, BLAKE3_OUT_LEN);
+	for (int i = 0; i < V; i++) {
+		for (int j = 0; j < NTI; j++) {
+			serial::put_gauss_ntt(b, pi->Z[i][j],
+					i < ANEX_K ? SIGMA_ANEX : SIGMA_ANEX_HAT);
+		}
+	}
+	return 1;
+}
+
+pibnd_short_t *pibnd_short_read(serial::bits & b) {
+	pibnd_short_t *pi = new pibnd_short_t;
+
+	pi->Z = new params::poly_q[V][NTI];
+	serial::get_bytes(b, pi->h, BLAKE3_OUT_LEN);
+	for (int i = 0; i < V; i++) {
+		for (int j = 0; j < NTI; j++) {
+			serial::get_gauss_ntt(b, pi->Z[i][j],
+					i < ANEX_K ? SIGMA_ANEX : SIGMA_ANEX_HAT);
+		}
+	}
+	pi->complete = 1;
+	return pi;
 }
 
 size_t pibnd_short_bytes(const pibnd_short_t * pi) {

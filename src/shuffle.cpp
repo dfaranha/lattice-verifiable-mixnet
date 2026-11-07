@@ -1105,7 +1105,7 @@ static void shuffle_compress(comkey_t & _key, commit_t cs[MSGS],
 	}
 }
 
-static int run(vector < vector < params::poly_q >> &m,
+[[maybe_unused]] static int run(vector < vector < params::poly_q >> &m,
 		vector < vector < params::poly_q >> &_m,
 		vector < params::poly_q > &sigma, comkey_t & key) {
 	static params::poly_q rho[SHUFFLE_REPS][SIZE];
@@ -1178,6 +1178,208 @@ static int run(vector < vector < params::poly_q >> &m,
 	}
 
 	return result;
+}
+
+/* The public half of shuffle_compress(): what a verifier of the pass needs,
+ * from the commitments, the published output messages and rho alone. */
+static void shuffle_compress_public(comkey_t & _key, commit_t vcs[MSGS],
+		params::poly_q v_ms[MSGS], vector < vector < params::poly_q >> &_m,
+		commit_t c[MSGS], comkey_t & key, params::poly_q rho[SIZE]) {
+	params::poly_q t1;
+
+	for (size_t i = 0; i < MSGS; i++) {
+		v_ms[i] = _m[i][0];
+		v_ms[i].ntt_pow_phi();
+		vcs[i].c1 = c[i].c1;
+		vcs[i].c2.resize(1);
+		vcs[i].c2[0] = c[i].c2[0] * rho[0];
+		for (size_t j = 1; j < SIZE; j++) {
+			vcs[i].c2[0] = vcs[i].c2[0] + c[i].c2[j] * rho[j];
+			t1 = _m[i][j];
+			t1.ntt_pow_phi();
+			v_ms[i] = v_ms[i] + t1 * rho[j];
+		}
+	}
+	for (size_t i = 0; i < HEIGHT; i++) {
+		for (size_t j = HEIGHT; j < WIDTH; j++) {
+			_key.A1[i][j - HEIGHT] = key.A1[i][j - HEIGHT];
+		}
+	}
+	_key.A2[0][0] = 0;
+	_key.A2[0][1] = rho[0];
+	for (size_t j = 2; j < WIDTH; j++) {
+		_key.A2[0][j] = key.A2[0][j];
+	}
+	for (size_t i = 1; i < SIZE; i++) {
+		for (size_t j = 2; j < WIDTH; j++) {
+			_key.A2[0][j] = _key.A2[0][j] + rho[i] * key.A2[i][j];
+		}
+	}
+}
+
+/*
+ * The proof of shuffle as published bytes, which is how the election runs
+ * it: shuffle_prove_bytes() writes the transcript for the commitments in com[]
+ * and keeps nothing a verifier reads, and shuffle_verify_bytes() checks it
+ * from those bytes, the commitments c it is about (which the verifier builds
+ * from public data) and the published output messages _m. The order is the
+ * order the verifier needs:
+ *
+ *   - the commitments P_i to the sigma_i and the proof that they are ring
+ *     constants (and, under SHUFFLE_PIBND, short), sent once;
+ *   - every pass's D_i, all committed before beta;
+ *   - for each pass, s_0 .. s_{MSGS-2} (s_{MSGS-1} is never used), then for
+ *     each relation its hash and its responses, coefficients Golomb-Rice coded
+ *     about SIGMA_C.
+ *
+ * The verifier derives rho, the compression, tau, mu and beta itself, checks
+ * each relation as it reads it, and uses storage of its own.
+ */
+static int shuffle_prove_bytes(serial::bits & out,
+		vector < vector < params::poly_q >> &m,
+		vector < vector < params::poly_q >> &_m,
+		vector < params::poly_q > &sigma, comkey_t & key) {
+	static params::poly_q rho[SHUFFLE_REPS][SIZE];
+	static params::poly_q tau[SHUFFLE_REPS], mu[SHUFFLE_REPS], beta[SHUFFLE_REPS];
+	params::poly_q coef[3], th[2];
+	comkey_t _key;
+	int ready, tries = 0, ok = 1;
+	double t0 = shuffle_now();
+
+	do {
+		ready = 1;
+		shuffle_commit_sigma(pcom, pr, sigma.data(), key);
+		for (int rep = 0; rep < SHUFFLE_REPS && ready; rep++) {
+			shuffle_rho_hash(rho[rep], com, _m, rep);
+			shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
+			if (getrandom(rseed[rep], BLAKE3_OUT_LEN, 0) != BLAKE3_OUT_LEN) {
+				fprintf(stderr, "ERROR: could not read entropy for a pass\n");
+				abort();
+			}
+			ready = shuffle_prover_commit(tau[rep], mu[rep], &d[rep * MSGS],
+					rseed[rep], pcom, cs, ms, _ms, rho[rep], _key, rep);
+		}
+	} while (!ready && ++tries < SHUFFLE_TRIES);
+	if (!ready) {
+		return 0;
+	}
+	for (size_t i = 0; i < MSGS; i++) {
+		serial::put_commit(out, pcom[i]);
+	}
+	ok &= pismall_const_write(cst, out);
+#if SHUFFLE_PIBND
+	ok &= pibnd_short_write(bnd, out);
+#endif
+	for (size_t i = 0; i < SHUFFLE_REPS * MSGS; i++) {
+		serial::put_commit(out, d[i]);
+	}
+	shuffle_beta_hash(beta, com, _m, pcom, d, tau, mu, rho);
+	for (int rep = 0; rep < SHUFFLE_REPS && ok; rep++) {
+		const uint8_t *seed = rseed[rep];
+
+		shuffle_compress(_key, cs, ms, _ms, m, _m, com, key, rho[rep]);
+		shuffle_factors(ms, _ms, tau[rep], mu[rep]);
+		if (!simul_inverse(inv, fb)) {
+			return 0;
+		}
+		shuffle_theta(th[0], seed, 0);
+		for (size_t i = 0; i < MSGS - 1; i++) {
+			if (i == 0) {
+				s[0] = th[0] * fb[0] - beta[rep] * fa[0];
+			} else {
+				shuffle_theta(th[i & 1], seed, i);
+				s[i] = th[(i - 1) & 1] * fa[i] + th[i & 1] * fb[i]
+						- s[i - 1] * fa[i];
+			}
+			s[i] = s[i] * inv[i];
+			serial::put_uniform(out, s[i]);
+		}
+		for (size_t l = 0; l < MSGS; l++) {
+			shuffle_coeffs(coef, l, s, _ms, beta[rep], tau[rep], mu[rep]);
+			shuffle_commit_rand(_rtmp, seed, l);
+			ok &= lin_prover(y, w, _y, lh[l], cs[l], pcom[l], d[rep * MSGS + l],
+					coef, _key, key, r[l], pr[l], _rtmp);
+			serial::put_bytes(out, lh[l], BLAKE3_OUT_LEN);
+			for (int j = 0; j < LIN_REPS; j++) {
+				for (int k = 0; k < WIDTH; k++) {
+					serial::put_gauss_ntt(out, y[j][k], SIGMA_C);
+					serial::put_gauss_ntt(out, w[j][k], SIGMA_C);
+					serial::put_gauss_ntt(out, _y[j][k], SIGMA_C);
+				}
+			}
+		}
+	}
+	shuffle_t_prove += shuffle_now() - t0;
+	return ok;
+}
+
+static int shuffle_verify_bytes(serial::bits & in, commit_t c[MSGS],
+		vector < vector < params::poly_q >> &_m, comkey_t & key) {
+	static params::poly_q rho[SHUFFLE_REPS][SIZE];
+	static params::poly_q tau[SHUFFLE_REPS], mu[SHUFFLE_REPS], beta[SHUFFLE_REPS];
+	params::poly_q coef[3];
+	comkey_t _key;
+	commit_t *vp = new commit_t[MSGS];
+	commit_t *vd = new commit_t[SHUFFLE_REPS * MSGS];
+	commit_t *vcs = new commit_t[MSGS];
+	params::poly_q *v_ms = new params::poly_q[MSGS];
+	params::poly_q *vs = new params::poly_q[MSGS];
+	static params::poly_q z[LIN_REPS][WIDTH], zp[LIN_REPS][WIDTH],
+			_z[LIN_REPS][WIDTH];
+	uint8_t h[BLAKE3_OUT_LEN];
+	double t0 = shuffle_now();
+	pismall_const_t *vc;
+	int ok;
+
+	for (size_t i = 0; i < MSGS; i++) {
+		serial::get_commit(in, vp[i], 1);
+	}
+	vc = pismall_const_read(in);
+	ok = !in.bad && pismall_const_verify(vc, key, vp, MSGS);
+	pismall_const_free(vc);
+#if SHUFFLE_PIBND
+	{
+		pibnd_short_t *vb = pibnd_short_read(in);
+		ok &= !in.bad && pibnd_short_verify(vb, key, vp, MSGS);
+		pibnd_short_free(vb);
+	}
+#endif
+	for (size_t i = 0; i < SHUFFLE_REPS * MSGS; i++) {
+		serial::get_commit(in, vd[i], 1);
+	}
+	for (int rep = 0; rep < SHUFFLE_REPS; rep++) {
+		shuffle_rho_hash(rho[rep], c, _m, rep);
+		shuffle_compress_public(_key, vcs, v_ms, _m, c, key, rho[rep]);
+		shuffle_chal_hash(tau[rep], mu[rep], vcs, vp, v_ms, rho[rep], rep);
+	}
+	shuffle_beta_hash(beta, c, _m, vp, vd, tau, mu, rho);
+	for (int rep = 0; rep < SHUFFLE_REPS && ok && !in.bad; rep++) {
+		shuffle_compress_public(_key, vcs, v_ms, _m, c, key, rho[rep]);
+		for (size_t i = 0; i < MSGS - 1; i++) {
+			serial::get_uniform(in, vs[i]);
+		}
+		vs[MSGS - 1] = 0;
+		for (size_t l = 0; l < MSGS && ok && !in.bad; l++) {
+			serial::get_bytes(in, h, BLAKE3_OUT_LEN);
+			for (int j = 0; j < LIN_REPS; j++) {
+				for (int k = 0; k < WIDTH; k++) {
+					serial::get_gauss_ntt(in, z[j][k], SIGMA_C);
+					serial::get_gauss_ntt(in, zp[j][k], SIGMA_C);
+					serial::get_gauss_ntt(in, _z[j][k], SIGMA_C);
+				}
+			}
+			shuffle_coeffs(coef, l, vs, v_ms, beta[rep], tau[rep], mu[rep]);
+			ok &= !in.bad && lin_verifier(z, zp, _z, h, vcs[l], vp[l],
+					vd[rep * MSGS + l], coef, _key, key);
+		}
+	}
+	delete[] vp;
+	delete[] vd;
+	delete[] vcs;
+	delete[] v_ms;
+	delete[] vs;
+	shuffle_t_verify += shuffle_now() - t0;
+	return ok && !in.bad;
 }
 
 #ifdef MAIN

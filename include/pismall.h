@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "common.h"
+#include "serial.h"
 
 /**
  * The amortized exact proof of src/pismall.cpp, specialised to the statement
@@ -59,6 +60,11 @@ size_t pismall_const_bytes(const pismall_const_t * pi);
 
 /** Release a proof and the one-time setup it shares with the other proofs. */
 void pismall_const_free(pismall_const_t * pi);
+/* The proof as published bytes (pismall.cpp): write returns 0 if the proof
+ * is not of the form a prover makes; read returns a proof to verify, or one
+ * to free if the reader is left bad or unfinished. */
+int pismall_const_write(const pismall_const_t * pi, serial::bits & b);
+pismall_const_t *pismall_const_read(serial::bits & b);
 void pismall_const_clear(void);
 
 /**
@@ -101,6 +107,11 @@ size_t pismall_mix_bytes(const pismall_mix_t * pi);
 
 /** Release a proof, and the setup the proofs of this build share. */
 void pismall_mix_free(pismall_mix_t * pi);
+/* The proof as published bytes (pismall.cpp): write returns 0 if the proof
+ * is not of the form a prover makes; read returns a proof to verify, or one
+ * to free if the reader is left bad or unfinished. */
+int pismall_mix_write(const pismall_mix_t * pi, serial::bits & b);
+pismall_mix_t *pismall_mix_read(serial::bits & b);
 void pismall_mix_clear(void);
 
 #endif

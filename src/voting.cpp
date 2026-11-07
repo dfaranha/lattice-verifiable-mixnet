@@ -432,42 +432,84 @@ static void verifier_commitments(bgvenc_t in[MSGS]) {
 	}
 }
 
-/* One mix server end to end: mix, prove the re-encryptions, and have them
- * checked, the commitments rebuilt from public data and the proof of shuffle
- * run. The proof of re-encryption's time and size are added to the totals. */
+/* One mix server's publication, as bytes: its output list (u and v of each
+ * ciphertext, uniform), the commitments to the E_i, the proof of
+ * re-encryption, and the proof of shuffle (shuffle_prove_bytes). sz[] gets
+ * the bytes of each of the four. */
 static double t_remix, t_rr_prove, t_rr_verify;
-static size_t rr_bytes;
 
-static int mix_and_prove(bgvenc_t out[MSGS], bgvenc_t in[MSGS],
+static int mix_publish(serial::bits & out, size_t sz[4], bgvenc_t in[MSGS],
 		vector < vector < params::poly_q >> &m,
 		vector < vector < params::poly_q >> &_m,
 		vector < params::poly_q > &sigma, bgvkey_t & pk, comkey_t & key,
-		int &commit_ok, int &rr_ok) {
+		int &commit_ok) {
+	static bgvenc_t list_out[MSGS];
 	pismall_mix_t *pr;
-	serial::bits b;
+	size_t at = out.bytes();
 	double t0;
+	int ok;
 
 	t0 = shuffle_now();
-	commit_ok &= mix(out, in, m, _m, sigma, pk, key);
+	commit_ok &= mix(list_out, in, m, _m, sigma, pk, key);
 	t_remix += shuffle_now() - t0;
+	for (int i = 0; i < MSGS; i++) {
+		serial::put_uniform(out, list_out[i].u);
+		serial::put_uniform(out, list_out[i].v);
+	}
+	sz[0] += out.bytes() - at;
+	at = out.bytes();
+	for (int i = 0; i < MSGS; i++) {
+		serial::put_commit(out, ecom[i]);
+	}
+	sz[1] += out.bytes() - at;
+	at = out.bytes();
 	t0 = shuffle_now();
 	pr = pismall_mix_prove(key, pk, ecom, r, erho, ee1, ee2, MSGS);
+	ok = pismall_mix_write(pr, out);
+	pismall_mix_free(pr);
 	t_rr_prove += shuffle_now() - t0;
-
-	t0 = shuffle_now();
-	rr_ok &= pismall_mix_verify(pr, key, pk, ecom, MSGS);
+	sz[2] += out.bytes() - at;
+	at = out.bytes();
+	/* The proof of shuffle is about the commitments to the c_i + E_i, which
+	 * the server forms as anyone does. */
 	verifier_commitments(in);
-	t_rr_verify += shuffle_now() - t0;
+	ok &= shuffle_prove_bytes(out, m, _m, sigma, key);
+	sz[3] += out.bytes() - at;
+	return ok;
+}
+
+/* Anyone: a mix server's bytes, against the list in it took. The list it
+ * published, as read, goes to out; returns whether every proof verifies and
+ * the bytes are exactly an encoding a server writes. */
+static int mix_check(serial::bits & pub, bgvenc_t out[MSGS], bgvenc_t in[MSGS],
+		bgvkey_t & pk, comkey_t & key, int &rr_ok) {
+	static commit_t vecom[MSGS], vcom[MSGS];
+	static vector < vector < params::poly_q >> vm(MSGS);
+	pismall_mix_t *pr;
+	double t0;
+	int rr, ok;
 
 	for (int i = 0; i < MSGS; i++) {
-		serial::put_uniform(b, ecom[i].c1);
-		serial::put_uniform(b, ecom[i].c2[0]);
-		serial::put_uniform(b, ecom[i].c2[1]);
+		serial::get_uniform(pub, out[i].u);
+		serial::get_uniform(pub, out[i].v);
 	}
-	rr_bytes += pismall_mix_bytes(pr) + b.bytes();
+	for (int i = 0; i < MSGS; i++) {
+		serial::get_commit(pub, vecom[i], SIZE);
+	}
+	t0 = shuffle_now();
+	pr = pismall_mix_read(pub);
+	rr = !pub.bad && pismall_mix_verify(pr, key, pk, vecom, MSGS);
 	pismall_mix_free(pr);
-
-	return run(m, _m, sigma, key);
+	t_rr_verify += shuffle_now() - t0;
+	rr_ok &= rr;
+	for (int i = 0; i < MSGS; i++) {
+		vcom[i] = vecom[i];
+		vcom[i].c2[0] = vcom[i].c2[0] + in[i].u;
+		vcom[i].c2[1] = vcom[i].c2[1] + in[i].v;
+		vm[i] = as_message(out[i]);
+	}
+	ok = shuffle_verify_bytes(pub, vcom, vm, key);
+	return rr && ok && pub.finish();
 }
 
 static int cmp_int(const void *a, const void *b) {
@@ -484,13 +526,18 @@ static void test() {
 	vector < params::poly_q > sigma(MSGS);
 	int votes[MSGS], tally[MSGS], count[NCAND] = { };
 	int commit_ok = 1, shuffle_ok = 1, valid = 1, cast_ok = 1, board_ok = 1;
-	int rr_ok = 1, dec_ok = 1, dlin_ok = 1, dbnd_ok = 1;
+	int rr_ok = 1, dec_ok = 1, dlin_ok = 1, dbnd_ok = 1, read_ok = 1;
+	size_t setup_bytes = 0, ballot_bytes = 0, mix_sz[4] = { }, mix_bytes = 0;
 	/* The trustees' commitments to their key shares, and what each publishes
 	 * for the decryption: shares T, commitments Y to the noise E, and their
 	 * randomness ry. One trustee's E, Y and ry are live at a time. */
 	static commit_t scom[PARTIES], Y[MSGS];
 	static vector < params::poly_q > srand[PARTIES], ry[MSGS];
 	static params::poly_q T[PARTIES][MSGS], E[MSGS];
+	/* What the trustees published, as read: the shares and the noise
+	 * commitments, which is what the shares are combined from. */
+	static params::poly_q VT[PARTIES][MSGS];
+	static commit_t vY[MSGS];
 	static params::poly_q dz[LIN_REPS][WIDTH], d_z[LIN_REPS][WIDTH];
 	uint8_t dh[BLAKE3_OUT_LEN];
 	size_t share_bytes = 0, dproof_bytes = 0;
@@ -519,6 +566,20 @@ static void test() {
 		commit_one(scom[j], srand[j], sj, key);
 	}
 	t_key = shuffle_now() - t0;
+	{
+		/* The trustees publish their key-share commitments; everyone uses
+		 * them as read. */
+		serial::bits b;
+		for (int j = 0; j < PARTIES; j++) {
+			serial::put_commit(b, scom[j]);
+		}
+		setup_bytes = b.bytes();
+		serial::bits rd(std::move(b.buf));
+		for (int j = 0; j < PARTIES; j++) {
+			serial::get_commit(rd, scom[j], 1);
+		}
+		read_ok &= rd.finish();
+	}
 	ballot_setup();
 	to_i128(a128, pk.a, true);
 	to_i128(b128, pk.b, true);
@@ -551,6 +612,23 @@ static void test() {
 		proof_bytes += len;
 	}
 	t_vote = shuffle_now() - t0;
+
+	/* Each ballot's ciphertext goes to the board as bytes, read back in place;
+	 * the proof is bytes already. */
+	for (int i = 0; i < MSGS; i++) {
+		serial::bits b;
+		serial::put_uniform(b, list[0][i].u);
+		serial::put_uniform(b, list[0][i].v);
+		ballot_bytes += b.bytes();
+		serial::bits rd(std::move(b.buf));
+		serial::get_uniform(rd, list[0][i].u);
+		serial::get_uniform(rd, list[0][i].v);
+		read_ok &= rd.finish();
+	}
+
+	TEST_ONCE("the key-share commitments and the ballots read back from their bytes") {
+		TEST_ASSERT(read_ok, end);
+	} TEST_END;
 
 	TEST_ONCE("every voter proves its ballot") {
 		TEST_ASSERT(cast_ok, end);
@@ -634,9 +712,14 @@ static void test() {
 	} TEST_END;
 
 	/* Mixing: server s takes list[s] and publishes list[s + 1]. */
-	for (int s = 0; s < MIXERS; s++) {
-		shuffle_ok &= mix_and_prove(list[s + 1], list[s], m, _m, sigma, pk,
-				key, commit_ok, rr_ok);
+	for (int srv = 0; srv < MIXERS; srv++) {
+		serial::bits pub;
+
+		shuffle_ok &= mix_publish(pub, mix_sz, list[srv], m, _m, sigma, pk, key,
+				commit_ok);
+		mix_bytes += pub.bytes();
+		serial::bits rd(std::move(pub.buf));
+		shuffle_ok &= mix_check(rd, list[srv + 1], list[srv], pk, key, rr_ok);
 	}
 	t_prove = shuffle_t_prove;
 	t_verify = shuffle_t_verify;
@@ -660,57 +743,66 @@ static void test() {
 	 * A linear proof is checked as soon as it is produced, as the proof of
 	 * shuffle does with its own, so only one is ever live. */
 	for (int j = 0; j < PARTIES; j++) {
-		serial::bits b, sb;
+		serial::bits pub;
 		pibnd_dec_t *bp;
+		size_t at;
 
+		/* Trustee j: its shares and, for each, the commitment to the noise
+		 * and the linear proof; then Pi_BND over all of its noise. */
+		t0 = shuffle_now();
 		for (int i = 0; i < MSGS; i++) {
 			bgvenc_t & c = list[MIXERS][i];
 
-			t0 = shuffle_now();
 			bgv_distdec_noise(T[j][i], E[i], c, share[j]);
 			commit_one(Y[i], ry[i], E[i], key);
 			dec_ok &= dlin_prove(dz, d_z, dh, scom[j], Y[i], c.u, T[j][i], key,
 					srand[j], ry[i], j, i);
-			t_dprove += shuffle_now() - t0;
-
-			t0 = shuffle_now();
-			dlin_ok &= dlin_verify(dz, d_z, dh, scom[j], Y[i], c.u, T[j][i],
-					key, j, i);
-			t_dverify += shuffle_now() - t0;
-
-			serial::put_uniform(sb, T[j][i]);
-			serial::put_uniform(b, Y[i].c1);
-			serial::put_uniform(b, Y[i].c2[0]);
+			at = pub.bytes();
+			serial::put_uniform(pub, T[j][i]);
+			share_bytes += pub.bytes() - at;
+			serial::put_commit(pub, Y[i]);
+			serial::put_bytes(pub, dh, BLAKE3_OUT_LEN);
 			for (int k = 0; k < LIN_REPS; k++) {
 				for (int l = 0; l < WIDTH; l++) {
-					params::poly_q a = dz[k][l];
-
-					a.invntt_pow_invphi();
-					serial::put_gauss(b, a, SIGMA_C);
-					a = d_z[k][l];
-					a.invntt_pow_invphi();
-					serial::put_gauss(b, a, SIGMA_C);
+					serial::put_gauss_ntt(pub, dz[k][l], SIGMA_C);
+					serial::put_gauss_ntt(pub, d_z[k][l], SIGMA_C);
 				}
 			}
 		}
-
-		t0 = shuffle_now();
 		bp = pibnd_dec_prove(key, Y, ry, E, MSGS);
-		t_dprove += shuffle_now() - t0;
-		t0 = shuffle_now();
-		dbnd_ok &= pibnd_dec_verify(bp, key, Y, MSGS);
-		t_dverify += shuffle_now() - t0;
-
-		share_bytes += sb.bytes();
-		dproof_bytes += b.bytes() + MSGS * BLAKE3_OUT_LEN + pibnd_dec_bytes(bp);
+		dec_ok &= pibnd_dec_write(bp, pub);
 		pibnd_dec_free(bp);
+		t_dprove += shuffle_now() - t0;
+		dproof_bytes += pub.bytes();
+
+		/* Anyone: the same, read from trustee j's bytes. */
+		t0 = shuffle_now();
+		serial::bits rd(std::move(pub.buf));
+		for (int i = 0; i < MSGS; i++) {
+			serial::get_uniform(rd, VT[j][i]);
+			serial::get_commit(rd, vY[i], 1);
+			serial::get_bytes(rd, dh, BLAKE3_OUT_LEN);
+			for (int k = 0; k < LIN_REPS; k++) {
+				for (int l = 0; l < WIDTH; l++) {
+					serial::get_gauss_ntt(rd, dz[k][l], SIGMA_C);
+					serial::get_gauss_ntt(rd, d_z[k][l], SIGMA_C);
+				}
+			}
+			dlin_ok &= !rd.bad && dlin_verify(dz, d_z, dh, scom[j], vY[i],
+					list[MIXERS][i].u, VT[j][i], key, j, i);
+		}
+		bp = pibnd_dec_read(rd);
+		dbnd_ok &= !rd.bad && pibnd_dec_verify(bp, key, vY, MSGS) && rd.finish();
+		pibnd_dec_free(bp);
+		t_dverify += shuffle_now() - t0;
 	}
+	dproof_bytes -= share_bytes;
 
 	/* Anyone: combine the shares, once every proof has been checked. */
 	t0 = shuffle_now();
 	for (int i = 0; i < MSGS; i++) {
 		for (int j = 0; j < PARTIES; j++) {
-			t[j] = T[j][i];
+			t[j] = VT[j][i];
 		}
 		bgv_comb(plain[i], list[MIXERS][i], t, PARTIES);
 		tally[i] = candidate(plain[i]);
@@ -740,32 +832,62 @@ static void test() {
 		TEST_ASSERT(memcmp(tally, votes, sizeof(votes)) == 0, end);
 	} TEST_END;
 
-	TEST_ONCE("a mix server that changes an output is rejected") {
-		/* Mix the first list again and add 1 to an output component: the
-		 * outputs are no longer the committed re-encryptions permuted. */
-		params::poly_q one = 1;
-		static bgvenc_t out[MSGS];
+	{
+		/* An honest publication by the first server, then altered. Its time
+		 * is not counted. */
+		double keep[5] = { t_remix, t_rr_prove, t_rr_verify, shuffle_t_prove,
+			shuffle_t_verify };
+		serial::bits pub;
+		static bgvenc_t next[MSGS];
+		size_t sz[4] = { };
+		const size_t elem = params::poly_q::degree * 88 / 8;
+		int junk = 1;
 
-		mix(out, list[0], m, _m, sigma, pk, key);
-		verifier_commitments(list[0]);
-		_m[0][1] = _m[0][1] + one;
-		TEST_ASSERT(run(m, _m, sigma, key) == 0, end);
-	} TEST_END;
+		mix_publish(pub, sz, list[0], m, _m, sigma, pk, key, junk);
+		std::vector < uint8_t > honest = pub.buf;
 
-	TEST_ONCE("a mix server that replaces a ballot is rejected") {
-		/* Publish, in place of one output, a fresh encryption of a vote of
-		 * the server's choosing. */
-		static bgvenc_t out[MSGS];
-		bgvenc_t own;
-		params::poly_p v;
+		TEST_ONCE("a mix server's publication reads back and verifies") {
+			serial::bits rd{std::vector < uint8_t > (honest)};
+			TEST_ASSERT(mix_check(rd, next, list[0], pk, key, junk) == 1, end);
+		} TEST_END;
 
-		mix(out, list[0], m, _m, sigma, pk, key);
-		verifier_commitments(list[0]);
-		make_vote(v, NCAND - 1);
-		bgv_encrypt(own, pk, v);
-		_m[0] = as_message(own);
-		TEST_ASSERT(run(m, _m, sigma, key) == 0, end);
-	} TEST_END;
+		TEST_ONCE("a mix server that changes an output is rejected") {
+			/* The low bit of the first coefficient of output 0's v. */
+			std::vector < uint8_t > bad = honest;
+			bad[elem + 10] ^= 0x01;
+			serial::bits rd(std::move(bad));
+			TEST_ASSERT(mix_check(rd, next, list[0], pk, key, junk) == 0, end);
+		} TEST_END;
+
+		TEST_ONCE("a mix server that replaces a ballot is rejected") {
+			/* In place of output 0, a fresh encryption of a vote of the
+			 * server's choosing. */
+			std::vector < uint8_t > bad = honest;
+			bgvenc_t own;
+			params::poly_p v;
+			serial::bits ob;
+
+			make_vote(v, NCAND - 1);
+			bgv_encrypt(own, pk, v);
+			serial::put_uniform(ob, own.u);
+			serial::put_uniform(ob, own.v);
+			memcpy(bad.data(), ob.buf.data(), 2 * elem);
+			serial::bits rd(std::move(bad));
+			TEST_ASSERT(mix_check(rd, next, list[0], pk, key, junk) == 0, end);
+		} TEST_END;
+
+		TEST_ONCE("a mix server's publication with a byte appended is refused") {
+			std::vector < uint8_t > bad = honest;
+			bad.push_back(0);
+			serial::bits rd(std::move(bad));
+			TEST_ASSERT(mix_check(rd, next, list[0], pk, key, junk) == 0, end);
+		} TEST_END;
+		t_remix = keep[0];
+		t_rr_prove = keep[1];
+		t_rr_verify = keep[2];
+		shuffle_t_prove = keep[3];
+		shuffle_t_verify = keep[4];
+	}
 
 	TEST_ONCE("a mix server that commits to other than a zero is rejected") {
 		/* The attack the proof of re-encryption is there for: commit, in
@@ -853,9 +975,15 @@ static void test() {
 			t_remix / MIXERS, t_prove / MIXERS, t_verify / MIXERS,
 			t_shared / MIXERS);
 	printf("    timing, per mix server: proof of re-encryption, prove %.2f s, "
-			"verify %.2f s; %.1f KB per ballot (commitments to the E_i "
-			"included)\n", t_rr_prove / MIXERS, t_rr_verify / MIXERS,
-			rr_bytes / 1024.0 / MIXERS / MSGS);
+			"verify %.2f s\n", t_rr_prove / MIXERS, t_rr_verify / MIXERS);
+	printf("    sizes, as published: key-share commitments %.1f KB in all; "
+			"ballot ciphertext %.1f KB\n", setup_bytes / 1024.0,
+			ballot_bytes / 1024.0 / MSGS);
+	printf("    sizes, per mix server and ballot: %.1f KB in all = output %.1f "
+			"+ commitments to the E_i %.1f + proof of re-encryption %.1f + "
+			"proof of shuffle %.1f\n", mix_bytes / 1024.0 / MIXERS / MSGS,
+			mix_sz[0] / 1024.0 / MIXERS / MSGS, mix_sz[1] / 1024.0 / MIXERS / MSGS,
+			mix_sz[2] / 1024.0 / MIXERS / MSGS, mix_sz[3] / 1024.0 / MIXERS / MSGS);
 	printf("    timing, per trustee: partial decryptions and their proofs %.2f "
 			"s, %.2f ms per ballot; verify them %.2f s, %.2f ms per ballot\n",
 			t_dprove / PARTIES, 1e3 * t_dprove / PARTIES / MSGS,

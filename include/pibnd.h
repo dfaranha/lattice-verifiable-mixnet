@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "common.h"
+#include "serial.h"
 
 /**
  * The amortized approximate norm proof of src/pibnd.cpp, instantiated on the
@@ -80,6 +81,11 @@ int pibnd_dec_verify(pibnd_dec_t * pi, comkey_t & key, commit_t * P, size_t n);
 double pibnd_dec_bound(void);
 size_t pibnd_dec_bytes(const pibnd_dec_t * pi);
 void pibnd_dec_free(pibnd_dec_t * pi);
+/* The proof as published bytes (pibnd.cpp): write returns 0 for a proof that
+ * is not complete; read returns a proof to verify, or one to free if the
+ * reader is left bad or unfinished. */
+int pibnd_dec_write(const pibnd_dec_t * pi, serial::bits & b);
+pibnd_dec_t *pibnd_dec_read(serial::bits & b);
 void pibnd_dec_clear(void);
 
 #endif

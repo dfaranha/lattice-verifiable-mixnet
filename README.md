@@ -100,9 +100,25 @@ a ballot for a candidate past the last is rejected, that a mix server that
 changes an output, replaces a ballot with one of its own, or commits to
 something other than an encryption of zero is rejected, and that a trustee whose
 partial decryption is wrong, or whose noise is far out of bounds, is rejected.
-It prints the time and size of each proof: per ballot for the voters, per ballot
-and mix server for the proofs of re-encryption and of shuffle, and per ballot
-and trustee for the shares and the proofs of decryption. Section 13 of
+Everything public goes through bytes, and every check reads only what was
+published: the key-share commitments; each ballot's ciphertext; each mix
+server's output list, its commitments to the E_i, its proof of re-encryption
+and its proof of shuffle (`mix_publish` and `mix_check`, the shuffle's
+transcript written by `shuffle_prove_bytes` and checked by
+`shuffle_verify_bytes`, which derives rho, the compression and every
+challenge itself and reads the output messages from the published list); and
+each trustee's shares, noise commitments, linear proofs and `\Pi_BND`. The
+next server takes the list as read and the shares are combined as read.
+Uniform elements are written at the 88 bits of q, the responses Golomb-Rice
+coded about their width (in 128 bits, so that `\Pi_BND`'s row for the
+decryption noise, about 2^74 wide, is carried exactly), the opened columns of
+`\Pi_SMALL` at 88 bits a symbol rather than the 16 bytes each is held in; the
+column indices are drawn again by the verifier rather than sent
+(`include/serial.h`, `pismall_*_write` and `_read`, `pibnd_dec_write` and
+`_read`). The program prints the measured size of each part: per ballot for
+the voters, per ballot and mix server for the outputs, the commitments, the
+proof of re-encryption and the proof of shuffle, and per ballot and trustee for
+the shares and the proofs of decryption. Section 13 of
 `SOUNDNESS.md` describes the proofs of re-encryption and of decryption and what
 they rest on. `pismall.cpp` and `pibnd.cpp` are each built twice into `voting`,
 once per relation, as the `Makefile` explains. The election size is the

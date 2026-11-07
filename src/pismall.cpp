@@ -2347,6 +2347,160 @@ static size_t pismall_lib_bytes(const pismall_proof_t * pi) {
 	return n;
 }
 
+/* The proof as published bytes, per pass: com (c1 and its R rows) and its
+ * opening rd (ternary, 2 bits a coefficient); f and h, N uniform coefficients
+ * each; rf and rh; the Merkle root; the ETA opened columns, each symbol at the
+ * 88 bits of q rather than the 16 bytes it is held in; their paths. The column
+ * indices are not sent: the verifier draws them from the transcript
+ * (aex_sample_I), as it did to check the ones it was given, and the depth of
+ * the tree is fixed by AEX_COLS. */
+#define Q_BITS      88
+
+static size_t aex_levels(void) {
+	size_t lv = 1;
+
+	for (size_t n = AEX_COLS; n > 1; n >>= 1) {
+		lv++;
+	}
+	return lv;
+}
+
+static void put_fmpz(serial::bits & b, const fmpz_t c) {
+	ulong hi, lo;
+
+	fmpz_get_uiui(&hi, &lo, c);
+	b.put128(((zq::u128) hi << 64) | lo, Q_BITS);
+}
+
+static void get_fmpz(serial::bits & b, fmpz_t c) {
+	zq::u128 v = b.get128(Q_BITS);
+
+	if (v >= params::poly_q::get_modulus(0)) {
+		b.bad = true;
+		v = 0;
+	}
+	fmpz_set_uiui(c, (ulong) (v >> 64), (ulong) v);
+}
+
+static void put_fpoly(serial::bits & b, const fmpz_mod_poly_t f, fmpz_t c) {
+	for (size_t l = 0; l < params::poly_q::degree; l++) {
+		fmpz_mod_poly_get_coeff_fmpz(c, f, l, mono_ctx);
+		put_fmpz(b, c);
+	}
+}
+
+static void get_fpoly(serial::bits & b, fmpz_mod_poly_t f, fmpz_t c) {
+	fmpz_mod_poly_zero(f, mono_ctx);
+	for (size_t l = 0; l < params::poly_q::degree; l++) {
+		get_fmpz(b, c);
+		fmpz_mod_poly_set_coeff_fmpz(f, l, c, mono_ctx);
+	}
+}
+
+static int pismall_lib_write(const pismall_proof_t * pi, serial::bits & b) {
+	const zq::u128 q = params::poly_q::get_modulus(0);
+	int ok = 1;
+	fmpz_t c;
+
+	fmpz_init(c);
+	for (int rep = 0; rep < AEX_REPS; rep++) {
+		const pismall_pass & ps = pi->pass[rep];
+
+		ok &= ps.com.c2.size() == (size_t) R && ps.rd.size() == (size_t) WIDTH
+				&& ps.o.levels == aex_levels();
+		serial::put_commit(b, ps.com);
+		for (size_t i = 0; i < ps.rd.size(); i++) {
+			ok &= serial::put_ternary_ntt(b, ps.rd[i]);
+		}
+		for (int i = 0; i < V; i++) {
+			for (int k = 0; k < AEX_DEG; k++) {
+				put_fpoly(b, ps.f[i][k], c);
+				put_fpoly(b, ps.h[0][i][k], c);
+				put_fpoly(b, ps.h[1][i][k], c);
+			}
+		}
+		for (size_t i = 0; i < ETA; i++) {
+			for (int k = 0; k < AEX_DEG; k++) {
+				put_fmpz(b, ps.rf[i].c[k]);
+				put_fmpz(b, ps.rh[i].c[k]);
+			}
+		}
+		serial::put_bytes(b, ps.o.root, BLAKE3_OUT_LEN);
+		for (size_t n = 0; n < ETA; n++) {
+			for (size_t r = 0; r < AEX_ROWS; r++) {
+				aex_w w = aex_col_sym(ps.o.col + n * AEX_COLBYTES, r);
+				ok &= w < q;
+				b.put128(w, Q_BITS);
+			}
+		}
+		serial::put_bytes(b, ps.o.path, ETA * (ps.o.levels - 1) * BLAKE3_OUT_LEN);
+	}
+	fmpz_clear(c);
+	return ok;
+}
+
+static pismall_proof_t *pismall_lib_read(serial::bits & b) {
+	pismall_proof_t *pi = new pismall_proof_t;
+	fmpz_t c;
+
+	pismall_lib_init();
+	fmpz_init(c);
+	for (int rep = 0; rep < AEX_REPS; rep++) {
+		pismall_pass & ps = pi->pass[rep];
+
+		for (int i = 0; i < V; i++) {
+			for (int k = 0; k < AEX_DEG; k++) {
+				fmpz_mod_poly_init(ps.f[i][k], mono_ctx);
+				fmpz_mod_poly_init(ps.h[0][i][k], mono_ctx);
+				fmpz_mod_poly_init(ps.h[1][i][k], mono_ctx);
+			}
+		}
+		for (size_t i = 0; i < ETA; i++) {
+			gr_init(ps.rf[i]);
+			gr_init(ps.rh[i]);
+		}
+		serial::get_commit(b, ps.com, R);
+		ps.rd.resize(WIDTH);
+		for (size_t i = 0; i < ps.rd.size(); i++) {
+			serial::get_ternary_ntt(b, ps.rd[i]);
+		}
+		for (int i = 0; i < V; i++) {
+			for (int k = 0; k < AEX_DEG; k++) {
+				get_fpoly(b, ps.f[i][k], c);
+				get_fpoly(b, ps.h[0][i][k], c);
+				get_fpoly(b, ps.h[1][i][k], c);
+			}
+		}
+		for (size_t i = 0; i < ETA; i++) {
+			for (int k = 0; k < AEX_DEG; k++) {
+				get_fmpz(b, ps.rf[i].c[k]);
+				get_fmpz(b, ps.rh[i].c[k]);
+			}
+		}
+		serial::get_bytes(b, ps.o.root, BLAKE3_OUT_LEN);
+		ps.o.levels = aex_levels();
+		ps.o.col = new uint8_t[ETA * AEX_COLBYTES];
+		ps.o.path = new uint8_t[ETA * (ps.o.levels - 1) * BLAKE3_OUT_LEN];
+		for (size_t n = 0; n < ETA; n++) {
+			for (size_t r = 0; r < AEX_ROWS; r++) {
+				zq::u128 v = b.get128(Q_BITS);
+				uint64_t w[2];
+				if (v >= params::poly_q::get_modulus(0)) {
+					b.bad = true;
+					v = 0;
+				}
+				w[0] = (uint64_t) v;
+				w[1] = (uint64_t) (v >> 64);
+				memcpy(ps.o.col + n * AEX_COLBYTES + r * 16, w, 16);
+			}
+		}
+		serial::get_bytes(b, ps.o.path, ETA * (ps.o.levels - 1) * BLAKE3_OUT_LEN);
+		aex_sample_I(ps.o.I, ps.o.root, ps.f, ps.rf, ps.h, ps.rh, mono_ctx);
+	}
+	fmpz_clear(c);
+	return pi;
+}
+
 static void pismall_lib_free(pismall_proof_t * pi) {
 	if (pi == NULL) {
 		return;
@@ -2485,6 +2639,14 @@ void pismall_mix_free(pismall_mix_t * pi) {
 	pismall_mix_impl::pismall_lib_free(pi);
 }
 
+int pismall_mix_write(const pismall_mix_t * pi, serial::bits & b) {
+	return pi != NULL && pismall_mix_impl::pismall_lib_write(pi, b);
+}
+
+pismall_mix_t *pismall_mix_read(serial::bits & b) {
+	return pismall_mix_impl::pismall_lib_read(b);
+}
+
 void pismall_mix_clear(void) {
 	pismall_mix_impl::pismall_lib_clear();
 }
@@ -2520,6 +2682,14 @@ size_t pismall_const_bytes(const pismall_const_t * pi) {
 
 void pismall_const_free(pismall_const_t * pi) {
 	pismall_lib_free(pi);
+}
+
+int pismall_const_write(const pismall_const_t * pi, serial::bits & b) {
+	return pi != NULL && pismall_lib_write(pi, b);
+}
+
+pismall_const_t *pismall_const_read(serial::bits & b) {
+	return pismall_lib_read(b);
 }
 #endif
 
