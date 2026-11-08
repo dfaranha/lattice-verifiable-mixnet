@@ -56,19 +56,31 @@ class bits {
 
 	/* The low n bits of v, most significant first; for n > 64, the bits
 	 * above v's 64 are zeros, written without shifting a 64-bit value by 64
-	 * or more, which is undefined (proof_size puts a 256-bit hash this way). */
+	 * or more, which is undefined (proof_size puts a 256-bit hash this way).
+	 * Up to a byte at a time: the Rice coder writes a residue of a dozen bits
+	 * or more for every coefficient, and a bit at a time that was most of the
+	 * cost of publishing a proof. */
 	void put(uint64_t v, int n) {
-		for (int i = n - 1; i >= 0; i--) {
-			if ((nbits & 7) == 0) {
+		while (n > 64) {
+			int z = n - 64 < 8 ? n - 64 : 8;
+
+			put(0, z);
+			n -= z;
+		}
+		while (n > 0) {
+			int used = nbits & 7, take = n < 8 - used ? n : 8 - used;
+
+			if (used == 0) {
 				buf.push_back(0);
 			}
-			if (i < 64 && ((v >> i) & 1)) {
-				buf[nbits >> 3] |= 0x80 >> (nbits & 7);
-			}
-			nbits++;
+			buf[nbits >> 3] |= (uint8_t) (((v >> (n - take)) & ((1u << take) - 1))
+					<< (8 - used - take));
+			nbits += take;
+			n -= take;
 		}
 	}
 
+	/* n bits, most significant first; for n > 64, the low 64 of them. */
 	uint64_t get(int n) {
 		uint64_t v = 0;
 		if (pos + n > 8 * buf.size()) {
@@ -76,12 +88,47 @@ class bits {
 			pos = 8 * buf.size();
 			return 0;
 		}
-		for (int i = 0; i < n; i++) {
-			v <<= 1;
-			v |= (buf[pos >> 3] >> (7 - (pos & 7))) & 1;
-			pos++;
+		while (n > 0) {
+			int used = pos & 7, take = n < 8 - used ? n : 8 - used;
+
+			v = (v << take) | ((buf[pos >> 3] >> (8 - used - take))
+					& ((1u << take) - 1));
+			pos += take;
+			n -= take;
 		}
 		return v;
+	}
+
+	/* Ones up to the next zero, which is read as well, and at most limit of
+	 * them: after limit ones the bit that follows is left unread, and a read
+	 * past the end flags the reader. This is what calling get(1) until it
+	 * returns 0 does, a byte at a time; a Rice code's unary quotient is read
+	 * this way for every coefficient. */
+	unsigned unary(unsigned limit) {
+		unsigned q = 0;
+
+		while (q < limit) {
+			if (pos >= 8 * buf.size()) {
+				bad = true;
+				pos = 8 * buf.size();
+				return q;
+			}
+			unsigned avail = 8 - (pos & 7);
+			uint32_t rest = (uint32_t) (uint8_t) (buf[pos >> 3] << (pos & 7)) << 24;
+			unsigned ones = __builtin_clz(~rest);
+
+			if (q + ones >= limit) {
+				pos += limit - q;
+				return limit;
+			}
+			q += ones;
+			pos += ones;
+			if (ones < avail) {
+				pos++;
+				return q;
+			}
+		}
+		return q;
 	}
 
 	size_t bytes(void) const {
@@ -143,21 +190,15 @@ static inline void put_rice(bits & b, int64_t x, int k) {
 		b.put(u, 64);
 		return;
 	}
-	for (uint64_t i = 0; i < q; i++) {
-		b.put(1, 1);
-	}
-	b.put(0, 1);
+	/* q ones and the zero that ends them, q < 24 */
+	b.put((((uint64_t) 1) << (q + 1)) - 2, (int) q + 1);
 	if (k > 0) {
 		b.put(u & (((uint64_t) 1 << k) - 1), k);
 	}
 }
 
 static inline int64_t get_rice(bits & b, int k) {
-	uint64_t q = 0;
-
-	while (q < SERIAL_ESCAPE && b.get(1) == 1) {
-		q++;
-	}
+	uint64_t q = b.unary(SERIAL_ESCAPE);
 	if (q >= SERIAL_ESCAPE) {
 		uint64_t u = b.get(64);
 		/* The writer escapes only what the unary run cannot carry. */
@@ -214,22 +255,17 @@ static inline void put_rice128(bits & b, __int128 x, int k) {
 		b.put128(u, 128);
 		return;
 	}
-	for (unsigned i = 0; i < (unsigned) q; i++) {
-		b.put(1, 1);
-	}
-	b.put(0, 1);
+	/* q ones and the zero that ends them, q < 24 */
+	b.put((((uint64_t) 1) << (q + 1)) - 2, (int) q + 1);
 	if (k > 0) {
 		b.put128(u & ((((zq::u128) 1) << k) - 1), k);
 	}
 }
 
 static inline __int128 get_rice128(bits & b, int k) {
-	unsigned q = 0;
+	unsigned q = b.unary(SERIAL_ESCAPE);
 	zq::u128 u;
 
-	while (q < SERIAL_ESCAPE && b.get(1) == 1) {
-		q++;
-	}
 	if (q >= SERIAL_ESCAPE) {
 		u = b.get128(128);
 		if ((u >> k) < SERIAL_ESCAPE) {
