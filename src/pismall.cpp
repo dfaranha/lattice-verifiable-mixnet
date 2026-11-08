@@ -413,12 +413,14 @@ static void pismall_free(void) {
 	delete[]t;
 }
 
-/* The prover's working space: H and v are most of a proof's memory (about 7
- * GB at TAU = 1024 for the mix-net's relation), and this file is linked up to
- * three times, so pismall_prover holds them only while it makes a proof,
- * unless its caller allocated them first and keeps them. */
-static void pismall_prover_alloc(void) {
-	H = new aex_code_t[TAU][3][V];
+/* The prover's working space, v most of it (1.3 GiB at TAU = 1024 for the
+ * mix-net's relation). This file is linked up to three times, so
+ * pismall_prover holds it only while it makes a proof, unless its caller
+ * allocated it first and keeps it. The rows H_{i,j} are made a block at a time
+ * (see aex_stream_commit) unless rows is set, which keeps them all in H for
+ * the tests to look at. */
+static void pismall_prover_alloc(bool rows) {
+	H = rows ? new aex_code_t[TAU][3][V] : NULL;
 	v = new zq::u128[3][TAU][V][params::poly_q::degree];
 	prover_y = new gr_t[TAU + 1];
 	prover_beta = new gr_t[TAU][3];
@@ -858,6 +860,8 @@ static_assert(AEX_COLS % AEX_TREE_BLOCK == 0, "columns come in whole blocks");
 static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
 		"the block gather copies limbs in memory order");
 
+static void aex_tree_up(aex_tree_t & t);
+
 static void aex_tree_build(aex_tree_t & t) {
 	uint8_t *blk = new uint8_t[AEX_TREE_BLOCK * AEX_COLBYTES];
 	t.node = new uint8_t[aex_tree_nodes() * BLAKE3_OUT_LEN];
@@ -876,6 +880,11 @@ static void aex_tree_build(aex_tree_t & t) {
 		}
 	}
 	delete[]blk;
+	aex_tree_up(t);
+}
+
+/* The levels above the leaves, which t.node already holds. */
+static void aex_tree_up(aex_tree_t & t) {
 	size_t off = 0, n = AEX_COLS;
 	t.levels = 1;
 	while (n > 1) {
@@ -1014,16 +1023,117 @@ static void aex_sample_I(size_t I[ETA], const uint8_t root[BLAKE3_OUT_LEN],
 	delete[]out;
 }
 
-/* Step 11: open the columns named by I, with their Merkle paths. */
+/* The rows H_{i,j} are by far most of E: 3 V TAU codewords, 5.3 GiB at
+ * TAU = 1024 for the mix-net's relation. They are only read to hash E's
+ * columns and to open ETA of them, so the prover makes them AEX_BLOCK values
+ * of i at a time, feeds each column's hash that block's symbols, and drops
+ * them; once the opened columns are known it makes them again for those
+ * columns' symbols. BLAKE3 gives the same digest however its input is split,
+ * so the leaves, the root and the proof are what the whole matrix gives. A
+ * caller that allocated H keeps every row there instead (the tests below). */
+#define AEX_BLOCK   ((size_t) 16)
+#define AEX_BROWS   (3 * V * AEX_BLOCK)
+
+/* Rows H_{i,j} for i in [i0, i0 + n), in blk, or in H when it is there. */
+static aex_code_t (*aex_encode_rows(size_t i0, size_t n,
+		aex_code_t (*blk)[3][V]))[3][V] {
+	aex_code_t (*out)[3][V] = H ? H + i0 : blk;
+	aex_rpoly *rs = new aex_rpoly;
+
+	for (size_t i = i0; i < i0 + n; i++) {
+		for (size_t k = 0; k < V; k++) {
+			rp_from_nfl(*rs, s[i][k]);
+			for (size_t j = 0; j < 3; j++) {
+				aex_encode_res(out[i - i0][j][k], (j == 0) ? rs->r : NULL,
+						v[j][i][k], (const fmpz *) prover_r[i][j]);
+			}
+		}
+	}
+	delete rs;
+	return out;
+}
+
+/* Hash the symbols of rows[0..n) into each column's hasher, AEX_TREE_BLOCK
+ * columns at a time, as aex_tree_build gathers them. */
+static void aex_absorb_rows(blake3_hasher *hs, const aex_code_t * const *rows,
+		size_t n, uint8_t *g) {
+	for (size_t c0 = 0; c0 < AEX_COLS; c0 += AEX_TREE_BLOCK) {
+		for (size_t r = 0; r < n; r++) {
+			const uint64_t *d = rows[r]->w + 2 * c0;
+			for (size_t b = 0; b < AEX_TREE_BLOCK; b++) {
+				memcpy(g + (b * n + r) * 16, d + 2 * b, 16);
+			}
+		}
+		for (size_t b = 0; b < AEX_TREE_BLOCK; b++) {
+			blake3_hasher_update(&hs[c0 + b], g + b * n * 16, n * 16);
+		}
+	}
+}
+
+/* Steps 5 and 6: the Merkle tree over E's columns, _H and H_0 being made. */
+static void aex_stream_commit(aex_tree_t & t) {
+	blake3_hasher *hs = new blake3_hasher[AEX_COLS];
+	uint8_t *g = new uint8_t[AEX_TREE_BLOCK * AEX_BROWS * 16];
+	aex_code_t (*blk)[3][V] = H ? NULL : new aex_code_t[AEX_BLOCK][3][V];
+	const aex_code_t *rows[AEX_BROWS];
+
+	for (size_t c = 0; c < AEX_COLS; c++) {
+		blake3_hasher_init(&hs[c]);
+	}
+	for (size_t r = 0; r < 2 * V; r++) {
+		rows[r] = &aex_row(r);
+	}
+	aex_absorb_rows(hs, rows, 2 * V, g);
+	for (size_t i0 = 0; i0 < TAU; i0 += AEX_BLOCK) {
+		size_t n = (TAU - i0 < AEX_BLOCK) ? TAU - i0 : AEX_BLOCK;
+		aex_code_t (*e)[3][V] = aex_encode_rows(i0, n, blk);
+
+		for (size_t r = 0; r < 3 * V * n; r++) {
+			rows[r] = &e[r / (3 * V)][(r / V) % 3][r % V];
+		}
+		aex_absorb_rows(hs, rows, 3 * V * n, g);
+	}
+	t.node = new uint8_t[aex_tree_nodes() * BLAKE3_OUT_LEN];
+	for (size_t c = 0; c < AEX_COLS; c++) {
+		blake3_hasher_finalize(&hs[c], t.node + c * BLAKE3_OUT_LEN,
+				BLAKE3_OUT_LEN);
+	}
+	aex_tree_up(t);
+	delete[]blk;
+	delete[]g;
+	delete[]hs;
+}
+
+/* Step 11: open the columns named by I, with their Merkle paths, making the
+ * rows H_{i,j} again for their symbols. */
 static void aex_open(aex_open_t & o) {
+	aex_code_t (*blk)[3][V] = H ? NULL : new aex_code_t[AEX_BLOCK][3][V];
+
 	o.levels = aex_tree.levels;
 	o.col = new uint8_t[ETA * AEX_COLBYTES];
 	o.path = new uint8_t[ETA * (o.levels - 1) * BLAKE3_OUT_LEN];
 	memcpy(o.root, aex_tree_root(aex_tree), BLAKE3_OUT_LEN);
 	for (size_t i = 0; i < ETA; i++) {
-		aex_column(o.col + i * AEX_COLBYTES, o.I[i]);
+		for (size_t r = 0; r < 2 * V; r++) {
+			memcpy(o.col + i * AEX_COLBYTES + r * 16,
+					aex_row(r).w + 2 * o.I[i], 16);
+		}
 		aex_path(o.path + i * (o.levels - 1) * BLAKE3_OUT_LEN, aex_tree, o.I[i]);
 	}
+	for (size_t i0 = 0; i0 < TAU; i0 += AEX_BLOCK) {
+		size_t n = (TAU - i0 < AEX_BLOCK) ? TAU - i0 : AEX_BLOCK;
+		aex_code_t (*e)[3][V] = H ? H + i0 : aex_encode_rows(i0, n, blk);
+
+		for (size_t i = 0; i < ETA; i++) {
+			uint8_t *col = o.col + i * AEX_COLBYTES + AEX_ROW_HIJ(i0, 0, 0) * 16;
+
+			for (size_t r = 0; r < 3 * V * n; r++) {
+				memcpy(col + r * 16,
+						e[r / (3 * V)][(r / V) % 3][r % V].w + 2 * o.I[i], 16);
+			}
+		}
+	}
+	delete[]blk;
 }
 
 static void aex_open_clear(aex_open_t & o) {
@@ -1891,25 +2001,19 @@ static int pismall_prover_run(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX
 	}
 
 	/* Encode H's as larger NTT. H_{i,j} has one codeword per component k of
-	 * s_i, so it is indexed by k as well; delta_j is 1 only for j = 0. */
+	 * s_i, so it is indexed by k as well; delta_j is 1 only for j = 0. The
+	 * H_{i,j} are made a block at a time as their columns are hashed. */
 	aex_rpoly *rs = new aex_rpoly;
 	for (size_t k = 0; k < V; k++) {
 		rp_from_nfl(*rs, s0[k]);
 		aex_encode_res(H0[k], rs->r, NULL, (const fmpz *) r0);
 		gr_comp(rc, rh, 0);
 		aex_encode(_H[k], h[0][k][0], h[1][k][0], rc, ctx);
-		for (size_t i = 0; i < TAU; i++) {
-			rp_from_nfl(*rs, s[i][k]);
-			for (size_t j = 0; j < 3; j++) {
-				aex_encode_res(H[i][j][k], (j == 0) ? rs->r : NULL, v[j][i][k],
-						(const fmpz *) prover_r[i][j]);
-			}
-		}
 	}
 
 	/* Steps 5 and 6: commit to the columns and send the root, then draw the
 	 * challenge from it. */
-	aex_tree_build(aex_tree);
+	aex_stream_commit(aex_tree);
 	memcpy(o.root, aex_tree_root(aex_tree), BLAKE3_OUT_LEN);
 	pismall_hash(x, beta0, prover_beta, q, com, o.root);
 
@@ -2055,10 +2159,10 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 		vector < params::poly_q > rd, comkey_t & key,
 		fmpz_mod_poly_t lag[TAU + 1], flint_rand_t prng,
 		const fmpz_mod_ctx_t ctx, aex_open_t & o) {
-	int ok, own = H == NULL;
+	int ok, own = v == NULL;
 
 	if (own) {
-		pismall_prover_alloc();
+		pismall_prover_alloc(false);
 	}
 	ok = pismall_prover_run(com, x, f, rf, h, rh, rd, key, lag, prng, ctx, o);
 	if (own) {
@@ -3401,6 +3505,42 @@ static void test(flint_rand_t rand) {
 		TEST_ASSERT(ok, end);
 	} TEST_END;
 
+	TEST_ONCE("the streamed commitment is the tree over the whole matrix") {
+		/* The rows are kept here, so after a proof the tree over all of E
+		 * can be built at once and its root and columns compared with what
+		 * the prover hashed and opened a block at a time. */
+		aex_open_t o;
+		aex_tree_t tt;
+		uint8_t *col = new uint8_t[AEX_COLBYTES];
+		int ok;
+
+		pismall_prover(com, x, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		aex_tree_build(tt);
+		ok = memcmp(o.root, aex_tree_root(tt), BLAKE3_OUT_LEN) == 0;
+		for (size_t i = 0; i < ETA; i++) {
+			aex_column(col, o.I[i]);
+			ok &= memcmp(col, o.col + i * AEX_COLBYTES, AEX_COLBYTES) == 0;
+		}
+		aex_tree_clear(tt);
+		aex_open_clear(o);
+		delete[]col;
+		TEST_ASSERT(ok, end);
+	} TEST_END;
+
+	TEST_ONCE("AEX proof is consistent with the rows made a block at a time") {
+		/* As pismall_prover makes it for the election: H not kept. */
+		aex_code_t (*keep)[3][V] = H;
+		aex_open_t o;
+		int ok;
+
+		H = NULL;
+		pismall_prover(com, x, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		H = keep;
+		ok = pismall_verifier(com, f, rf, h, rh, rd, key, lag, rand, ctx, o);
+		aex_open_clear(o);
+		TEST_ASSERT(ok == 1, end);
+	} TEST_END;
+
 	TEST_ONCE("challenge really lives in the extension") {
 		aex_open_t o;
 		int live, any = 0;
@@ -3667,7 +3807,7 @@ int main() {
 	pismall_alloc();
 	/* The tests look at the prover's rows after a proof, so they keep its
 	 * working space for the whole run. */
-	pismall_prover_alloc();
+	pismall_prover_alloc(true);
 
 	printf("\n** Tests for lattice-based AEX proof:\n\n");
 	test(rand);
