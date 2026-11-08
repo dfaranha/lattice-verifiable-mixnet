@@ -129,21 +129,27 @@ and a half minutes, three of them the ballot proofs, and half a GiB; at `MSGS =
 `-DMIXERS=<n>` the number of mix servers.
 
 The ballot proof (`src/ballot_proof.c`) shows, with LaZer's linear proofs, that
-(u, v) = (ar + 2e1, br + 2e2 + m) with r, e1, e2 ternary and short and m = X^j
-with j < NCAND, or 0: a vote for one candidate, or a blank one. It proves m
-binary and equal to a u' with ||u'|| <= 1, which leaves only X^j or 0, and
-X^(4096 - NCAND) m binary, which in the negacyclic ring holds for j < NCAND and
-fails for j >= NCAND. It is bound to the election and the voter, so it cannot be
-copied to another voter's ballot. LaZer lifts the statement, over R_q of degree
-4096 and the 88-bit q, to its ring of degree 64 and a 115-bit proof modulus;
-`lazer/ballot.py` describes it, and `lazer/ballot.h` is generated from it, from
-`third_party/lazer/scripts`, with `sage lin-codegen.sage
-../../../lazer/ballot.py > ../../../lazer/ballot.h`. LaZer's default target, a
-root Hermite factor of 1.0044, is about 102 bits core-SVP under the
-lattice-estimator, so the file asks for 1.0036: MLWE 134.9 and MSIS 136.1 bits,
-knowledge error 2^-127. The proof is about 92 KiB, and takes about 4.4 s to
-prove and 3.0 s to check on a laptop: the degree and the width of q make it the
-slowest of the codebases' ballot proofs.
+(u, v) = (ar + 2e1, br + 2e2 + m) with r, e1, e2 ternary and short and m a vote
+for one of NCAND candidates, or 0 for a blank one. A vote for candidate j is
+X^(64j): the proof is stated over LaZer's own ring of degree 64,
+R_64 = Z_q[Y]/(Y^64 + 1), with R_q = R_64[X]/(X^64 - Y), and X^(64j) = Y^j is
+one element of it rather than 64. The two encryption equations become 128
+equations over R_64, one per piece of u and of v; the proof shows m binary and
+equal to a u' with ||u'|| <= 1, which leaves only Y^j or 0, and Y^(64 - NCAND) m
+binary, which in the negacyclic ring holds for j < NCAND and fails for
+j >= NCAND, so NCAND is at most 64 (63 with the tests, which also try
+NCAND + 1). Stating it over R_q and letting LaZer lift it made m and the last
+row's witness 64 binary elements of R_64 each; this way the witness is 195
+elements, not 384. It is bound to the election and the voter, so it cannot be
+copied to another voter's ballot. `lazer/ballot.py` describes it, and
+`lazer/ballot.h` is generated from it, from `third_party/lazer/scripts`, with
+`sage lin-codegen.sage ../../../lazer/ballot.py > ../../../lazer/ballot.h`, for
+a 114-bit proof modulus. LaZer's default target, a root Hermite factor of
+1.0044, is about 102 bits core-SVP under the lattice-estimator, so the file asks
+for 1.0036: MLWE 134.4 and MSIS 136.1 bits (`LWE.estimate.rough`, `SIS.lattice`
+with `RC.ADPS16`), knowledge error 2^-127. The proof is about 62 KiB, against
+92 KiB for the lifted statement, and on a laptop takes 4.4 s to prove and 3.0 s
+to check, against 15.3 s and 10.6 s measured alongside it.
 
 ### Memory requirements
 

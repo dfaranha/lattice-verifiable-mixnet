@@ -27,6 +27,12 @@ extern "C" {
 #define BALLOT_DEG 	4096
 #define BALLOT_Q 	(((__int128) 1 << 88) - ((__int128) 25 << 16) + 1)
 
+/* A vote for candidate j is X^(BALLOT_STRIDE j): the proof is stated over
+ * LaZer's ring of degree 64, and these are the elements of R_q that lie in
+ * one element of it. So there are at most BALLOT_MAXCAND candidates. */
+#define BALLOT_STRIDE 	(BALLOT_DEG / 64)
+#define BALLOT_MAXCAND 	64
+
 /* Initialise LaZer; call once before proving or verifying. */
 void ballot_setup(void);
 
@@ -35,7 +41,8 @@ size_t ballot_proof_len(void);
 
 /**
  * Prove that u = a r + 2 e1 and v = b r + 2 e2 + m with r, e1, e2 ternary and
- * short and m = X^j, j < ncand, or 0, bound to ctx. Refuses (returns 0, no
+ * short and m = X^(BALLOT_STRIDE j), j < ncand <= BALLOT_MAXCAND, or 0,
+ * bound to ctx. Refuses (returns 0, no
  * proof) if the witness is not of that form or the equations do not hold.
  *
  * @param[out] proof		- room for ballot_proof_len() bytes.
