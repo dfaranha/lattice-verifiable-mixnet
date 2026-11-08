@@ -1034,22 +1034,20 @@ static void aex_sample_I(size_t I[ETA], const uint8_t root[BLAKE3_OUT_LEN],
 #define AEX_BLOCK   ((size_t) 16)
 #define AEX_BROWS   (3 * V * AEX_BLOCK)
 
-/* Rows H_{i,j} for i in [i0, i0 + n), in blk, or in H when it is there. */
+/* Rows H_{i,j} for i in [i0, i0 + n), in blk, or in H when it is there; s is
+ * in the coefficient domain while the prover runs. */
 static aex_code_t (*aex_encode_rows(size_t i0, size_t n,
 		aex_code_t (*blk)[3][V]))[3][V] {
 	aex_code_t (*out)[3][V] = H ? H + i0 : blk;
-	aex_rpoly *rs = new aex_rpoly;
 
 	for (size_t i = i0; i < i0 + n; i++) {
 		for (size_t k = 0; k < V; k++) {
-			rp_from_nfl(*rs, s[i][k]);
 			for (size_t j = 0; j < 3; j++) {
-				aex_encode_res(out[i - i0][j][k], (j == 0) ? rs->r : NULL,
+				aex_encode_res(out[i - i0][j][k], (j == 0) ? s[i][k].data() : NULL,
 						v[j][i][k], (const fmpz *) prover_r[i][j]);
 			}
 		}
 	}
-	delete rs;
 	return out;
 }
 
@@ -1977,12 +1975,10 @@ static int pismall_prover_run(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX
 			memcpy(s0res, s0[k].data(), N * sizeof(aex_w));
 			s0[k].ntt_pow_phi();
 			for (size_t i = 0; i < TAU; i++) {
-				s[i][k].invntt_pow_invphi();
 				const aex_w *d = s[i][k].data();
 				for (size_t l = 0; l < N; l++) {
 					sres[l * TAU + i] = d[l];
 				}
-				s[i][k].ntt_pow_phi();
 			}
 			for (size_t l = 0; l < N; l++) {
 				aex_extract(s0res[l], sres + l * TAU, out, TT, buf,
@@ -2039,9 +2035,14 @@ static int pismall_prover_run(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX
 			rs_from_fmpz(sc[c], prover_y[i].c[c]);
 		}
 		for (int j = 0; j < V; j++) {
-			rp_from_nfl(*rs, (i == 0) ? s0[j] : s[i - 1][j]);
+			const aex_w *x = s[i - (i > 0)][j].data();
+
+			if (i == 0) {
+				rp_from_nfl(*rs, s0[j]);
+				x = rs->r;
+			}
 			for (int c = 0; c < AEX_DEG; c++) {
-				rp_addmul(acc[j][c], rs->r, sc[c]);
+				rp_addmul(acc[j][c], x, sc[c]);
 			}
 		}
 	}
@@ -2093,9 +2094,8 @@ static int pismall_prover_run(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX
 			}
 			for (size_t k = 0; k < V; k++) {
 				if (j == 0) {
-					rp_from_nfl(*rs, s[i - 1][k]);
 					for (int c = 0; c < AEX_DEG; c++) {
-						rp_addmul(acc[k][c], rs->r, sc[c]);
+						rp_addmul(acc[k][c], s[i - 1][k].data(), sc[c]);
 					}
 				}
 				for (int c = 0; c < AEX_DEG; c++) {
@@ -2164,7 +2164,21 @@ static int pismall_prover(commit_t & com, gr_t & x, fmpz_mod_poly_t f[V][AEX_DEG
 	if (own) {
 		pismall_prover_alloc(false);
 	}
+	/* The prover reads the witness only as coefficients: in extraction, in
+	 * both encodings of the rows and in f and h. So it is put in the
+	 * coefficient domain once here, and back once after, rather than each
+	 * element being transformed back and forth five times. */
+	for (size_t i = 0; i < TAU; i++) {
+		for (size_t k = 0; k < V; k++) {
+			s[i][k].invntt_pow_invphi();
+		}
+	}
 	ok = pismall_prover_run(com, x, f, rf, h, rh, rd, key, lag, prng, ctx, o);
+	for (size_t i = 0; i < TAU; i++) {
+		for (size_t k = 0; k < V; k++) {
+			s[i][k].ntt_pow_phi();
+		}
+	}
 	if (own) {
 		pismall_prover_free();
 	}
