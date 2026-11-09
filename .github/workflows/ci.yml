@@ -21,6 +21,10 @@ jobs:
       LD_LIBRARY_PATH: /home/runner/flint/lib
     steps:
       - uses: actions/checkout@v4
+        with:
+          # LaZer, for the voters' ballot proofs, is the submodule
+          # third_party/lazer; the Makefile builds it.
+          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -102,6 +106,10 @@ jobs:
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
       - uses: actions/checkout@v4
+        with:
+          # LaZer, for the voters' ballot proofs, is the submodule
+          # third_party/lazer; the Makefile builds it.
+          submodules: recursive
 
       - name: Install dependencies
         run: |
