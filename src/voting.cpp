@@ -272,6 +272,10 @@ static params::poly_q dlin_row1(comkey_t & key, params::poly_q z[WIDTH]) {
  * (randomness re) satisfy u s + p E = t. The responses go to z and _z, the
  * hash the challenges come from to h. Returns 0 if rejection sampling did not
  * succeed within LIN_TRIES, in which case nothing may be published. */
+/* The responses of the last proof dlin_prove made, in the coefficient domain,
+ * which is where they are published from. */
+static params::poly_q dlin_zc[2][LIN_REPS][WIDTH];
+
 static int dlin_prove(params::poly_q z[LIN_REPS][WIDTH],
 		params::poly_q _z[LIN_REPS][WIDTH], uint8_t h[BLAKE3_OUT_LEN],
 		commit_t & X, commit_t & Y, params::poly_q & u, params::poly_q & t,
@@ -290,12 +294,14 @@ static int dlin_prove(params::poly_q z[LIN_REPS][WIDTH],
 				for (size_t k = 0; k < params::poly_q::degree; k++) {
 					coeffs[k] = sample_z(0.0, SIGMA_C);
 				}
-				util::set_signed(z[j][i], coeffs);
+				util::set_signed(dlin_zc[0][j][i], coeffs);
+				z[j][i] = dlin_zc[0][j][i];
 				z[j][i].ntt_pow_phi();
 				for (size_t k = 0; k < params::poly_q::degree; k++) {
 					coeffs[k] = sample_z(0.0, SIGMA_C);
 				}
-				util::set_signed(_z[j][i], coeffs);
+				util::set_signed(dlin_zc[1][j][i], coeffs);
+				_z[j][i] = dlin_zc[1][j][i];
 				_z[j][i].ntt_pow_phi();
 			}
 			w[j] = dlin_row0(key, z[j]);
@@ -315,8 +321,8 @@ static int dlin_prove(params::poly_q z[LIN_REPS][WIDTH],
 				z[j][i] = z[j][i] + tmp[i];
 				_z[j][i] = _z[j][i] + _tmp[i];
 			}
-			rej_accum(z[j], tmp, dot, norm);
-			rej_accum(_z[j], _tmp, dot, norm);
+			rej_accum(dlin_zc[0][j], tmp, dot, norm);
+			rej_accum(dlin_zc[1][j], _tmp, dot, norm);
 		}
 		rej = rej_decide(dot, norm, SIGMA_C * SIGMA_C);
 	} while (rej && ++tries < LIN_TRIES);
@@ -327,7 +333,7 @@ static int dlin_prove(params::poly_q z[LIN_REPS][WIDTH],
 static int dlin_verify(params::poly_q z[LIN_REPS][WIDTH],
 		params::poly_q _z[LIN_REPS][WIDTH], uint8_t h[BLAKE3_OUT_LEN],
 		commit_t & X, commit_t & Y, params::poly_q & u, params::poly_q & t,
-		comkey_t & key, uint32_t trustee, uint32_t index) {
+		comkey_t & key, uint32_t trustee, uint32_t index, int checked = 0) {
 	params::poly_q beta[LIN_REPS], w[LIN_REPS], _w[LIN_REPS], v[LIN_REPS];
 	params::poly_q a, p = PRIMEP;
 	uint8_t h2[BLAKE3_OUT_LEN];
@@ -336,7 +342,7 @@ static int dlin_verify(params::poly_q z[LIN_REPS][WIDTH],
 	p.ntt_pow_phi();
 	lin_chal(beta, h);
 	for (int j = 0; j < LIN_REPS; j++) {
-		for (int i = 0; i < WIDTH; i++) {
+		for (int i = 0; i < WIDTH && !checked; i++) {
 			a = z[j][i];
 			a.invntt_pow_invphi();
 			result &= bdlop_test_norm(a, 4 * SIGMA_C * SIGMA_C);
@@ -772,8 +778,8 @@ static void test() {
 			serial::put_bytes(pub, dh, BLAKE3_OUT_LEN);
 			for (int k = 0; k < LIN_REPS; k++) {
 				for (int l = 0; l < WIDTH; l++) {
-					serial::put_gauss_ntt(pub, dz[k][l], SIGMA_C);
-					serial::put_gauss_ntt(pub, d_z[k][l], SIGMA_C);
+					serial::put_gauss(pub, dlin_zc[0][k][l], SIGMA_C);
+					serial::put_gauss(pub, dlin_zc[1][k][l], SIGMA_C);
 				}
 			}
 		}
@@ -787,17 +793,25 @@ static void test() {
 		t0 = shuffle_now();
 		serial::bits rd(std::move(pub.buf));
 		for (int i = 0; i < MSGS; i++) {
+			int norms_ok = 1;
+
 			serial::get_uniform(rd, VT[j][i]);
 			serial::get_commit(rd, vY[i], 1);
 			serial::get_bytes(rd, dh, BLAKE3_OUT_LEN);
 			for (int k = 0; k < LIN_REPS; k++) {
 				for (int l = 0; l < WIDTH; l++) {
-					serial::get_gauss_ntt(rd, dz[k][l], SIGMA_C);
-					serial::get_gauss_ntt(rd, d_z[k][l], SIGMA_C);
+					serial::get_gauss(rd, dz[k][l], SIGMA_C);
+					serial::get_gauss(rd, d_z[k][l], SIGMA_C);
+					/* The norms where the responses were read, so that each
+					 * is transformed once, to the NTT domain. */
+					norms_ok &= bdlop_test_norm(dz[k][l], 4 * SIGMA_C * SIGMA_C)
+							&& bdlop_test_norm(d_z[k][l], 4 * SIGMA_C * SIGMA_C);
+					dz[k][l].ntt_pow_phi();
+					d_z[k][l].ntt_pow_phi();
 				}
 			}
-			dlin_ok &= !rd.bad && dlin_verify(dz, d_z, dh, scom[j], vY[i],
-					list[MIXERS][i].u, VT[j][i], key, j, i);
+			dlin_ok &= !rd.bad && norms_ok && dlin_verify(dz, d_z, dh, scom[j],
+					vY[i], list[MIXERS][i].u, VT[j][i], key, j, i, 1);
 		}
 		bp = pibnd_dec_read(rd);
 		dbnd_ok &= !rd.bad && pibnd_dec_verify(bp, key, vY, MSGS) && rd.finish();

@@ -440,21 +440,28 @@ static int simul_inverse(params::poly_q inv[MSGS], params::poly_q m[MSGS]) {
  * below is then Figure 2 run on the concatenation, which is the standard
  * procedure, pays the halfspace test once instead of three times and leaks one
  * bit rather than three. See SOUNDNESS.md section 8.1. */
-static void rej_accum(params::poly_q z[WIDTH], params::poly_q v[WIDTH],
+/* zc holds the mask y in the coefficient domain on entry and the response
+ * z = y + v there on return, the form it is published in: v is transformed
+ * back once, which the test needs anyway, and z, held in the NTT domain by the
+ * caller, is not transformed at all. */
+static void rej_accum(params::poly_q zc[WIDTH], params::poly_q v[WIDTH],
 		long double &dot, long double &norm) {
 	__int128 a[params::poly_q::degree], b[params::poly_q::degree];
 	params::poly_q t;
 
 	for (int i = 0; i < WIDTH; i++) {
-		t = z[i];
-		t.invntt_pow_invphi();
-		util::centred(a, t);
 		t = v[i];
 		t.invntt_pow_invphi();
+		zc[i] = zc[i] + t;
+		util::centred(a, zc[i]);
 		util::centred(b, t);
 		util::dot_norm(dot, norm, a, b, params::poly_q::degree);
 	}
 }
+
+/* The responses of the last proof lin_prover made, in the coefficient domain,
+ * which is where they are published from. */
+static params::poly_q lin_zc[3][LIN_REPS][WIDTH];
 
 /* Reject when <z, v> < 0, then accept with probability min(1, r) for
  * r = exp((-2<z, v> + ||v||^2) / 2 s2) / M. The first step is what SIGMA_C is
@@ -534,17 +541,20 @@ static int lin_prover(params::poly_q y[LIN_REPS][WIDTH],
 				for (size_t k = 0; k < params::poly_q::degree; k++) {
 					coeffs[k] = sample_z(0.0, SIGMA_C);
 				}
-				util::set_signed(y[j][i], coeffs);
+				util::set_signed(lin_zc[0][j][i], coeffs);
+				y[j][i] = lin_zc[0][j][i];
 				y[j][i].ntt_pow_phi();
 				for (size_t k = 0; k < params::poly_q::degree; k++) {
 					coeffs[k] = sample_z(0.0, SIGMA_C);
 				}
-				util::set_signed(w[j][i], coeffs);
+				util::set_signed(lin_zc[1][j][i], coeffs);
+				w[j][i] = lin_zc[1][j][i];
 				w[j][i].ntt_pow_phi();
 				for (size_t k = 0; k < params::poly_q::degree; k++) {
 					coeffs[k] = sample_z(0.0, SIGMA_C);
 				}
-				util::set_signed(_y[j][i], coeffs);
+				util::set_signed(lin_zc[2][j][i], coeffs);
+				_y[j][i] = lin_zc[2][j][i];
 				_y[j][i].ntt_pow_phi();
 			}
 
@@ -585,9 +595,9 @@ static int lin_prover(params::poly_q y[LIN_REPS][WIDTH],
 				w[j][i] = w[j][i] + ptmp[i];
 				_y[j][i] = _y[j][i] + _tmp[i];
 			}
-			rej_accum(y[j], tmp, dot, norm);
-			rej_accum(w[j], ptmp, dot, norm);
-			rej_accum(_y[j], _tmp, dot, norm);
+			rej_accum(lin_zc[0][j], tmp, dot, norm);
+			rej_accum(lin_zc[1][j], ptmp, dot, norm);
+			rej_accum(lin_zc[2][j], _tmp, dot, norm);
 		}
 		rej = rej_decide(dot, norm, SIGMA_C * SIGMA_C);
 	} while (rej && ++tries < LIN_TRIES);
@@ -595,10 +605,13 @@ static int lin_prover(params::poly_q y[LIN_REPS][WIDTH],
 	return !rej;
 }
 
+/* With checked set, the caller has checked the norms of the responses
+ * already, in the coefficient domain they were read in. */
 static int lin_verifier(params::poly_q z[LIN_REPS][WIDTH],
 		params::poly_q zp[LIN_REPS][WIDTH], params::poly_q _z[LIN_REPS][WIDTH],
 		uint8_t h[BLAKE3_OUT_LEN], commit_t x, commit_t p, commit_t _x,
-		params::poly_q coef[3], comkey_t & key, comkey_t & pkey) {
+		params::poly_q coef[3], comkey_t & key, comkey_t & pkey,
+		int checked = 0) {
 	params::poly_q beta[LIN_REPS], t[LIN_REPS], tp[LIN_REPS], _t[LIN_REPS];
 	params::poly_q u[LIN_REPS], v, tmp;
 	uint8_t h2[BLAKE3_OUT_LEN];
@@ -608,7 +621,7 @@ static int lin_verifier(params::poly_q z[LIN_REPS][WIDTH],
 
 	for (int j = 0; j < LIN_REPS; j++) {
 		/* Verifier checks norm, reconstruct from NTT representation. */
-		for (int i = 0; i < WIDTH; i++) {
+		for (int i = 0; i < WIDTH && !checked; i++) {
 			v = z[j][i];
 			v.invntt_pow_invphi();
 			result &= bdlop_test_norm(v, 4 * SIGMA_C * SIGMA_C);
@@ -1302,9 +1315,9 @@ static int shuffle_prove_bytes(serial::bits & out,
 			serial::put_bytes(out, lh[l], BLAKE3_OUT_LEN);
 			for (int j = 0; j < LIN_REPS; j++) {
 				for (int k = 0; k < WIDTH; k++) {
-					serial::put_gauss_ntt(out, y[j][k], SIGMA_C);
-					serial::put_gauss_ntt(out, w[j][k], SIGMA_C);
-					serial::put_gauss_ntt(out, _y[j][k], SIGMA_C);
+					serial::put_gauss(out, lin_zc[0][j][k], SIGMA_C);
+					serial::put_gauss(out, lin_zc[1][j][k], SIGMA_C);
+					serial::put_gauss(out, lin_zc[2][j][k], SIGMA_C);
 				}
 			}
 		}
@@ -1363,14 +1376,22 @@ static int shuffle_verify_bytes(serial::bits & in, commit_t c[MSGS],
 			serial::get_bytes(in, h, BLAKE3_OUT_LEN);
 			for (int j = 0; j < LIN_REPS; j++) {
 				for (int k = 0; k < WIDTH; k++) {
-					serial::get_gauss_ntt(in, z[j][k], SIGMA_C);
-					serial::get_gauss_ntt(in, zp[j][k], SIGMA_C);
-					serial::get_gauss_ntt(in, _z[j][k], SIGMA_C);
+					serial::get_gauss(in, z[j][k], SIGMA_C);
+					serial::get_gauss(in, zp[j][k], SIGMA_C);
+					serial::get_gauss(in, _z[j][k], SIGMA_C);
+					/* The norms where the responses were read, so that each is
+					 * transformed once, to the NTT domain. */
+					ok &= bdlop_test_norm(z[j][k], 4 * SIGMA_C * SIGMA_C)
+							&& bdlop_test_norm(zp[j][k], 4 * SIGMA_C * SIGMA_C)
+							&& bdlop_test_norm(_z[j][k], 4 * SIGMA_C * SIGMA_C);
+					z[j][k].ntt_pow_phi();
+					zp[j][k].ntt_pow_phi();
+					_z[j][k].ntt_pow_phi();
 				}
 			}
 			shuffle_coeffs(coef, l, vs, v_ms, beta[rep], tau[rep], mu[rep]);
 			ok &= !in.bad && lin_verifier(z, zp, _z, h, vcs[l], vp[l],
-					vd[rep * MSGS + l], coef, _key, key);
+					vd[rep * MSGS + l], coef, _key, key, 1);
 		}
 	}
 	delete[] vp;
